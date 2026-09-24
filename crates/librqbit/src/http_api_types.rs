@@ -22,6 +22,8 @@ pub struct TorrentAddQueryParams {
     pub initial_peers: Option<InitialPeers>,
     // Will force interpreting the content as a URL.
     pub is_url: Option<bool>,
+    /// Read a .torrent from this server filesystem path (must be under browse roots).
+    pub from_server_path: Option<String>,
     pub list_only: Option<bool>,
     /// Optional Newznab/Torznab category id (e.g. 2000=Movies, 5070=Anime).
     pub torznab_category: Option<u32>,

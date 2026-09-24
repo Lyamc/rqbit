@@ -579,6 +579,11 @@ impl Session {
         &self.cancellation_token
     }
 
+    /// Session default download / output folder.
+    pub fn get_default_output_folder(&self) -> &Path {
+        &self.output_folder
+    }
+
     pub fn client_name_and_version(&self) -> &str {
         &self.client_name_and_version
     }

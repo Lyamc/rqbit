@@ -661,5 +661,19 @@ export const MockAPI: RqbitAPI & { getVersion: () => Promise<string> } = {
     move_completed_path: null,
     move_completed_copy: false,
   }),
+
+  uploadTorrentFromServerPath: async (): Promise<AddTorrentResponse> => {
+    throw new Error("not implemented in mock");
+  },
+  fsRoots: async () => ({ roots: [{ label: "Downloads", path: "/downloads" }] }),
+  fsList: async (path: string) => ({
+    path,
+    parent: path === "/downloads" ? null : "/downloads",
+    entries: [
+      { name: "sample.torrent", path: `${path}/sample.torrent`, is_dir: false, is_torrent: true, size: 100 },
+      { name: "subdir", path: `${path}/subdir`, is_dir: true, is_torrent: false },
+    ],
+  }),
+  extractUpload: async () => ({ items: [] }),
   restartProcess: async () => {},
 };

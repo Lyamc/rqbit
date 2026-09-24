@@ -370,6 +370,43 @@ export interface JSONLogLine {
   spans: Span[];
 }
 
+
+export interface FsRoot {
+  label: string;
+  path: string;
+}
+
+export interface FsRootsResponse {
+  roots: FsRoot[];
+}
+
+export interface FsEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  is_torrent: boolean;
+  size?: number;
+}
+
+export interface FsListResponse {
+  path: string;
+  parent?: string | null;
+  entries: FsEntry[];
+  truncated?: boolean;
+}
+
+export interface ExtractItem {
+  name: string;
+  kind: string;
+  data_base64?: string;
+  magnet?: string;
+  error?: string;
+}
+
+export interface ExtractResponse {
+  items: ExtractItem[];
+}
+
 export interface RqbitAPI {
   getPlaylistUrl: (index: number) => string | null;
   getStreamLogsUrl: () => string | null;
@@ -389,6 +426,16 @@ export interface RqbitAPI {
     data: string | File,
     opts?: AddTorrentOptions,
   ) => Promise<AddTorrentResponse>;
+  uploadTorrentFromServerPath: (
+    path: string,
+    opts?: AddTorrentOptions,
+  ) => Promise<AddTorrentResponse>;
+  fsRoots: () => Promise<FsRootsResponse>;
+  fsList: (
+    path: string,
+    opts?: { recursive?: boolean; torrentsOnly?: boolean },
+  ) => Promise<FsListResponse>;
+  extractUpload: (data: Blob | ArrayBuffer | File) => Promise<ExtractResponse>;
 
   pause: (index: number) => Promise<void>;
   updateOnlyFiles: (index: number, files: number[]) => Promise<void>;

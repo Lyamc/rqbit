@@ -12,6 +12,9 @@ import {
   SessionStats,
   TorrentDetails,
   TorrentStats,
+  FsRootsResponse,
+  FsListResponse,
+  ExtractResponse,
 } from "./api-types";
 
 // Define API URL and base path
@@ -154,6 +157,65 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
       url += "&is_url=true";
     }
     return makeRequest("POST", url, data);
+  },
+
+  uploadTorrentFromServerPath: (path, opts): Promise<AddTorrentResponse> => {
+    const overwrite = opts?.overwrite ?? true;
+    let url = `/torrents?overwrite=${overwrite}&from_server_path=${encodeURIComponent(path)}`;
+    if (opts?.list_only) {
+      url += "&list_only=true";
+    }
+    if (opts?.output_folder) {
+      url += `&output_folder=${encodeURIComponent(opts.output_folder)}`;
+    }
+    return makeRequest("POST", url, "");
+  },
+
+  fsRoots: (): Promise<FsRootsResponse> => {
+    return makeRequest("GET", "/fs/roots");
+  },
+
+  fsList: (path, opts): Promise<FsListResponse> => {
+    let url = `/fs/list?path=${encodeURIComponent(path)}`;
+    if (opts?.recursive) url += "&recursive=true";
+    if (opts?.torrentsOnly) url += "&torrents_only=true";
+    return makeRequest("GET", url);
+  },
+
+  extractUpload: async (data): Promise<ExtractResponse> => {
+    const url = apiUrl + "/fs/extract";
+    let error: ErrorDetails = {
+      method: "POST",
+      path: "/fs/extract",
+      text: "",
+    };
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: { Accept: "application/json" },
+        body: data,
+      });
+    } catch (e) {
+      error.text = "network error";
+      return Promise.reject(error);
+    }
+    error.status = response.status;
+    error.statusText = `${response.status} ${response.statusText}`;
+    if (!response.ok) {
+      const errorBody = await response.text();
+      try {
+        const json = JSON.parse(errorBody);
+        error.text =
+          json.human_readable !== undefined
+            ? json.human_readable
+            : JSON.stringify(json, null, 2);
+      } catch {
+        error.text = errorBody;
+      }
+      return Promise.reject(error);
+    }
+    return response.json();
   },
 
   updateOnlyFiles: (index: number, files: number[]): Promise<void> => {

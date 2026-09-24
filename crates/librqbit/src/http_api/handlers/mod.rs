@@ -1,4 +1,5 @@
 mod admin;
+mod fs;
 mod configure;
 mod dht;
 mod logging;
@@ -59,6 +60,9 @@ async fn h_api_root(parts: Parts) -> impl IntoResponse {
             "GET /torrents/{id_or_infohash}/stream/{file_idx}": "Stream a file. Accepts Range header to seek.",
             "GET /torrents/{id_or_infohash}/playlist": "Playlist for supported players",
             "POST /torrents": "Add a torrent here. magnet: or http:// or a local file.",
+            "GET /fs/roots": "List allowed filesystem browse roots",
+            "GET /fs/list": "List a directory under browse roots (?path=&recursive=&torrents_only=)",
+            "POST /fs/extract": "Extract .torrent / magnets from a zip (or raw .torrent body)",
             "POST /torrents/create": "Create a torrent and start seeding. Body should be a local folder",
             "POST /torrents/resolve_magnet": "Resolve a magnet to torrent file bytes",
             "POST /torrents/{id_or_infohash}/pause": "Pause torrent",
@@ -111,11 +115,14 @@ pub fn make_api_router(state: ApiState) -> Router {
             "/torrents/preferences",
             get(configure::h_get_session_preferences),
         )
-        .route("/admin", get(admin::h_admin_status));
+        .route("/admin", get(admin::h_admin_status))
+        .route("/fs/roots", get(fs::h_fs_roots))
+        .route("/fs/list", get(fs::h_fs_list));
 
     if !state.opts.read_only {
         api_router = api_router
             .route("/torrents", post(torrents::h_torrents_post))
+            .route("/fs/extract", post(fs::h_fs_extract))
             .route(
                 "/torrents/limits",
                 post(configure::h_update_session_ratelimits),
