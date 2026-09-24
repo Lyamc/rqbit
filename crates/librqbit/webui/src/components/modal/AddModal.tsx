@@ -10,10 +10,8 @@ import { FormCheckbox } from "../forms/FormCheckbox";
 import { ProgressBar } from "../ProgressBar";
 import { TabButton, TabList } from "../Tabs";
 import { FilesystemBrowser } from "../filesystem/FilesystemBrowser";
-import {
-  StagingItem,
-  StagingQueue,
-} from "../add/StagingQueue";
+import { StagingItem, StagingQueue } from "../add/StagingQueue";
+import { UrlLinesEditor } from "../add/UrlLinesEditor";
 import { extractTorrentSources } from "../../helper/parseTorrentSources";
 import {
   BulkImportProgress,
@@ -51,12 +49,7 @@ export const AddModal: React.FC<Props> = ({
   const refreshTorrents = useTorrentStore((s) => s.refreshTorrents);
 
   const [tab, setTab] = useState<Tab>(
-    initialTab ??
-      (initialFiles && initialFiles.length > 0
-        ? "upload"
-        : initialPaste
-          ? "urls"
-          : "upload"),
+    initialTab ?? (initialFiles && initialFiles.length > 0 ? "upload" : "urls"),
   );
   const [pasteText, setPasteText] = useState(initialPaste ?? "");
   const [queue, setQueue] = useState<StagingItem[]>(() => {
@@ -125,10 +118,12 @@ export const AddModal: React.FC<Props> = ({
       const merged = [...prev];
       for (const item of incoming) {
         let key: string;
-        if (item.kind === "file" && item.file) key = `file:${fileKey(item.file)}`;
+        if (item.kind === "file" && item.file)
+          key = `file:${fileKey(item.file)}`;
         else if (item.text) key = `text:${item.text}`;
         else if (item.serverPath) key = `srv:${item.serverPath}`;
-        else if (item.bytes) key = `bytes:${item.label}:${item.bytes.byteLength}`;
+        else if (item.bytes)
+          key = `bytes:${item.label}:${item.bytes.byteLength}`;
         else key = item.id;
         if (seen.has(key)) continue;
         seen.add(key);
@@ -147,7 +142,7 @@ export const AddModal: React.FC<Props> = ({
     setProgress(null);
     setRunning(false);
     cancelRef.current = { cancelled: false };
-    setTab("upload");
+    setTab("urls");
     setDragOver(false);
     setUploadBusy(false);
     setUploadMsg(null);
@@ -245,9 +240,7 @@ export const AddModal: React.FC<Props> = ({
           staged.push({
             id: nextId(),
             label:
-              it.magnet.length > 64
-                ? it.magnet.slice(0, 61) + "…"
-                : it.magnet,
+              it.magnet.length > 64 ? it.magnet.slice(0, 61) + "…" : it.magnet,
             source: `zip:${file.name}`,
             status: "ready",
             kind: "magnet",
@@ -379,10 +372,12 @@ export const AddModal: React.FC<Props> = ({
               ? item.label
               : `${item.label}.torrent`;
             const file = new File(
-              [item.bytes.buffer.slice(
-                item.bytes.byteOffset,
-                item.bytes.byteOffset + item.bytes.byteLength,
-              ) as ArrayBuffer],
+              [
+                item.bytes.buffer.slice(
+                  item.bytes.byteOffset,
+                  item.bytes.byteOffset + item.bytes.byteLength,
+                ) as ArrayBuffer,
+              ],
               name,
               { type: "application/x-bittorrent" },
             );
@@ -410,9 +405,7 @@ export const AddModal: React.FC<Props> = ({
   };
 
   const pct =
-    progress && progress.total > 0
-      ? (100 * progress.done) / progress.total
-      : 0;
+    progress && progress.total > 0 ? (100 * progress.done) / progress.total : 0;
 
   return (
     <Modal
@@ -492,8 +485,9 @@ export const AddModal: React.FC<Props> = ({
                 Drop files, folders, or zips here — or click to select
               </div>
               <div className="text-sm text-secondary mt-1">
-                .torrent files are staged locally. Zips are unpacked server-side.
-                Non-torrent junk is skipped with an error in the queue.
+                .torrent files are staged locally. Zips are unpacked
+                server-side. Non-torrent junk is skipped with an error in the
+                queue.
               </div>
             </div>
             <div className="flex gap-2">
@@ -522,24 +516,20 @@ export const AddModal: React.FC<Props> = ({
 
         {tab === "urls" && (
           <div className="flex flex-col gap-2 mb-3">
-            <label htmlFor="add_urls">
-              Paste magnet links and http(s) .torrent URLs
-            </label>
-            <textarea
+            <UrlLinesEditor
               id="add_urls"
-              className="block w-full min-h-32 border border-divider rounded bg-transparent py-1.5 px-2 font-mono text-sm focus:ring-0 focus:border-primary"
-              placeholder={
-                "magnet:?xt=urn:btih:...\nhttps://example.com/file.torrent"
-              }
               value={pasteText}
               disabled={running}
-              onChange={(e) => setPasteText(e.target.value)}
+              placeholder={"magnet:?xt=urn:btih:…"}
+              onChange={setPasteText}
             />
             <div className="flex items-center justify-between gap-2">
               <div className="text-sm text-secondary">
-                {detectedUrls.length === 0
-                  ? "No magnets or torrent URLs detected yet."
-                  : `${detectedUrls.length} source${detectedUrls.length === 1 ? "" : "s"} detected.`}
+                {pasteText.trim().length === 0
+                  ? "Paste one URL, or several (one per line)."
+                  : detectedUrls.length === 0
+                    ? "No magnets or torrent URLs detected yet."
+                    : `${detectedUrls.length} source${detectedUrls.length === 1 ? "" : "s"} detected.`}
               </div>
               <Button
                 size="sm"
@@ -564,55 +554,59 @@ export const AddModal: React.FC<Props> = ({
           </div>
         )}
 
-        <StagingQueue
-          items={queue}
-          running={running}
-          onRemove={(id) =>
-            setQueue((prev) => prev.filter((i) => i.id !== id))
-          }
-          onClear={() => setQueue([])}
-          onDismissErrors={() =>
-            setQueue((prev) => prev.filter((i) => i.status !== "error"))
-          }
-        />
+        {queue.length > 0 && (
+          <>
+            <StagingQueue
+              items={queue}
+              running={running}
+              onRemove={(id) =>
+                setQueue((prev) => prev.filter((i) => i.id !== id))
+              }
+              onClear={() => setQueue([])}
+              onDismissErrors={() =>
+                setQueue((prev) => prev.filter((i) => i.status !== "error"))
+              }
+            />
 
-        <div className="mt-3">
-          <FormInput
-            label="Output folder (optional)"
-            name="add_output_folder"
-            value={outputFolder}
-            disabled={running}
-            onChange={(e) => setOutputFolder(e.target.value)}
-            placeholder="Leave empty for session default"
-          />
-        </div>
+            <div className="mt-3">
+              <FormInput
+                label="Output folder (optional)"
+                name="add_output_folder"
+                value={outputFolder}
+                disabled={running}
+                onChange={(e) => setOutputFolder(e.target.value)}
+                placeholder="Leave empty for session default"
+              />
+            </div>
 
-        <div className="mb-3">
-          <FormCheckbox
-            name="add_overwrite"
-            label="Overwrite existing files on disk"
-            checked={overwrite}
-            disabled={running}
-            onChange={() => setOverwrite(!overwrite)}
-          />
-        </div>
+            <div className="mb-3">
+              <FormCheckbox
+                name="add_overwrite"
+                label="Overwrite existing files on disk"
+                checked={overwrite}
+                disabled={running}
+                onChange={() => setOverwrite(!overwrite)}
+              />
+            </div>
 
-        <div className="flex flex-col gap-1 mb-3">
-          <label htmlFor="add_concurrency">
-            Concurrent adds: {concurrency}
-          </label>
-          <input
-            id="add_concurrency"
-            type="range"
-            min={2}
-            max={8}
-            step={1}
-            value={concurrency}
-            disabled={running}
-            onChange={(e) => setConcurrency(Number(e.target.value))}
-            className="w-full"
-          />
-        </div>
+            <div className="flex flex-col gap-1 mb-3">
+              <label htmlFor="add_concurrency">
+                Concurrent adds: {concurrency}
+              </label>
+              <input
+                id="add_concurrency"
+                type="range"
+                min={2}
+                max={8}
+                step={1}
+                value={concurrency}
+                disabled={running}
+                onChange={(e) => setConcurrency(Number(e.target.value))}
+                className="w-full"
+              />
+            </div>
+          </>
+        )}
 
         {progress && (
           <div className="mt-2 mb-2">
@@ -644,9 +638,7 @@ export const AddModal: React.FC<Props> = ({
           </Button>
         )}
         <Button variant="primary" disabled={!canStart} onClick={startImport}>
-          {running
-            ? "Adding…"
-            : `Add ${readyCount || ""}`.trim()}
+          {running ? "Adding…" : `Add ${readyCount || ""}`.trim()}
         </Button>
       </ModalFooter>
     </Modal>

@@ -1,14 +1,10 @@
 import { Button } from "../buttons/Button";
 
 export type StagingStatus =
-  | "pending"
-  | "ready"
-  | "error"
-  | "running"
-  | "ok"
-  | "cancelled";
+  "pending" | "ready" | "error" | "running" | "ok" | "cancelled";
 
-export type StagingKind = "magnet" | "url" | "file" | "server_path" | "torrent_bytes";
+export type StagingKind =
+  "magnet" | "url" | "file" | "server_path" | "torrent_bytes";
 
 export type StagingItem = {
   id: string;
@@ -69,11 +65,7 @@ export const StagingQueue: React.FC<{
   ).length;
 
   if (items.length === 0) {
-    return (
-      <div className="border border-dashed border-divider rounded p-4 text-sm text-secondary text-center">
-        Staging queue is empty. Add torrents via Upload, URL, or Browse.
-      </div>
-    );
+    return null;
   }
 
   return (
