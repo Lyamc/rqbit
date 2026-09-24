@@ -129,13 +129,25 @@ const TorrentTableRowUnmemoized: React.FC<TorrentTableRowProps> = ({
         </div>
       </div>
       <div role="gridcell" className={numericCell}>
+        {downloadSpeed !== "-" ? (
+          <>
+            <span className="text-success">↓</span> {downloadSpeed}
+          </>
+        ) : (
+          downloadSpeed
+        )}
+      </div>
+      <div role="gridcell" className={numericCell}>
+        {uploadSpeed !== "-" ? (
+          <>
+            <span className="text-primary">↑</span> {uploadSpeed}
+          </>
+        ) : (
+          uploadSpeed
+        )}
+      </div>
+      <div role="gridcell" className={numericCell}>
         {formatBytes(progressBytes)}
-      </div>
-      <div role="gridcell" className={numericCell}>
-        {downloadSpeed}
-      </div>
-      <div role="gridcell" className={numericCell}>
-        {uploadSpeed}
       </div>
       <div role="gridcell" className={numericCell}>
         {uploadedBytes > 0 && <>{formatBytes(uploadedBytes)}</>}

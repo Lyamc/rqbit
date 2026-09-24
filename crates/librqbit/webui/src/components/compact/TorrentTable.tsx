@@ -231,7 +231,7 @@ export const TorrentTable: React.FC<TorrentTableProps> = ({
 
   return (
     <div className="flex flex-col h-full" role="grid">
-      {/* Header ? same grid template as rows; gutter matches Virtuoso scroller */}
+      {/* Header: same grid template as rows; gutter matches Virtuoso scroller */}
       <div className="shrink-0 bg-surface-raised text-sm overflow-y-auto [scrollbar-gutter:stable]">
         <div
           role="row"
@@ -285,16 +285,8 @@ export const TorrentTable: React.FC<TorrentTableProps> = ({
             align="center"
           />
           <TableHeader
-            column="downloadedBytes"
-            label="Recv"
-            sortColumn={sortColumn}
-            sortDirection={sortDirection}
-            onSort={handleSort}
-            align="right"
-          />
-          <TableHeader
             column="downSpeed"
-            label="? Speed"
+            label="↓ Download"
             sortColumn={sortColumn}
             sortDirection={sortDirection}
             onSort={handleSort}
@@ -302,7 +294,15 @@ export const TorrentTable: React.FC<TorrentTableProps> = ({
           />
           <TableHeader
             column="upSpeed"
-            label="? Speed"
+            label="↑ Upload"
+            sortColumn={sortColumn}
+            sortDirection={sortDirection}
+            onSort={handleSort}
+            align="right"
+          />
+          <TableHeader
+            column="downloadedBytes"
+            label="Received"
             sortColumn={sortColumn}
             sortDirection={sortDirection}
             onSort={handleSort}
