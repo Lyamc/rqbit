@@ -1,18 +1,14 @@
-import { RefObject, useContext, useRef, useState } from "react";
+import { RefObject, useRef, useState } from "react";
 import { UploadButton } from "./UploadButton";
 import { CgFileAdd } from "react-icons/cg";
-import { APIContext } from "../../context";
-import { useTorrentStore } from "../../stores/torrentStore";
+import { BulkImportModal } from "../modal/BulkImportModal";
 
 export const FileInput = ({ className }: { className?: string }) => {
   const inputRef = useRef<HTMLInputElement>(
     null,
   ) as RefObject<HTMLInputElement>;
   const [file, setFile] = useState<File | null>(null);
-
-  const API = useContext(APIContext);
-
-  const refreshTorrents = useTorrentStore((state) => state.refreshTorrents);
+  const [bulkFiles, setBulkFiles] = useState<File[] | null>(null);
 
   const onFileChange = async () => {
     if (!inputRef?.current?.files) {
@@ -21,21 +17,11 @@ export const FileInput = ({ className }: { className?: string }) => {
     if (inputRef.current.files.length == 1) {
       const file = inputRef.current.files[0];
       setFile(file);
-    } else {
-      const files = inputRef.current.files;
-      for (let i = 0; i < inputRef.current.files.length; i++) {
-        const file = inputRef.current.files[i];
-        API.uploadTorrent(file, { overwrite: true }).then(
-          () => {
-            console.log("uploaded file successfully");
-            refreshTorrents();
-          },
-          (err) => {
-            console.error("error uploading file", err);
-          },
-        );
-      }
-      reset();
+    } else if (inputRef.current.files.length > 1) {
+      const files = Array.from(inputRef.current.files);
+      // Reset the input so the same multi-select can be chosen again later.
+      inputRef.current.value = "";
+      setBulkFiles(files);
     }
   };
 
@@ -73,6 +59,13 @@ export const FileInput = ({ className }: { className?: string }) => {
         <CgFileAdd className="text-blue-500 group-hover:text-white dark:text-white" />
         <div>Upload .torrent File</div>
       </UploadButton>
+      {bulkFiles && (
+        <BulkImportModal
+          isOpen={true}
+          initialFiles={bulkFiles}
+          onClose={() => setBulkFiles(null)}
+        />
+      )}
     </>
   );
 };

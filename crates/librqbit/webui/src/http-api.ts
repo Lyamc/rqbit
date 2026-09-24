@@ -129,7 +129,9 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
   },
 
   uploadTorrent: (data, opts): Promise<AddTorrentResponse> => {
-    let url = "/torrents?&overwrite=true";
+    // Prefer caller overwrite; default true to match prior webui behavior.
+    const overwrite = opts?.overwrite ?? true;
+    let url = `/torrents?overwrite=${overwrite}`;
     if (opts?.list_only) {
       url += "&list_only=true";
     }
@@ -146,7 +148,7 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
       url += `&initial_peers=${opts.initial_peers.join(",")}`;
     }
     if (opts?.output_folder) {
-      url += `&output_folder=${opts.output_folder}`;
+      url += `&output_folder=${encodeURIComponent(opts.output_folder)}`;
     }
     if (typeof data === "string") {
       url += "&is_url=true";
