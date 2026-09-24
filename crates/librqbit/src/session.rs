@@ -307,6 +307,10 @@ pub struct AddTorrentOptions {
     /// Restored per-file relative path renames (file_id -> relative path).
     #[serde(default)]
     pub file_renames: Option<std::collections::HashMap<usize, PathBuf>>,
+
+    /// Optional Newznab/Torznab category id from indexer (survives session restore).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub torznab_category: Option<u32>,
 }
 
 pub struct ListOnlyResponse {
@@ -1433,6 +1437,7 @@ impl Session {
                 client_name_and_version: self.client_name_and_version.clone(),
                 current_output_folder: RwLock::new(output_folder.clone()),
                 file_renames: RwLock::new(file_renames),
+                torznab_category: opts.torznab_category,
             });
 
             let initializing = Arc::new(TorrentStateInitializing::new(
@@ -2158,7 +2163,15 @@ fn auto_organize_torrent(
         })
         .unwrap_or_default();
 
-    let media = crate::media_classify::classify_media(&name, &file_paths);
+    let (media, from_torznab) = match handle.torznab_category().and_then(
+        crate::media_classify::media_type_from_torznab_category,
+    ) {
+        Some(m) => (m, true),
+        None => (
+            crate::media_classify::classify_media(&name, &file_paths),
+            false,
+        ),
+    };
     let type_folder = prefs.folder_for_media(media).to_owned();
     let root = prefs
         .auto_organize_root
@@ -2176,9 +2189,11 @@ fn auto_organize_torrent(
     info!(
         id = handle.id(),
         media = media.as_str(),
+        from_torznab,
+        torznab_category = ?handle.torznab_category(),
         type_folder = %type_folder,
         ?dest,
-        "auto-organize classification (heuristic; may be wrong)"
+        "auto-organize classification"
     );
 
     if handle.output_folder() == dest {

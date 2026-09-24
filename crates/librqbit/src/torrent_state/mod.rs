@@ -196,6 +196,9 @@ pub struct ManagedTorrentShared {
     /// Per-file relative path overrides (file_id -> new relative path).
     pub(crate) file_renames: RwLock<HashMap<usize, PathBuf>>,
 
+    /// Optional Newznab/Torznab category id supplied at add time.
+    pub(crate) torznab_category: Option<u32>,
+
     // "dn" from magnet link
     pub(crate) magnet_name: Option<String>,
 
@@ -264,6 +267,10 @@ impl ManagedTorrent {
 
     pub fn file_renames(&self) -> HashMap<usize, PathBuf> {
         self.shared.file_renames.read().clone()
+    }
+
+    pub fn torznab_category(&self) -> Option<u32> {
+        self.shared.torznab_category
     }
 
     /// Rename a single file (or its relative path including folders) while the torrent

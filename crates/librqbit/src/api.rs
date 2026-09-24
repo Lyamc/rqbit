@@ -243,6 +243,7 @@ impl Api {
                             .to_string_lossy()
                             .into_owned(),
                         total_pieces,
+                        torznab_category: mgr.torznab_category(),
 
                         // These will be filled in /details and /stats endpoints
                         files: None,
@@ -277,6 +278,7 @@ impl Api {
                 only_files.as_deref(),
                 output_folder,
                 &renames,
+                handle.torznab_category(),
             )
         }
     }
@@ -544,6 +546,7 @@ impl Api {
                         .to_string_lossy()
                         .into_owned(),
                     &handle.file_renames(),
+                    handle.torznab_category(),
                 )
                 .context("error making torrent details")?;
                 ApiAddTorrentResponse {
@@ -575,6 +578,7 @@ impl Api {
                     only_files.as_deref(),
                     output_folder.to_string_lossy().into_owned().to_string(),
                     &Default::default(),
+                    None,
                 )
                 .context("error making torrent details")?,
             },
@@ -590,6 +594,7 @@ impl Api {
                         .to_string_lossy()
                         .into_owned(),
                     &handle.file_renames(),
+                    handle.torznab_category(),
                 )
                 .context("error making torrent details")?;
                 ApiAddTorrentResponse {
@@ -687,6 +692,10 @@ pub struct TorrentDetailsResponse {
     #[serde(default)]
     pub total_pieces: u32,
 
+    /// Newznab/Torznab category id if supplied at add time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub torznab_category: Option<u32>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub files: Option<Vec<TorrentDetailsResponseFile>>,
     #[serde(skip_serializing_if = "Option::is_none", skip_deserializing)]
@@ -709,6 +718,7 @@ fn make_torrent_details(
     only_files: Option<&[usize]>,
     output_folder: String,
     renames: &std::collections::HashMap<usize, PathBuf>,
+    torznab_category: Option<u32>,
 ) -> Result<TorrentDetailsResponse> {
     let files = match info {
         Some(info) => info
@@ -747,6 +757,7 @@ fn make_torrent_details(
         files: Some(files),
         output_folder,
         total_pieces,
+        torznab_category,
         stats: None,
     })
 }

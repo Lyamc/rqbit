@@ -23,6 +23,8 @@ pub struct TorrentAddQueryParams {
     // Will force interpreting the content as a URL.
     pub is_url: Option<bool>,
     pub list_only: Option<bool>,
+    /// Optional Newznab/Torznab category id (e.g. 2000=Movies, 5070=Anime).
+    pub torznab_category: Option<u32>,
 }
 
 impl Serialize for OnlyFiles {
@@ -106,6 +108,7 @@ impl TorrentAddQueryParams {
                 read_write_timeout: self.peer_read_write_timeout.map(Duration::from_secs),
                 ..Default::default()
             }),
+            torznab_category: self.torznab_category,
             ..Default::default()
         }
     }

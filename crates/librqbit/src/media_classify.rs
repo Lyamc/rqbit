@@ -119,6 +119,29 @@ impl AutoOrganizeFolders {
     }
 }
 
+/// Map a Newznab/Torznab category id to a media type.
+///
+/// Uses the thousands bucket (1000 Games, 2000 Movies, …). Category 5070
+/// (Anime) wins over generic TV (5000). Unknown / 8000+ returns `None` so
+/// callers can fall back to name/path heuristics.
+pub fn media_type_from_torznab_category(category: u32) -> Option<MediaType> {
+    // Anime is a TV subcategory — check before the 5000 bucket.
+    if category == 5070 || (5070..5080).contains(&category) {
+        return Some(MediaType::Anime);
+    }
+    match category / 1000 {
+        1 => Some(MediaType::Game),
+        2 => Some(MediaType::Movie),
+        3 => Some(MediaType::Music),
+        4 => Some(MediaType::Software),
+        5 => Some(MediaType::Tv),
+        6 => Some(MediaType::Porn),
+        7 => Some(MediaType::Book),
+        // 8xxx Other / unknown → heuristics
+        _ => None,
+    }
+}
+
 /// Classify a torrent from its display name and relative file paths.
 ///
 /// Order of checks (first match wins for strong signals):
@@ -434,5 +457,16 @@ mod tests {
             classify_media("Artist - Album (2020) [FLAC]", &["01.Track.flac", "02.Track.flac"]),
             MediaType::Music
         );
+    }
+
+    #[test]
+    fn torznab_5070_beats_tv_bucket() {
+        assert_eq!(
+            media_type_from_torznab_category(5070),
+            Some(MediaType::Anime)
+        );
+        assert_eq!(media_type_from_torznab_category(5000), Some(MediaType::Tv));
+        assert_eq!(media_type_from_torznab_category(2000), Some(MediaType::Movie));
+        assert_eq!(media_type_from_torznab_category(8000), None);
     }
 }
