@@ -128,11 +128,41 @@ export interface LimitsConfig {
   download_bps?: number | null;
 }
 
+export type CompletionActionType =
+  | "shell"
+  | "move"
+  | "organize"
+  | "drop_incomplete_ext";
+
+export interface CompletionAction {
+  type: CompletionActionType;
+  command?: string;
+  path?: string;
+  copy?: boolean;
+}
+
+export interface AutoOrganizeFolders {
+  anime: string;
+  tv: string;
+  movie: string;
+  game: string;
+  porn: string;
+  music: string;
+  book: string;
+  software: string;
+  other: string;
+}
+
 export interface SessionPreferences {
   soft_recover_on_io_error: boolean;
   on_complete_hook?: string | null;
   move_completed_path?: string | null;
   move_completed_copy?: boolean;
+  auto_organize_enabled?: boolean;
+  auto_organize_root?: string | null;
+  auto_organize_folders?: AutoOrganizeFolders;
+  incomplete_extension?: string | null;
+  completion_actions?: CompletionAction[];
 }
 
 // Interface for the Torrent Stats API response

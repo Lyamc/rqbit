@@ -608,7 +608,11 @@ export const MockAPI: RqbitAPI & { getVersion: () => Promise<string> } = {
   },
 
   getPreferences: async (): Promise<SessionPreferences> => {
-    return { soft_recover_on_io_error: false, on_complete_hook: null, move_completed_path: null, move_completed_copy: false };
+    return { soft_recover_on_io_error: false,
+    auto_organize_enabled: false,
+    auto_organize_root: null,
+    incomplete_extension: null,
+    completion_actions: [], on_complete_hook: null, move_completed_path: null, move_completed_copy: false };
   },
   renameFile: async (_index: number, _fileId: number, _newPath: string): Promise<void> => {},
   relocateTorrent: async (

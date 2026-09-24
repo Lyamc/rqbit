@@ -26,7 +26,7 @@ use crate::{
     peer_connection::PeerConnectionOptions,
     read_buf::ReadBuf,
     session_persistence::{SessionPersistenceStore, json::JsonSessionPersistenceStore},
-    session_preferences::{SessionPreferences, SessionPreferencesStore},
+    session_preferences::{SessionPreferences, SessionPreferencesStore, CompletionAction, apply_incomplete_suffix_to_renames, run_shell_hook_async},
     session_stats::SessionStats,
     spawn_utils::BlockingSpawner,
     storage::{
@@ -1367,6 +1367,17 @@ impl Session {
             let span = debug_span!(parent: self.rs(), "torrent", id);
             let peer_opts = self.merge_peer_opts(opts.peer_opts);
             let metadata = Arc::new(metadata);
+            let mut file_renames = opts.file_renames.clone().unwrap_or_default();
+            if let Some(ext) = self.preferences.incomplete_extension() {
+                let infos: Vec<(usize, PathBuf, bool)> = metadata
+                    .file_infos
+                    .iter()
+                    .enumerate()
+                    .map(|(i, fi)| (i, fi.relative_filename.clone(), fi.attrs.padding))
+                    .collect();
+                file_renames = apply_incomplete_suffix_to_renames(&infos, &file_renames, &ext);
+            }
+
             let minfo = Arc::new(ManagedTorrentShared {
                 id,
                 span,
@@ -1392,7 +1403,7 @@ impl Session {
                 magnet_name: name,
                 client_name_and_version: self.client_name_and_version.clone(),
                 current_output_folder: RwLock::new(output_folder.clone()),
-                file_renames: RwLock::new(opts.file_renames.clone().unwrap_or_default()),
+                file_renames: RwLock::new(file_renames),
             });
 
             let initializing = Arc::new(TorrentStateInitializing::new(
@@ -1641,50 +1652,100 @@ impl Session {
     }
 
     /// Called when a torrent finishes downloading selected files.
-    /// Runs move-completed (if configured) then the on_complete shell hook.
+    /// Runs the ordered completion-action pipeline (see SessionPreferences::effective_actions).
     pub fn on_torrent_finished(self: &Arc<Self>, handle: &ManagedTorrentHandle) {
         let prefs = self.preferences.get();
+        let actions = prefs.effective_actions();
+        if actions.is_empty() {
+            return;
+        }
+        let session = self.clone();
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            session.run_completion_actions(&handle, &prefs, actions).await;
+        });
+    }
+
+    async fn run_completion_actions(
+        self: &Arc<Self>,
+        handle: &ManagedTorrentHandle,
+        prefs: &SessionPreferences,
+        actions: Vec<CompletionAction>,
+    ) {
         let id = handle.id();
         let info_hash = handle.info_hash().as_string();
         let name = handle.name().unwrap_or_else(|| info_hash.clone());
-        let output_folder = handle.output_folder();
 
-        if let Some(dest) = prefs.move_completed_path.clone() {
-            let dest = PathBuf::from(dest);
-            // Place content under dest/<torrent-name-or-hash>/ when moving a multi-file layout,
-            // or directly under dest when the torrent already has its own subfolder.
-            // Simplest: move the torrent's output_folder contents into dest, preserving relative paths
-            // by setting the new output folder to dest (files keep their relative names).
-            let copy = prefs.move_completed_copy;
-            let handle2 = handle.clone();
-            let session2 = self.clone();
-            tokio::spawn(async move {
-                let result = tokio::task::spawn_blocking({
-                    let handle2 = handle2.clone();
-                    move || handle2.relocate_output(dest, copy)
-                })
-                .await;
-                match result {
-                    Ok(Ok(())) => {
-                        info!(id, "move_completed finished");
-                        session2.try_update_persistence_metadata(&handle2).await;
+        for action in actions {
+            // Refresh folder each step — prior actions may have relocated.
+            let output_folder = handle.output_folder();
+            let env = [
+                ("RQBIT_TORRENT_ID", id.to_string()),
+                ("RQBIT_INFO_HASH", info_hash.clone()),
+                ("RQBIT_NAME", name.clone()),
+                (
+                    "RQBIT_OUTPUT_FOLDER",
+                    output_folder.to_string_lossy().into_owned(),
+                ),
+            ];
+            match action {
+                CompletionAction::DropIncompleteExt => {
+                    let Some(ext) = prefs.incomplete_extension_str().map(|s| s.to_owned()) else {
+                        warn!(id, "DropIncompleteExt skipped: incomplete_extension not set");
+                        continue;
+                    };
+                    let handle2 = handle.clone();
+                    let ext2 = ext.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        drop_incomplete_extension(&handle2, &ext2)
+                    })
+                    .await;
+                    match result {
+                        Ok(Ok(())) => {
+                            info!(id, ext = %ext, "DropIncompleteExt finished");
+                            self.try_update_persistence_metadata(handle).await;
+                        }
+                        Ok(Err(e)) => warn!(error=?e, id, "DropIncompleteExt failed"),
+                        Err(e) => warn!(error=?e, id, "DropIncompleteExt join failed"),
                     }
-                    Ok(Err(e)) => warn!(error=?e, id, "move_completed failed"),
-                    Err(e) => warn!(error=?e, id, "move_completed join failed"),
                 }
-            });
-        }
-
-        if let Some(hook) = prefs.on_complete_hook.clone() {
-            crate::session_preferences::spawn_shell_hook(
-                &hook,
-                &[
-                    ("RQBIT_TORRENT_ID", id.to_string()),
-                    ("RQBIT_INFO_HASH", info_hash),
-                    ("RQBIT_NAME", name),
-                    ("RQBIT_OUTPUT_FOLDER", output_folder.to_string_lossy().into_owned()),
-                ],
-            );
+                CompletionAction::Organize => {
+                    let handle2 = handle.clone();
+                    let prefs2 = prefs.clone();
+                    let default_root = self.output_folder.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        auto_organize_torrent(&handle2, &prefs2, default_root)
+                    })
+                    .await;
+                    match result {
+                        Ok(Ok(dest)) => {
+                            info!(id, ?dest, "Organize finished");
+                            self.try_update_persistence_metadata(handle).await;
+                        }
+                        Ok(Err(e)) => warn!(error=?e, id, "Organize failed"),
+                        Err(e) => warn!(error=?e, id, "Organize join failed"),
+                    }
+                }
+                CompletionAction::Move { path, copy } => {
+                    let dest = PathBuf::from(path);
+                    let handle2 = handle.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        handle2.relocate_output(dest, copy)
+                    })
+                    .await;
+                    match result {
+                        Ok(Ok(())) => {
+                            info!(id, "Move completed finished");
+                            self.try_update_persistence_metadata(handle).await;
+                        }
+                        Ok(Err(e)) => warn!(error=?e, id, "Move completed failed"),
+                        Err(e) => warn!(error=?e, id, "Move completed join failed"),
+                    }
+                }
+                CompletionAction::Shell { command } => {
+                    run_shell_hook_async(&command, &env).await;
+                }
+            }
         }
     }
 
@@ -1955,3 +2016,100 @@ mod tests {
         assert_eq!(parsed_trackers, get_trackers(&generated_parsed));
     }
 }
+
+
+fn drop_incomplete_extension(
+    handle: &ManagedTorrentHandle,
+    incomplete_ext: &str,
+) -> anyhow::Result<()> {
+    let metadata = handle
+        .with_metadata(|m| {
+            m.file_infos
+                .iter()
+                .enumerate()
+                .map(|(i, fi)| {
+                    (
+                        i,
+                        fi.relative_filename.clone(),
+                        fi.attrs.padding,
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .context("torrent metadata not resolved")?;
+
+    for (file_id, original, padding) in metadata {
+        if padding {
+            continue;
+        }
+        let current = handle
+            .shared()
+            .file_rename(file_id)
+            .unwrap_or_else(|| original.clone());
+        let s = current.to_string_lossy();
+        if !s.ends_with(incomplete_ext) {
+            continue;
+        }
+        let trimmed = &s[..s.len() - incomplete_ext.len()];
+        if trimmed.is_empty() {
+            warn!(file_id, "refusing to drop incomplete ext: empty result");
+            continue;
+        }
+        let new_path = PathBuf::from(trimmed);
+        if new_path == current {
+            continue;
+        }
+        handle
+            .rename_file(file_id, new_path)
+            .with_context(|| format!("rename file_id={file_id}"))?;
+    }
+    Ok(())
+}
+
+fn auto_organize_torrent(
+    handle: &ManagedTorrentHandle,
+    prefs: &SessionPreferences,
+    default_root: PathBuf,
+) -> anyhow::Result<PathBuf> {
+    let info_hash = handle.info_hash().as_string();
+    let name = handle.name().unwrap_or_else(|| info_hash.clone());
+    let file_paths: Vec<String> = handle
+        .with_metadata(|m| {
+            m.file_infos
+                .iter()
+                .filter(|fi| !fi.attrs.padding)
+                .map(|fi| fi.relative_filename.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let media = crate::media_classify::classify_media(&name, &file_paths);
+    let type_folder = prefs.folder_for_media(media).to_owned();
+    let root = prefs
+        .auto_organize_root
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or(default_root);
+
+    let leaf = handle
+        .output_folder()
+        .file_name()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(&name));
+    let dest = root.join(&type_folder).join(leaf);
+
+    info!(
+        id = handle.id(),
+        media = media.as_str(),
+        type_folder = %type_folder,
+        ?dest,
+        "auto-organize classification (heuristic; may be wrong)"
+    );
+
+    if handle.output_folder() == dest {
+        return Ok(dest);
+    }
+    handle.relocate_output(dest.clone(), false)?;
+    Ok(dest)
+}
+

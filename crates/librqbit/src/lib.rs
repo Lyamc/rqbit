@@ -66,6 +66,7 @@ mod peer_info_reader;
 mod piece_tracker;
 mod read_buf;
 mod session;
+mod media_classify;
 mod session_preferences;
 mod session_persistence;
 pub mod session_stats;
