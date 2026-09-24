@@ -6,6 +6,8 @@ export type StagingStatus =
 export type StagingKind =
   "magnet" | "url" | "file" | "server_path" | "torrent_bytes";
 
+export type TransferMatchStatus = "matched" | "unmatched" | "ambiguous";
+
 export type StagingItem = {
   id: string;
   label: string;
@@ -19,6 +21,11 @@ export type StagingItem = {
   serverPath?: string;
   /** raw torrent bytes (from zip extract) */
   bytes?: Uint8Array;
+  /** Transfer-from-other-client match. */
+  matchedPath?: string;
+  matchStatus?: TransferMatchStatus;
+  matchConfidence?: number;
+  matchReason?: string;
 };
 
 const statusLabel = (s: StagingStatus) => {
@@ -112,6 +119,29 @@ export const StagingQueue: React.FC<{
                 <span className={statusClass(item.status)}>
                   {statusLabel(item.status)}
                 </span>
+                {item.matchStatus === "matched" && item.matchedPath && (
+                  <span
+                    className="text-green-600 dark:text-green-400 truncate"
+                    title={item.matchedPath}
+                  >
+                    matched {Math.round((item.matchConfidence ?? 0) * 100)}% ·{" "}
+                    {item.matchedPath.split(/[/\\]/).pop()}
+                  </span>
+                )}
+                {item.matchStatus === "ambiguous" && (
+                  <span
+                    className="text-amber-600 dark:text-amber-400 truncate"
+                    title={item.matchedPath}
+                  >
+                    ambiguous {Math.round((item.matchConfidence ?? 0) * 100)}%
+                    {item.matchedPath
+                      ? ` · ${item.matchedPath.split(/[/\\]/).pop()}`
+                      : ""}
+                  </span>
+                )}
+                {item.matchStatus === "unmatched" && (
+                  <span className="text-secondary">unmatched</span>
+                )}
                 {item.error && (
                   <span className="text-red-600 dark:text-red-400 break-all">
                     {item.error}

@@ -14,6 +14,11 @@ import { StagingItem, StagingQueue } from "../add/StagingQueue";
 import { UrlLinesEditor } from "../add/UrlLinesEditor";
 import { extractTorrentSources } from "../../helper/parseTorrentSources";
 import {
+  TransferCandidate,
+  displayNameForSource,
+  matchTransferFolders,
+} from "../../helper/matchTransferFolders";
+import {
   BulkImportProgress,
   BulkWorkItem,
   runBulkQueue,
@@ -72,7 +77,7 @@ export const AddModal: React.FC<Props> = ({
       for (const s of extractTorrentSources(initialPaste)) {
         items.push({
           id: nextId(),
-          label: s.value.length > 72 ? s.value.slice(0, 69) + "…" : s.value,
+          label: displayNameForSource(s.value),
           source: "url",
           status: "ready",
           kind: s.kind,
@@ -84,6 +89,9 @@ export const AddModal: React.FC<Props> = ({
   });
   const [outputFolder, setOutputFolder] = useState("");
   const [overwrite, setOverwrite] = useState(true);
+  const [transferMode, setTransferMode] = useState(false);
+  const [transferBusy, setTransferBusy] = useState(false);
+  const [transferMsg, setTransferMsg] = useState<string | null>(null);
   const [concurrency, setConcurrency] = useState(DEFAULT_CONCURRENCY);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState<BulkImportProgress | null>(null);
@@ -138,6 +146,9 @@ export const AddModal: React.FC<Props> = ({
     setQueue([]);
     setOutputFolder("");
     setOverwrite(true);
+    setTransferMode(false);
+    setTransferBusy(false);
+    setTransferMsg(null);
     setConcurrency(DEFAULT_CONCURRENCY);
     setProgress(null);
     setRunning(false);
@@ -289,7 +300,7 @@ export const AddModal: React.FC<Props> = ({
     mergeIntoQueue(
       detectedUrls.map((s) => ({
         id: nextId(),
-        label: s.value.length > 72 ? s.value.slice(0, 69) + "…" : s.value,
+        label: displayNameForSource(s.value),
         source: "url",
         status: "ready" as const,
         kind: s.kind,
@@ -315,15 +326,126 @@ export const AddModal: React.FC<Props> = ({
     );
   };
 
+  const clearTransferMatches = () => {
+    setQueue((prev) =>
+      prev.map((i) => ({
+        ...i,
+        matchedPath: undefined,
+        matchStatus: undefined,
+        matchConfidence: undefined,
+        matchReason: undefined,
+      })),
+    );
+    setTransferMsg(null);
+  };
+
+  const onTransferFolders = async (selectedPaths: string[]) => {
+    if (!selectedPaths.length) return;
+    setTransferBusy(true);
+    setTransferMsg("Scanning folders…");
+    try {
+      const candidates: TransferCandidate[] = [];
+      const seen = new Set<string>();
+      const pushCand = (path: string, name: string, children?: string[]) => {
+        if (seen.has(path)) return;
+        seen.add(path);
+        candidates.push({ path, name, children });
+      };
+
+      const discoveredTorrents: StagingItem[] = [];
+
+      for (const p of selectedPaths) {
+        const name = p.split(/[/\\]/).pop() || p;
+        try {
+          const listing = await API.fsList(p);
+          const children = listing.entries.map((e) => e.name);
+          pushCand(p, name, children);
+          for (const e of listing.entries) {
+            if (!e.is_dir) continue;
+            try {
+              const sub = await API.fsList(e.path);
+              pushCand(
+                e.path,
+                e.name,
+                sub.entries.map((x) => x.name),
+              );
+            } catch {
+              pushCand(e.path, e.name);
+            }
+          }
+          for (const e of listing.entries) {
+            if (!e.is_torrent) continue;
+            discoveredTorrents.push({
+              id: nextId(),
+              label: e.name.replace(/\.torrent$/i, ""),
+              source: "transfer",
+              status: "ready",
+              kind: "server_path",
+              serverPath: e.path,
+            });
+          }
+        } catch (err: unknown) {
+          const e = err as { text?: string; message?: string };
+          pushCand(p, name);
+          setTransferMsg(e?.text || e?.message || String(err));
+        }
+      }
+
+      setQueue((prev) => {
+        // Merge newly discovered .torrent paths (dedupe by serverPath/text).
+        const seenKeys = new Set(
+          prev.map((p) => {
+            if (p.serverPath) return `srv:${p.serverPath}`;
+            if (p.text) return `text:${p.text}`;
+            return p.id;
+          }),
+        );
+        const merged = [...prev];
+        for (const item of discoveredTorrents) {
+          const key = item.serverPath ? `srv:${item.serverPath}` : item.id;
+          if (seenKeys.has(key)) continue;
+          seenKeys.add(key);
+          merged.push(item);
+        }
+
+        const hints = merged.map((i) => ({ id: i.id, label: i.label }));
+        const matches = matchTransferFolders(hints, candidates);
+        const byId = new Map(matches.map((m) => [m.torrentId, m]));
+        let matched = 0;
+        let ambiguous = 0;
+        let unmatched = 0;
+        const next = merged.map((item) => {
+          const m = byId.get(item.id);
+          if (!m) return item;
+          if (m.status === "matched") matched++;
+          else if (m.status === "ambiguous") ambiguous++;
+          else unmatched++;
+          return {
+            ...item,
+            matchedPath: m.path,
+            matchStatus: m.status,
+            matchConfidence: m.confidence,
+            matchReason: m.reason,
+          };
+        });
+        setTransferMsg(
+          `Transfer: ${candidates.length} folder${candidates.length === 1 ? "" : "s"} · ` +
+            `${matched} matched · ${ambiguous} ambiguous · ${unmatched} unmatched` +
+            (discoveredTorrents.length
+              ? ` · ${discoveredTorrents.length} .torrent found`
+              : ""),
+        );
+        return next;
+      });
+    } finally {
+      setTransferBusy(false);
+    }
+  };
+
   const startImport = async () => {
     cancelRef.current = { cancelled: false };
     setRunning(true);
     setProgress(null);
-
-    const opts = {
-      overwrite,
-      output_folder: outputFolder.trim() || undefined,
-    };
 
     const workItems = queue.filter(
       (i) => i.status === "ready" || i.status === "pending",
@@ -365,8 +487,12 @@ export const AddModal: React.FC<Props> = ({
           });
         },
         worker: async (item) => {
+          const itemOpts = {
+            overwrite: transferMode ? true : overwrite,
+            output_folder: item.matchedPath || outputFolder.trim() || undefined,
+          };
           if (item.kind === "server_path" && item.serverPath) {
-            await API.uploadTorrentFromServerPath(item.serverPath, opts);
+            await API.uploadTorrentFromServerPath(item.serverPath, itemOpts);
           } else if (item.kind === "torrent_bytes" && item.bytes) {
             const name = item.label.endsWith(".torrent")
               ? item.label
@@ -381,11 +507,11 @@ export const AddModal: React.FC<Props> = ({
               name,
               { type: "application/x-bittorrent" },
             );
-            await API.uploadTorrent(file, opts);
+            await API.uploadTorrent(file, itemOpts);
           } else if (item.file) {
-            await API.uploadTorrent(item.file, opts);
+            await API.uploadTorrent(item.file, itemOpts);
           } else if (item.text) {
-            await API.uploadTorrent(item.text, opts);
+            await API.uploadTorrent(item.text, itemOpts);
           } else {
             throw new Error("nothing to upload");
           }
@@ -435,6 +561,44 @@ export const AddModal: React.FC<Props> = ({
             onClick={() => !running && setTab("browse")}
           />
         </TabList>
+
+        <div className="mb-3 flex flex-col gap-2">
+          <FormCheckbox
+            name="add_transfer"
+            label="Transfer from other client"
+            checked={transferMode}
+            disabled={running || transferBusy}
+            onChange={() => {
+              const next = !transferMode;
+              setTransferMode(next);
+              if (!next) clearTransferMatches();
+              else setOverwrite(true);
+            }}
+          />
+          {transferMode && (
+            <div className="border border-divider rounded p-2">
+              <div className="text-sm text-secondary mb-2">
+                Select folders that already contain downloads (or a parent of
+                many). We&apos;ll fuzzy-match them to the queue and set each
+                item&apos;s output folder.
+              </div>
+              <FilesystemBrowser
+                mode="select-directories"
+                multi
+                confirmLabel="Match folders"
+                onConfirm={(paths) => {
+                  void onTransferFolders(paths);
+                }}
+              />
+              {transferMsg && (
+                <div className="text-sm text-secondary mt-2">{transferMsg}</div>
+              )}
+              {transferBusy && (
+                <div className="text-sm text-secondary mt-1">Working…</div>
+              )}
+            </div>
+          )}
+        </div>
 
         {tab === "upload" && (
           <div className="flex flex-col gap-2 mb-3">

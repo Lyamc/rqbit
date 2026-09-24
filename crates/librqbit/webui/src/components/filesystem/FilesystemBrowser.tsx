@@ -4,11 +4,13 @@ import { FsEntry, FsRoot } from "../../api-types";
 import { Button } from "../buttons/Button";
 import { Spinner } from "../Spinner";
 
-export type FilesystemBrowserMode = "select-torrents" | "select-directory";
+export type FilesystemBrowserMode =
+  "select-torrents" | "select-directory" | "select-directories";
 
 export type FilesystemBrowserProps = {
   /** select-torrents: pick .torrent files and/or folders of torrents.
-   *  select-directory: pick a single folder (for output path prefs later). */
+   *  select-directory: pick a single folder (for output path prefs later).
+   *  select-directories: multi-select folders (transfer from other client). */
   mode?: FilesystemBrowserMode;
   multi?: boolean;
   initialPath?: string;
@@ -95,6 +97,16 @@ export const FilesystemBrowser: React.FC<FilesystemBrowserProps> = ({
       setSelected(new Set([entry.path]));
       return;
     }
+    if (mode === "select-directories") {
+      if (!entry.is_dir) return;
+      setSelected((prev) => {
+        const next = new Set(prev);
+        if (next.has(entry.path)) next.delete(entry.path);
+        else next.add(entry.path);
+        return next;
+      });
+      return;
+    }
     // torrents mode: files that are torrents, or directories (folder of torrents)
     if (!entry.is_dir && !entry.is_torrent) return;
     setSelected((prev) => {
@@ -111,13 +123,21 @@ export const FilesystemBrowser: React.FC<FilesystemBrowserProps> = ({
       if (dir) onConfirm([dir]);
       return;
     }
+    if (mode === "select-directories") {
+      const dirs = selected.size > 0 ? [...selected] : path ? [path] : [];
+      if (dirs.length) onConfirm(dirs);
+      return;
+    }
     // Expand selected folders into torrent paths
     const paths: string[] = [];
     for (const p of selected) {
       const ent = entries.find((e) => e.path === p);
       if (ent?.is_dir) {
         try {
-          const r = await API.fsList(p, { recursive: true, torrentsOnly: true });
+          const r = await API.fsList(p, {
+            recursive: true,
+            torrentsOnly: true,
+          });
           for (const e of r.entries) {
             if (e.is_torrent) paths.push(e.path);
           }
@@ -134,7 +154,7 @@ export const FilesystemBrowser: React.FC<FilesystemBrowserProps> = ({
   };
 
   const canConfirm =
-    mode === "select-directory"
+    mode === "select-directory" || mode === "select-directories"
       ? true
       : selected.size > 0;
 
@@ -184,7 +204,7 @@ export const FilesystemBrowser: React.FC<FilesystemBrowserProps> = ({
           <ul className="divide-y divide-divider">
             {entries.map((e) => {
               const selectable =
-                mode === "select-directory"
+                mode === "select-directory" || mode === "select-directories"
                   ? e.is_dir
                   : e.is_dir || e.is_torrent;
               const isSelected = selected.has(e.path);
@@ -192,7 +212,9 @@ export const FilesystemBrowser: React.FC<FilesystemBrowserProps> = ({
                 <li
                   key={e.path}
                   className={`flex items-center gap-2 px-2 py-1.5 text-sm ${
-                    selectable ? "cursor-pointer hover:bg-primary/10" : "opacity-50"
+                    selectable
+                      ? "cursor-pointer hover:bg-primary/10"
+                      : "opacity-50"
                   } ${isSelected ? "bg-primary/15" : ""}`}
                   onDoubleClick={() => {
                     if (e.is_dir) setPath(e.path);
@@ -248,7 +270,9 @@ export const FilesystemBrowser: React.FC<FilesystemBrowserProps> = ({
         <div className="text-sm text-secondary">
           {mode === "select-directory"
             ? "Double-click folders to navigate. Confirm uses selection or current folder."
-            : `${selected.size} selected · double-click to open folders`}
+            : mode === "select-directories"
+              ? `${selected.size} folder${selected.size === 1 ? "" : "s"} selected · confirm current if none`
+              : `${selected.size} selected · double-click to open folders`}
         </div>
         <div className="flex gap-2">
           {onCancel && (
@@ -263,7 +287,11 @@ export const FilesystemBrowser: React.FC<FilesystemBrowserProps> = ({
             onClick={confirm}
           >
             {confirmLabel ??
-              (mode === "select-directory" ? "Select folder" : "Add to queue")}
+              (mode === "select-directory"
+                ? "Select folder"
+                : mode === "select-directories"
+                  ? "Use folders"
+                  : "Add to queue")}
           </Button>
         </div>
       </div>
