@@ -216,6 +216,22 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
   getPreferences: (): Promise<SessionPreferences> => {
     return makeRequest("GET", "/torrents/preferences");
   },
+  renameFile: (index: number, fileId: number, newPath: string): Promise<void> => {
+    return makeRequest("POST", `/torrents/${index}/rename_file`, {
+      file_id: fileId,
+      new_path: newPath,
+    });
+  },
+  relocateTorrent: (
+    index: number,
+    destination: string,
+    copy?: boolean,
+  ): Promise<void> => {
+    return makeRequest("POST", `/torrents/${index}/relocate`, {
+      destination,
+      copy: !!copy,
+    });
+  },
   setPreferences: (prefs: SessionPreferences): Promise<void> => {
     return makeRequest("POST", "/torrents/preferences", prefs, true);
   },

@@ -151,6 +151,8 @@ pub fn make_api_router(state: ApiState) -> Router {
                 post(torrents::h_torrent_action_update_only_files),
             )
             .route("/torrents/{id}/add_peers", post(torrents::h_add_peers))
+            .route("/torrents/{id}/rename_file", post(torrents::h_rename_file))
+            .route("/torrents/{id}/relocate", post(torrents::h_relocate))
             .route("/torrents/create", post(torrents::h_create_torrent));
     }
 
