@@ -295,6 +295,10 @@ pub struct AddTorrentOptions {
 
     // Custom trackers
     pub trackers: Option<Vec<String>>,
+
+    /// Restored per-file relative path renames (file_id -> relative path).
+    #[serde(default)]
+    pub file_renames: Option<std::collections::HashMap<usize, PathBuf>>,
 }
 
 pub struct ListOnlyResponse {
@@ -1376,7 +1380,7 @@ impl Session {
                     peer_connect_timeout: peer_opts.connect_timeout,
                     peer_read_write_timeout: peer_opts.read_write_timeout,
                     allow_overwrite: opts.overwrite,
-                    output_folder,
+                    output_folder: output_folder.clone(),
                     ratelimits: opts.ratelimits,
                     initial_peers: opts.initial_peers.clone().unwrap_or_default(),
                     peer_limit: opts.peer_limit.or(self.peer_limit),
@@ -1387,6 +1391,8 @@ impl Session {
                 session: Arc::downgrade(self),
                 magnet_name: name,
                 client_name_and_version: self.client_name_and_version.clone(),
+                current_output_folder: RwLock::new(output_folder.clone()),
+                file_renames: RwLock::new(opts.file_renames.clone().unwrap_or_default()),
             });
 
             let initializing = Arc::new(TorrentStateInitializing::new(
@@ -1514,13 +1520,13 @@ impl Session {
             (Ok(storage), true) => {
                 debug!("will delete files");
                 remove_files_and_dirs(&metadata.file_infos, &storage);
-                if removed.shared().options.output_folder != self.output_folder
+                if removed.shared().output_folder() != self.output_folder
                     && let Err(e) = storage.remove_directory_if_empty(Path::new(""))
                 {
                     warn!(
                         ?id,
                         "error removing {:?}: {e:#}",
-                        removed.shared().options.output_folder
+                        removed.shared().output_folder()
                     )
                 }
             }
@@ -1632,6 +1638,88 @@ impl Session {
 
     pub async fn update_preferences(&self, prefs: SessionPreferences) -> anyhow::Result<()> {
         self.preferences.update(prefs).await
+    }
+
+    /// Called when a torrent finishes downloading selected files.
+    /// Runs move-completed (if configured) then the on_complete shell hook.
+    pub fn on_torrent_finished(self: &Arc<Self>, handle: &ManagedTorrentHandle) {
+        let prefs = self.preferences.get();
+        let id = handle.id();
+        let info_hash = handle.info_hash().as_string();
+        let name = handle.name().unwrap_or_else(|| info_hash.clone());
+        let output_folder = handle.output_folder();
+
+        if let Some(dest) = prefs.move_completed_path.clone() {
+            let dest = PathBuf::from(dest);
+            // Place content under dest/<torrent-name-or-hash>/ when moving a multi-file layout,
+            // or directly under dest when the torrent already has its own subfolder.
+            // Simplest: move the torrent's output_folder contents into dest, preserving relative paths
+            // by setting the new output folder to dest (files keep their relative names).
+            let copy = prefs.move_completed_copy;
+            let handle2 = handle.clone();
+            let session2 = self.clone();
+            tokio::spawn(async move {
+                let result = tokio::task::spawn_blocking({
+                    let handle2 = handle2.clone();
+                    move || handle2.relocate_output(dest, copy)
+                })
+                .await;
+                match result {
+                    Ok(Ok(())) => {
+                        info!(id, "move_completed finished");
+                        session2.try_update_persistence_metadata(&handle2).await;
+                    }
+                    Ok(Err(e)) => warn!(error=?e, id, "move_completed failed"),
+                    Err(e) => warn!(error=?e, id, "move_completed join failed"),
+                }
+            });
+        }
+
+        if let Some(hook) = prefs.on_complete_hook.clone() {
+            crate::session_preferences::spawn_shell_hook(
+                &hook,
+                &[
+                    ("RQBIT_TORRENT_ID", id.to_string()),
+                    ("RQBIT_INFO_HASH", info_hash),
+                    ("RQBIT_NAME", name),
+                    ("RQBIT_OUTPUT_FOLDER", output_folder.to_string_lossy().into_owned()),
+                ],
+            );
+        }
+    }
+
+    pub async fn rename_file(
+        &self,
+        handle: &ManagedTorrentHandle,
+        file_id: usize,
+        new_relative_path: PathBuf,
+    ) -> anyhow::Result<()> {
+        let path = new_relative_path;
+        tokio::task::spawn_blocking({
+            let handle = handle.clone();
+            move || handle.rename_file(file_id, path)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!(e))??;
+        self.try_update_persistence_metadata(handle).await;
+        Ok(())
+    }
+
+    pub async fn relocate_torrent(
+        &self,
+        handle: &ManagedTorrentHandle,
+        new_output_folder: PathBuf,
+        copy: bool,
+    ) -> anyhow::Result<()> {
+        let dest = new_output_folder;
+        tokio::task::spawn_blocking({
+            let handle = handle.clone();
+            move || handle.relocate_output(dest, copy)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!(e))??;
+        self.try_update_persistence_metadata(handle).await;
+        Ok(())
     }
 
     pub async fn pause(&self, handle: &ManagedTorrentHandle) -> anyhow::Result<()> {

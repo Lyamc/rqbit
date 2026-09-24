@@ -5,9 +5,9 @@ pub mod stats;
 mod streaming;
 pub mod utils;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Weak;
 use std::sync::atomic::Ordering;
@@ -113,6 +113,7 @@ pub(crate) struct ManagedTorrentOptions {
     pub peer_connect_timeout: Option<Duration>,
     pub peer_read_write_timeout: Option<Duration>,
     pub allow_overwrite: bool,
+    #[allow(dead_code)] // initial folder; runtime uses current_output_folder
     pub output_folder: PathBuf,
     pub ratelimits: LimitsConfig,
     pub initial_peers: Vec<SocketAddr>,
@@ -190,6 +191,11 @@ pub struct ManagedTorrentShared {
     pub(crate) storage_factory: BoxStorageFactory,
     pub(crate) session: Weak<Session>,
 
+    /// Effective on-disk output folder (may change after move-completed / relocate).
+    pub(crate) current_output_folder: RwLock<PathBuf>,
+    /// Per-file relative path overrides (file_id -> new relative path).
+    pub(crate) file_renames: RwLock<HashMap<usize, PathBuf>>,
+
     // "dn" from magnet link
     pub(crate) magnet_name: Option<String>,
 
@@ -199,6 +205,26 @@ pub struct ManagedTorrentShared {
 impl ManagedTorrentShared {
     pub(crate) fn client_name_and_version(&self) -> &str {
         &self.client_name_and_version
+    }
+
+    pub fn output_folder(&self) -> PathBuf {
+        self.current_output_folder.read().clone()
+    }
+
+    pub fn set_output_folder(&self, path: PathBuf) {
+        *self.current_output_folder.write() = path;
+    }
+
+    pub fn file_rename(&self, file_id: usize) -> Option<PathBuf> {
+        self.file_renames.read().get(&file_id).cloned()
+    }
+
+    pub fn set_file_rename(&self, file_id: usize, path: PathBuf) {
+        self.file_renames.write().insert(file_id, path);
+    }
+
+    pub fn set_file_renames_map(&self, map: HashMap<usize, PathBuf>) {
+        *self.file_renames.write() = map;
     }
 }
 
@@ -232,8 +258,75 @@ impl ManagedTorrent {
     }
 
     /// The resolved on-disk folder this torrent's files are written under.
-    pub fn output_folder(&self) -> &Path {
-        &self.shared.options.output_folder
+    pub fn output_folder(&self) -> PathBuf {
+        self.shared.output_folder()
+    }
+
+    pub fn file_renames(&self) -> HashMap<usize, PathBuf> {
+        self.shared.file_renames.read().clone()
+    }
+
+    /// Rename a single file (or its relative path including folders) while the torrent
+    /// is active. Piece mapping stays the same; only the on-disk path changes.
+    pub fn rename_file(&self, file_id: usize, new_relative_path: PathBuf) -> anyhow::Result<()> {
+        if new_relative_path.as_os_str().is_empty() {
+            bail!("new path must not be empty");
+        }
+        if new_relative_path.is_absolute() {
+            bail!("new path must be relative");
+        }
+        let metadata = self.metadata.load();
+        let metadata = metadata.as_ref().context("torrent is not resolved")?;
+        if file_id >= metadata.file_infos.len() {
+            bail!("file_id out of range");
+        }
+        if metadata.file_infos[file_id].attrs.padding {
+            bail!("cannot rename padding file");
+        }
+
+        let rename = |files: &crate::type_aliases::FileStorage| -> anyhow::Result<()> {
+            files.rename_file(&self.shared, metadata, file_id, &new_relative_path)?;
+            self.shared.set_file_rename(file_id, new_relative_path.clone());
+            Ok(())
+        };
+
+        let g = self.locked.read();
+        match &g.state {
+            ManagedTorrentState::Live(live) => rename(&live.files)?,
+            ManagedTorrentState::Paused(paused) => rename(&paused.files)?,
+            ManagedTorrentState::Initializing(_) => {
+                bail!("cannot rename while initializing")
+            }
+            ManagedTorrentState::Error(_) => bail!("cannot rename torrent in error state"),
+            ManagedTorrentState::None => bail!("bug: torrent is in empty state"),
+        }
+        drop(g);
+        Ok(())
+    }
+
+    /// Move or copy completed content to a new output folder and keep seeding from there.
+    pub fn relocate_output(&self, new_output_folder: PathBuf, copy: bool) -> anyhow::Result<()> {
+        let metadata = self.metadata.load();
+        let metadata = metadata.as_ref().context("torrent is not resolved")?;
+
+        let relocate = |files: &crate::type_aliases::FileStorage| -> anyhow::Result<()> {
+            files.relocate_output(&self.shared, metadata, &new_output_folder, copy)?;
+            self.shared.set_output_folder(new_output_folder.clone());
+            Ok(())
+        };
+
+        let g = self.locked.read();
+        match &g.state {
+            ManagedTorrentState::Live(live) => relocate(&live.files)?,
+            ManagedTorrentState::Paused(paused) => relocate(&paused.files)?,
+            ManagedTorrentState::Initializing(_) => {
+                bail!("cannot relocate while initializing")
+            }
+            ManagedTorrentState::Error(_) => bail!("cannot relocate torrent in error state"),
+            ManagedTorrentState::None => bail!("bug: torrent is in empty state"),
+        }
+        drop(g);
+        Ok(())
     }
 
     pub fn with_metadata<R>(

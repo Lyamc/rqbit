@@ -1,4 +1,4 @@
-use std::{collections::HashSet, marker::PhantomData, net::SocketAddr, str::FromStr, sync::Arc};
+use std::{collections::HashSet, marker::PhantomData, net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc};
 
 use anyhow::Context;
 use buffers::ByteBufOwned;
@@ -218,9 +218,7 @@ impl Api {
                         info_hash: mgr.shared().info_hash.as_string(),
                         name: mgr.name(),
                         output_folder: mgr
-                            .shared()
-                            .options
-                            .output_folder
+                            .output_folder()
                             .to_string_lossy()
                             .into_owned(),
                         total_pieces,
@@ -244,20 +242,22 @@ impl Api {
         let info_hash = handle.shared().info_hash;
         let only_files = handle.only_files();
         let output_folder = handle
-            .shared()
-            .options
-            .output_folder
+            .output_folder()
             .to_string_lossy()
             .into_owned()
             .to_string();
-        make_torrent_details(
-            Some(handle.id()),
-            &info_hash,
-            handle.metadata.load().as_ref().map(|r| &r.info),
-            handle.name().as_deref(),
-            only_files.as_deref(),
-            output_folder,
-        )
+        {
+            let renames = handle.file_renames();
+            make_torrent_details(
+                Some(handle.id()),
+                &info_hash,
+                handle.metadata.load().as_ref().map(|r| &r.info),
+                handle.name().as_deref(),
+                only_files.as_deref(),
+                output_folder,
+                &renames,
+            )
+        }
     }
 
     pub fn api_session_stats(&self) -> SessionStatsSnapshot {
@@ -336,6 +336,34 @@ impl Api {
             .unpause(&handle)
             .await
             .with_status(StatusCode::BAD_REQUEST)?;
+        Ok(Default::default())
+    }
+
+    pub async fn api_torrent_action_rename_file(
+        &self,
+        idx: TorrentIdOrHash,
+        file_id: usize,
+        new_path: String,
+    ) -> Result<EmptyJsonResponse> {
+        let handle = self.mgr_handle(idx)?;
+        self.session
+            .rename_file(&handle, file_id, PathBuf::from(new_path))
+            .await
+            .map_err(|e| ApiError::from((StatusCode::BAD_REQUEST, e)))?;
+        Ok(Default::default())
+    }
+
+    pub async fn api_torrent_action_relocate(
+        &self,
+        idx: TorrentIdOrHash,
+        destination: String,
+        copy: bool,
+    ) -> Result<EmptyJsonResponse> {
+        let handle = self.mgr_handle(idx)?;
+        self.session
+            .relocate_torrent(&handle, PathBuf::from(destination), copy)
+            .await
+            .map_err(|e| ApiError::from((StatusCode::BAD_REQUEST, e)))?;
         Ok(Default::default())
     }
 
@@ -436,11 +464,10 @@ impl Api {
                     handle.name().as_deref(),
                     handle.only_files().as_deref(),
                     handle
-                        .shared()
-                        .options
-                        .output_folder
+                        .output_folder()
                         .to_string_lossy()
                         .into_owned(),
+                    &handle.file_renames(),
                 )
                 .context("error making torrent details")?;
                 ApiAddTorrentResponse {
@@ -448,9 +475,7 @@ impl Api {
                     details,
                     seen_peers: None,
                     output_folder: handle
-                        .shared()
-                        .options
-                        .output_folder
+                        .output_folder()
                         .to_string_lossy()
                         .into_owned(),
                 }
@@ -473,6 +498,7 @@ impl Api {
                     None,
                     only_files.as_deref(),
                     output_folder.to_string_lossy().into_owned().to_string(),
+                    &Default::default(),
                 )
                 .context("error making torrent details")?,
             },
@@ -484,11 +510,10 @@ impl Api {
                     handle.name().as_deref(),
                     handle.only_files().as_deref(),
                     handle
-                        .shared()
-                        .options
-                        .output_folder
+                        .output_folder()
                         .to_string_lossy()
                         .into_owned(),
+                    &handle.file_renames(),
                 )
                 .context("error making torrent details")?;
                 ApiAddTorrentResponse {
@@ -496,9 +521,7 @@ impl Api {
                     details,
                     seen_peers: None,
                     output_folder: handle
-                        .shared()
-                        .options
-                        .output_folder
+                        .output_folder()
                         .to_string_lossy()
                         .into_owned(),
                 }
@@ -609,14 +632,23 @@ fn make_torrent_details(
     name: Option<&str>,
     only_files: Option<&[usize]>,
     output_folder: String,
+    renames: &std::collections::HashMap<usize, PathBuf>,
 ) -> Result<TorrentDetailsResponse> {
     let files = match info {
         Some(info) => info
             .iter_file_details()
             .enumerate()
             .map(|(idx, d)| {
-                let name = d.filename.to_string();
-                let components = d.filename.to_vec();
+                let (name, components) = if let Some(renamed) = renames.get(&idx) {
+                    let name = renamed.to_string_lossy().into_owned();
+                    let components = renamed
+                        .components()
+                        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                        .collect::<Vec<_>>();
+                    (name, components)
+                } else {
+                    (d.filename.to_string(), d.filename.to_vec())
+                };
                 let included = only_files.map(|o| o.contains(&idx)).unwrap_or(true);
                 TorrentDetailsResponseFile {
                     name,

@@ -868,6 +868,15 @@ impl TorrentStateLive {
             if chunks.get_selected_pieces()[id.get_usize()] {
                 locked.try_flush_bitv(&self.shared, false);
                 info!(id=self.shared.id, info_hash=?self.shared.info_hash, "torrent finished downloading");
+                let session_weak = self.shared.session.clone();
+                let torrent_id = self.shared.id;
+                tokio::spawn(async move {
+                    if let Some(session) = session_weak.upgrade() {
+                        if let Some(handle) = session.get(crate::api::TorrentIdOrHash::Id(torrent_id)) {
+                            session.on_torrent_finished(&handle);
+                        }
+                    }
+                });
             }
             self.finished_notify.notify_waiters();
 
