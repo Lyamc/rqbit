@@ -128,6 +128,10 @@ export interface LimitsConfig {
   download_bps?: number | null;
 }
 
+export interface SessionPreferences {
+  soft_recover_on_io_error: boolean;
+}
+
 // Interface for the Torrent Stats API response
 export interface LiveTorrentStats {
   snapshot: {
@@ -272,9 +276,13 @@ export interface RqbitAPI {
   pause: (index: number) => Promise<void>;
   updateOnlyFiles: (index: number, files: number[]) => Promise<void>;
   start: (index: number) => Promise<void>;
+  restart: (index: number) => Promise<void>;
+  fixErrors: (index: number) => Promise<void>;
   forget: (index: number) => Promise<void>;
   delete: (index: number) => Promise<void>;
   stats: () => Promise<SessionStats>;
   getLimits: () => Promise<LimitsConfig>;
   setLimits: (limits: LimitsConfig) => Promise<void>;
+  getPreferences: () => Promise<SessionPreferences>;
+  setPreferences: (prefs: SessionPreferences) => Promise<void>;
 }

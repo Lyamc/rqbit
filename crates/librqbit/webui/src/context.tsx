@@ -26,6 +26,12 @@ export const APIContext = createContext<RqbitAPI>({
   start: () => {
     throw new Error("Function not implemented.");
   },
+  restart: () => {
+    throw new Error("Function not implemented.");
+  },
+  fixErrors: () => {
+    throw new Error("Function not implemented.");
+  },
   forget: () => {
     throw new Error("Function not implemented.");
   },
@@ -51,6 +57,12 @@ export const APIContext = createContext<RqbitAPI>({
     throw new Error("Function not implemented.");
   },
   setLimits: function (limits: LimitsConfig): Promise<void> {
+    throw new Error("Function not implemented.");
+  },
+  getPreferences: function () {
+    throw new Error("Function not implemented.");
+  },
+  setPreferences: function () {
     throw new Error("Function not implemented.");
   },
 });

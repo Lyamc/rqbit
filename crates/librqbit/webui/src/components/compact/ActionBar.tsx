@@ -1,5 +1,5 @@
 import { useContext, useState, useCallback, useMemo } from "react";
-import { FaPause, FaPlay, FaTrash } from "react-icons/fa";
+import { FaPause, FaPlay, FaTrash, FaRedo, FaWrench } from "react-icons/fa";
 import { GoSearch, GoX } from "react-icons/go";
 import debounce from "lodash.debounce";
 import { APIContext } from "../../context";
@@ -10,6 +10,7 @@ import { DeleteTorrentModal } from "../modal/DeleteTorrentModal";
 import { useKeyboardShortcuts } from "../../hooks/useKeyboardShortcuts";
 import {
   ErrorDetails,
+  STATE_ERROR,
   STATE_LIVE,
   STATE_PAUSED,
   TorrentListItem,
@@ -116,6 +117,28 @@ export const ActionBar: React.FC<ActionBarProps> = ({ hideFilters }) => {
     runBulkAction((id) => API.pause(id), STATE_PAUSED, "pausing");
   const resumeSelected = () =>
     runBulkAction((id) => API.start(id), STATE_LIVE, "starting");
+  const restartSelected = () =>
+    runBulkAction((id) => API.restart(id), "", "restarting");
+  const fixErrorsSelected = async () => {
+    setDisabled(true);
+    try {
+      for (const id of selectedTorrentIds) {
+        const torrent = getTorrentById(id);
+        if (torrent?.stats?.state !== STATE_ERROR) continue;
+        try {
+          await API.fixErrors(id);
+          refreshTorrents();
+        } catch (e) {
+          setCloseableError({
+            text: `Error fixing errors on torrent id=${id}`,
+            details: e as ErrorDetails,
+          });
+        }
+      }
+    } finally {
+      setDisabled(false);
+    }
+  };
 
   return (
     <div className="flex items-center gap-1.5 px-3 py-1.5 bg-surface-raised border-b border-divider">
@@ -134,6 +157,22 @@ export const ActionBar: React.FC<ActionBarProps> = ({ hideFilters }) => {
       >
         <FaPause className="w-2.5 h-2.5" />
         Pause
+      </Button>
+      <Button
+        onClick={restartSelected}
+        disabled={disabled || !hasSelection}
+        variant="secondary"
+      >
+        <FaRedo className="w-2.5 h-2.5" />
+        Restart
+      </Button>
+      <Button
+        onClick={fixErrorsSelected}
+        disabled={disabled || !hasSelection}
+        variant="secondary"
+      >
+        <FaWrench className="w-2.5 h-2.5" />
+        Fix errors
       </Button>
       <Button
         onClick={openDeleteModal}
