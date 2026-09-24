@@ -312,6 +312,49 @@ impl Api {
         Ok(Default::default())
     }
 
+    pub async fn api_torrent_action_restart(
+        &self,
+        idx: TorrentIdOrHash,
+    ) -> Result<EmptyJsonResponse> {
+        let handle = self.mgr_handle(idx)?;
+        let _ = self.session().pause(&handle).await;
+        self.session
+            .unpause(&handle)
+            .await
+            .with_status(StatusCode::BAD_REQUEST)?;
+        Ok(Default::default())
+    }
+
+    /// Soft-recover torrents in error: re-init with previously_errored=true so bitfield is
+    /// cleared and a full recheck keeps good pieces while bad ones are redownloaded.
+    pub async fn api_torrent_action_fix_errors(
+        &self,
+        idx: TorrentIdOrHash,
+    ) -> Result<EmptyJsonResponse> {
+        let handle = self.mgr_handle(idx)?;
+        self.session
+            .unpause(&handle)
+            .await
+            .with_status(StatusCode::BAD_REQUEST)?;
+        Ok(Default::default())
+    }
+
+    pub fn api_get_preferences(&self) -> crate::SessionPreferences {
+        self.session().preferences()
+    }
+
+    pub async fn api_set_preferences(
+        &self,
+        prefs: crate::SessionPreferences,
+    ) -> Result<EmptyJsonResponse> {
+        self.session()
+            .update_preferences(prefs)
+            .await
+            .context("error saving preferences")
+            .with_status(StatusCode::BAD_REQUEST)?;
+        Ok(Default::default())
+    }
+
     pub async fn api_torrent_action_forget(
         &self,
         idx: TorrentIdOrHash,

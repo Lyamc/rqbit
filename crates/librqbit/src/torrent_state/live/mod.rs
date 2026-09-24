@@ -1870,6 +1870,33 @@ impl PeerHandler {
                 match state.file_ops().write_chunk(addr, piece, chunk_info) {
                     Ok(()) => {}
                     Err(e) => {
+                        let soft = state
+                            .shared
+                            .session
+                            .upgrade()
+                            .map(|s| s.preferences.soft_recover_on_io_error())
+                            .unwrap_or(false);
+                        if soft {
+                            warn!(
+                                id = state.shared.id,
+                                info_hash = ?state.shared.info_hash,
+                                piece = ?chunk_info.piece_index,
+                                error = format!("{e:#}"),
+                                "I/O write error; soft-recovering piece (invalidate + redownload)"
+                            );
+                            {
+                                let mut g = state.lock_write("soft_recover_io_write");
+                                let pieces = g.get_pieces_mut()?;
+                                pieces.take_inflight(chunk_info.piece_index);
+                                pieces.mark_piece_hash_failed(chunk_info.piece_index);
+                            }
+                            state.new_pieces_notify.notify_waiters();
+                            // Drop this peer/chunk path without fatally erroring the torrent.
+                            anyhow::bail!(
+                                "I/O write error on piece {}; soft-recovered",
+                                chunk_info.piece_index
+                            );
+                        }
                         error!(
                             id = state.shared.id,
                             info_hash = ?state.shared.info_hash,
