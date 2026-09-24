@@ -121,9 +121,44 @@ If you have the Rust toolchain installed then you can use the following.
 cargo install rqbit
 ```
 
-## Docker
+## NixOS
 
-Docker images are published at [ikatson/rqbit](https://hub.docker.com/r/ikatson/rqbit)
+Current NixOS already has `services.rqbit`. Use that. No container is required.
+
+```nix
+services.rqbit = {
+  enable = true;
+  downloadDir = "/var/lib/rqbit/downloads";
+  httpHost = "0.0.0.0";
+  httpPort = 3030;
+  openFirewall = true;
+};
+```
+
+`nix/package.nix` installs the static `v9.0.1` Linux binary if you want this release instead of the nixpkgs build:
+
+```nix
+services.rqbit.package = pkgs.callPackage ./nix/package.nix { };
+```
+
+```bash
+nix-build -E 'with import <nixpkgs> {}; callPackage ./nix/package.nix {}'
+```
+
+To keep torrent traffic off the host route, import `nix/module.nix` and run rqbit inside a network namespace that has no path except a VPN:
+
+```nix
+imports = [ /path/to/rqbit/nix/module.nix ];
+
+services.rqbit = {
+  enable = true;
+  httpHost = "0.0.0.0";
+  networkNamespace = "nordvpn";
+  namespaceService = "nordvpn-netns.service";
+};
+```
+
+Create the namespace first, and point `/etc/netns/nordvpn/resolv.conf` at resolvers reached through the tunnel. Leave `openFirewall` off. From the host, open the web UI on the namespace address and port, for example `http://10.200.200.2:3030/web/`.
 
 ## Build
 
