@@ -248,6 +248,21 @@ impl SessionPreferencesStore {
         );
         Ok(())
     }
+    /// Re-read preferences.json from disk into memory (force-reload).
+    pub async fn reload_from_disk(&self) -> anyhow::Result<SessionPreferences> {
+        let prefs = match tokio::fs::read(&self.path).await {
+            Ok(bytes) => serde_json::from_slice::<SessionPreferences>(&bytes)
+                .map(|p| p.sanitize())
+                .map_err(|e| anyhow::anyhow!("parse preferences.json: {e}"))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => SessionPreferences::default(),
+            Err(e) => return Err(e.into()),
+        };
+        self.soft_recover_on_io_error
+            .store(prefs.soft_recover_on_io_error, Ordering::Relaxed);
+        *self.prefs.write() = prefs.clone();
+        info!(path=?self.path, "reloaded session preferences from disk");
+        Ok(prefs)
+    }
 }
 
 /// Build incomplete-extension renames for newly added torrents.

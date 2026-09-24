@@ -67,6 +67,7 @@ mod piece_tracker;
 mod read_buf;
 mod session;
 mod media_classify;
+mod session_admin;
 mod session_preferences;
 mod session_persistence;
 pub mod session_stats;
@@ -97,6 +98,7 @@ pub use session::{
     AddTorrent, AddTorrentOptions, AddTorrentResponse, DhtSessionConfig, ListOnlyResponse,
     SUPPORTED_SCHEMES, Session, SessionOptions, SessionPersistenceConfig,
 };
+pub use session_admin::{AdminConfig, AdminConfigPublic, AdminConfigStore, AdminConfigUpdate};
 pub use session_preferences::{SessionPreferences, SessionPreferencesStore};
 pub use stream_connect::ConnectionOptions;
 pub use torrent_state::{

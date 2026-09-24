@@ -768,11 +768,36 @@ async fn async_main(mut opts: Opts, cancel: CancellationToken) -> anyhow::Result
                     session.watch_folder(Path::new(watch_folder));
                 }
 
+                let admin_path = {
+                    let folder = start_opts
+                        .persistence_location
+                        .as_ref()
+                        .map(PathBuf::from)
+                        .or_else(|| {
+                            SessionPersistenceConfig::default_json_persistence_folder().ok()
+                        })
+                        .unwrap_or_else(|| PathBuf::from("."));
+                    folder.join("admin.json")
+                };
+                let admin_cfg = load_admin_config_sync(&admin_path);
+                if http_api_opts.basic_auth.is_none() {
+                    if let Some(up) = admin_cfg.basic_auth_userpass.as_deref() {
+                        if let Some((u, p)) = up.split_once(':') {
+                            info!(path=?admin_path, "using basic auth from admin.json");
+                            http_api_opts.basic_auth = Some((u.to_owned(), p.to_owned()));
+                        }
+                    }
+                }
+                let listen_addr = resolve_http_listen_addr(
+                    opts.http_api_listen_addr,
+                    &admin_cfg,
+                    (Ipv4Addr::LOCALHOST, 3030).into(),
+                );
+
                 let http_api_fut = start_http_api(
                     cancel,
                     session.clone(),
-                    opts.http_api_listen_addr
-                        .unwrap_or((Ipv4Addr::LOCALHOST, 3030).into()),
+                    listen_addr,
                     http_api_opts,
                     &opts,
                     log_config,
@@ -992,6 +1017,30 @@ async fn async_main(mut opts: Opts, cancel: CancellationToken) -> anyhow::Result
     }
 }
 
+fn load_admin_config_sync(path: &std::path::Path) -> librqbit::AdminConfig {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+        Err(_) => Default::default(),
+    }
+}
+
+fn resolve_http_listen_addr(
+    cli: Option<std::net::SocketAddr>,
+    admin: &librqbit::AdminConfig,
+    default_addr: std::net::SocketAddr,
+) -> std::net::SocketAddr {
+    if let Some(a) = cli {
+        return a;
+    }
+    if let Some(s) = admin.http_api_listen_addr.as_deref() {
+        if let Ok(a) = s.parse() {
+            return a;
+        }
+        tracing::warn!(addr = s, "admin.json http_api_listen_addr is invalid; using default");
+    }
+    default_addr
+}
+
 async fn start_http_api(
     cancel: CancellationToken,
     session: Arc<Session>,
@@ -1000,11 +1049,23 @@ async fn start_http_api(
     opts: &Opts,
     log_config: InitLoggingResult,
 ) -> anyhow::Result<impl Future<Output = anyhow::Result<()>> + use<> + 'static> {
+    let (restart_tx, mut restart_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
     let api = Api::new(
         session.clone(),
         Some(log_config.rust_log_reload_tx),
         Some(log_config.line_broadcast),
-    );
+    )
+    .with_restart_tx(restart_tx);
+
+    tokio::spawn(async move {
+        if restart_rx.recv().await.is_some() {
+            tracing::warn!(
+                "admin requested process restart; exiting with code 75 for systemd Restart=on-failure"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            std::process::exit(75);
+        }
+    });
 
     #[cfg(target_os = "linux")]
     let systemd_listener = api_socket_from_systemd().unwrap_or_else(|e| {

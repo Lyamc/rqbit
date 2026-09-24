@@ -1,3 +1,4 @@
+mod admin;
 mod configure;
 mod dht;
 mod logging;
@@ -109,7 +110,8 @@ pub fn make_api_router(state: ApiState) -> Router {
         .route(
             "/torrents/preferences",
             get(configure::h_get_session_preferences),
-        );
+        )
+        .route("/admin", get(admin::h_admin_status));
 
     if !state.opts.read_only {
         api_router = api_router
@@ -122,6 +124,12 @@ pub fn make_api_router(state: ApiState) -> Router {
                 "/torrents/preferences",
                 post(configure::h_update_session_preferences),
             )
+            .route(
+                "/admin/reload",
+                post(admin::h_admin_reload_preferences),
+            )
+            .route("/admin/config", post(admin::h_admin_update_config))
+            .route("/admin/restart", post(admin::h_admin_restart))
             .route(
                 "/torrents/{id}/pause",
                 post(torrents::h_torrent_action_pause),

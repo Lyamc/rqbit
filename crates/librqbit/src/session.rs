@@ -20,12 +20,13 @@ use crate::{
     create_torrent_file::CreateTorrentResult,
     dht_utils::{ReadMetainfoResult, read_metainfo_from_peer_receiver},
     ip_ranges::IpRanges,
-    limits::{Limits, LimitsConfig},
+    limits::{Limits, LimitsConfig, load_persisted_limits, save_persisted_limits},
     listen::{Accept, ListenerOptions},
     merge_streams::merge_streams,
     peer_connection::PeerConnectionOptions,
     read_buf::ReadBuf,
     session_persistence::{SessionPersistenceStore, json::JsonSessionPersistenceStore},
+    session_admin::AdminConfigStore,
     session_preferences::{SessionPreferences, SessionPreferencesStore, CompletionAction, apply_incomplete_suffix_to_renames, run_shell_hook_async},
     session_stats::SessionStats,
     spawn_utils::BlockingSpawner,
@@ -141,6 +142,12 @@ pub struct Session {
 
     /// Session-level preferences (persisted as preferences.json).
     pub preferences: SessionPreferencesStore,
+
+    /// Admin/server settings (persisted as admin.json). Restart often required.
+    pub admin: AdminConfigStore,
+
+    /// Path for persisted rate limits (limits.json).
+    limits_path: PathBuf,
 
     pub blocklist: IpRanges,
     pub allowlist: Option<IpRanges>,
@@ -802,7 +809,21 @@ impl Session {
                 };
                 folder.join("preferences.json")
             };
-            let preferences = SessionPreferencesStore::load_or_default(preferences_path).await;
+            let preferences = SessionPreferencesStore::load_or_default(preferences_path.clone()).await;
+            let admin_path = preferences_path
+                .parent()
+                .map(|p| p.join("admin.json"))
+                .unwrap_or_else(|| PathBuf::from("admin.json"));
+            let admin = AdminConfigStore::load_or_default(admin_path).await;
+            let limits_path = preferences_path
+                .parent()
+                .map(|p| p.join("limits.json"))
+                .unwrap_or_else(|| PathBuf::from("limits.json"));
+            let mut ratelimits_config = opts.ratelimits;
+            if let Some(persisted) = load_persisted_limits(&limits_path).await {
+                // UI-persisted limits override CLI/env defaults across restarts.
+                ratelimits_config = persisted;
+            }
 
             let session = Arc::new(Self {
                 persistence,
@@ -827,8 +848,10 @@ impl Session {
                     opts.concurrent_init_limit.unwrap_or(3),
                 )),
                 udp_tracker_client,
-                ratelimits: Limits::new(opts.ratelimits),
+                ratelimits: Limits::new(ratelimits_config),
                 preferences,
+                admin,
+                limits_path,
                 ipv4_only: opts.ipv4_only,
                 trackers: opts.trackers,
                 disable_trackers: opts.disable_trackers,
@@ -1650,6 +1673,37 @@ impl Session {
     pub async fn update_preferences(&self, prefs: SessionPreferences) -> anyhow::Result<()> {
         self.preferences.update(prefs).await
     }
+
+
+    pub async fn reload_preferences(&self) -> anyhow::Result<SessionPreferences> {
+        self.preferences.reload_from_disk().await
+    }
+
+    pub fn preferences_path(&self) -> &std::path::Path {
+        self.preferences.path()
+    }
+
+    pub fn admin_path(&self) -> &std::path::Path {
+        self.admin.path()
+    }
+
+    pub fn admin_config(&self) -> crate::session_admin::AdminConfig {
+        self.admin.get()
+    }
+
+    pub async fn update_admin_config(
+        &self,
+        patch: crate::session_admin::AdminConfigUpdate,
+    ) -> anyhow::Result<crate::session_admin::AdminConfig> {
+        self.admin.apply_update(patch).await
+    }
+
+    pub async fn set_ratelimits_persistent(&self, config: LimitsConfig) -> anyhow::Result<()> {
+        self.ratelimits.set_upload_bps(config.upload_bps);
+        self.ratelimits.set_download_bps(config.download_bps);
+        save_persisted_limits(&self.limits_path, &config).await
+    }
+
 
     /// Called when a torrent finishes downloading selected files.
     /// Runs the ordered completion-action pipeline (see SessionPreferences::effective_actions).

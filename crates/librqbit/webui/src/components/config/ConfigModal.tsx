@@ -4,6 +4,7 @@ import { RateLimitsTab } from "./RateLimitsTab";
 import { DownloadsTab } from "./DownloadsTab";
 import { OrganizeTab, DEFAULT_ORGANIZE_FOLDERS } from "./OrganizeTab";
 import { CompletionTab } from "./CompletionTab";
+import { AdminTab } from "./AdminTab";
 import { APIContext } from "../../context";
 import {
   LimitsConfig,
@@ -170,6 +171,11 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({
               onChange={patchPreferences}
             />
           ),
+        },
+        {
+          id: "admin",
+          label: "Administration",
+          content: <AdminTab />,
         },
       ]}
       onSave={handleSave}

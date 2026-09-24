@@ -123,6 +123,32 @@ export interface SessionStats {
   uptime_seconds: number;
 }
 
+export interface AdminConfigPublic {
+  http_api_listen_addr?: string | null;
+  basic_auth_enabled: boolean;
+  basic_auth_user?: string | null;
+  basic_auth_password_set: boolean;
+}
+
+export interface AdminStatus {
+  version: string;
+  preferences_path: string;
+  admin_path: string;
+  effective_http_listen_addr?: string | null;
+  env_http_listen_addr?: string | null;
+  env_basic_auth_set: boolean;
+  persisted: AdminConfigPublic;
+  restart_supported: boolean;
+  notes: string[];
+}
+
+export interface AdminConfigUpdate {
+  http_api_listen_addr?: string | null;
+  basic_auth_enabled?: boolean | null;
+  basic_auth_user?: string | null;
+  basic_auth_password?: string | null;
+}
+
 export interface LimitsConfig {
   upload_bps?: number | null;
   download_bps?: number | null;
@@ -320,4 +346,8 @@ export interface RqbitAPI {
   setLimits: (limits: LimitsConfig) => Promise<void>;
   getPreferences: () => Promise<SessionPreferences>;
   setPreferences: (prefs: SessionPreferences) => Promise<void>;
+  getAdminStatus: () => Promise<AdminStatus>;
+  updateAdminConfig: (patch: AdminConfigUpdate) => Promise<AdminConfigPublic>;
+  reloadPreferences: () => Promise<SessionPreferences>;
+  restartProcess: () => Promise<void>;
 }

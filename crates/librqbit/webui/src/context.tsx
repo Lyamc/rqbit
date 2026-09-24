@@ -71,4 +71,16 @@ export const APIContext = createContext<RqbitAPI>({
   setPreferences: function () {
     throw new Error("Function not implemented.");
   },
+  getAdminStatus: function () {
+    throw new Error("Function not implemented.");
+  },
+  updateAdminConfig: function () {
+    throw new Error("Function not implemented.");
+  },
+  reloadPreferences: function () {
+    throw new Error("Function not implemented.");
+  },
+  restartProcess: function () {
+    throw new Error("Function not implemented.");
+  },
 });

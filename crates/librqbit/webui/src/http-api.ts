@@ -3,6 +3,9 @@ import {
   ErrorDetails,
   LimitsConfig,
   SessionPreferences,
+  AdminStatus,
+  AdminConfigUpdate,
+  AdminConfigPublic,
   ListTorrentsResponse,
   PeerStatsSnapshot,
   RqbitAPI,
@@ -234,5 +237,17 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
   },
   setPreferences: (prefs: SessionPreferences): Promise<void> => {
     return makeRequest("POST", "/torrents/preferences", prefs, true);
+  },
+  getAdminStatus: (): Promise<AdminStatus> => {
+    return makeRequest("GET", "/admin");
+  },
+  updateAdminConfig: (patch: AdminConfigUpdate): Promise<AdminConfigPublic> => {
+    return makeRequest("POST", "/admin/config", patch, true);
+  },
+  reloadPreferences: (): Promise<SessionPreferences> => {
+    return makeRequest("POST", "/admin/reload");
+  },
+  restartProcess: (): Promise<void> => {
+    return makeRequest("POST", "/admin/restart");
   },
 };

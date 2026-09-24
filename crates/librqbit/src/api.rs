@@ -41,6 +41,7 @@ pub struct Api {
     rust_log_reload_tx: Option<UnboundedSender<String>>,
     #[cfg(feature = "tracing-subscriber-utils")]
     line_broadcast: Option<LineBroadcast>,
+    restart_tx: Option<UnboundedSender<()>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -175,6 +176,20 @@ pub struct ApiTorrentListOpts {
     pub with_stats: bool,
 }
 
+
+#[derive(serde::Serialize)]
+pub struct AdminStatusResponse {
+    pub version: String,
+    pub preferences_path: String,
+    pub admin_path: String,
+    pub effective_http_listen_addr: Option<String>,
+    pub env_http_listen_addr: Option<String>,
+    pub env_basic_auth_set: bool,
+    pub persisted: crate::AdminConfigPublic,
+    pub restart_supported: bool,
+    pub notes: Vec<String>,
+}
+
 impl Api {
     pub fn new(
         session: Arc<Session>,
@@ -184,9 +199,15 @@ impl Api {
         Self {
             session,
             rust_log_reload_tx,
+            restart_tx: None,
             #[cfg(feature = "tracing-subscriber-utils")]
             line_broadcast,
         }
+    }
+
+    pub fn with_restart_tx(mut self, tx: UnboundedSender<()>) -> Self {
+        self.restart_tx = Some(tx);
+        self
     }
 
     pub fn session(&self) -> &Arc<Session> {
@@ -382,6 +403,60 @@ impl Api {
             .with_status(StatusCode::BAD_REQUEST)?;
         Ok(Default::default())
     }
+
+    pub async fn api_reload_preferences(&self) -> Result<crate::SessionPreferences> {
+        self.session()
+            .reload_preferences()
+            .await
+            .context("error reloading preferences")
+            .with_status(StatusCode::BAD_REQUEST)
+    }
+
+    pub fn api_admin_status(&self, listen_addr: Option<std::net::SocketAddr>) -> AdminStatusResponse {
+        let admin = self.session().admin_config();
+        let env_listen = std::env::var("RQBIT_HTTP_API_LISTEN_ADDR").ok();
+        let env_auth = std::env::var("RQBIT_HTTP_BASIC_AUTH_USERPASS").ok();
+        AdminStatusResponse {
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            preferences_path: self.session().preferences_path().display().to_string(),
+            admin_path: self.session().admin_path().display().to_string(),
+            effective_http_listen_addr: listen_addr.map(|a| a.to_string()),
+            env_http_listen_addr: env_listen,
+            env_basic_auth_set: env_auth.is_some(),
+            persisted: admin.public_view(),
+            restart_supported: self.restart_tx.is_some(),
+            notes: vec![
+                "Session preferences and rate limits apply immediately and persist to disk.".into(),
+                "HTTP listen address and basic auth from admin.json apply on next process start; environment variables override admin.json.".into(),
+                "Process restart exits with code 75 so systemd Restart=on-failure can bring the service back.".into(),
+            ],
+        }
+    }
+
+    pub async fn api_update_admin(
+        &self,
+        patch: crate::AdminConfigUpdate,
+    ) -> Result<crate::AdminConfigPublic> {
+        let cfg = self
+            .session()
+            .update_admin_config(patch)
+            .await
+            .context("error saving admin config")
+            .with_status(StatusCode::BAD_REQUEST)?;
+        Ok(cfg.public_view())
+    }
+
+    pub fn api_request_restart(&self) -> Result<EmptyJsonResponse> {
+        let tx = self
+            .restart_tx
+            .as_ref()
+            .ok_or_else(|| ApiError::from((StatusCode::NOT_IMPLEMENTED, anyhow::anyhow!("process restart is not enabled in this build/runtime"))))?;
+        tx.send(())
+            .context("failed to signal restart")
+            .with_status(StatusCode::INTERNAL_SERVER_ERROR)?;
+        Ok(Default::default())
+    }
+
 
     pub async fn api_torrent_action_forget(
         &self,

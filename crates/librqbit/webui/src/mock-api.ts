@@ -629,4 +629,37 @@ export const MockAPI: RqbitAPI & { getVersion: () => Promise<string> } = {
   setLimits: async (): Promise<void> => {
     await new Promise((r) => setTimeout(r, 50));
   },
+  getAdminStatus: async () => ({
+    version: "mock",
+    preferences_path: "/tmp/preferences.json",
+    admin_path: "/tmp/admin.json",
+    effective_http_listen_addr: "127.0.0.1:3030",
+    env_http_listen_addr: null,
+    env_basic_auth_set: false,
+    persisted: {
+      http_api_listen_addr: "0.0.0.0:9030",
+      basic_auth_enabled: false,
+      basic_auth_user: null,
+      basic_auth_password_set: false,
+    },
+    restart_supported: true,
+    notes: ["mock admin status"],
+  }),
+  updateAdminConfig: async (patch) => ({
+    http_api_listen_addr: patch.http_api_listen_addr ?? null,
+    basic_auth_enabled: !!patch.basic_auth_enabled,
+    basic_auth_user: patch.basic_auth_user ?? null,
+    basic_auth_password_set: !!patch.basic_auth_password,
+  }),
+  reloadPreferences: async () => ({
+    soft_recover_on_io_error: false,
+    auto_organize_enabled: false,
+    auto_organize_root: null,
+    incomplete_extension: null,
+    completion_actions: [],
+    on_complete_hook: null,
+    move_completed_path: null,
+    move_completed_copy: false,
+  }),
+  restartProcess: async () => {},
 };
