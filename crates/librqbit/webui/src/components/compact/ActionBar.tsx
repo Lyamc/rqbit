@@ -28,6 +28,7 @@ interface ActionBarProps {
 
 export const ActionBar: React.FC<ActionBarProps> = ({ hideFilters }) => {
   const selectedTorrentIds = useUIStore((state) => state.selectedTorrentIds);
+  const clearSelection = useUIStore((state) => state.clearSelection);
   const searchQuery = useUIStore((state) => state.searchQuery);
   const setSearchQuery = useUIStore((state) => state.setSearchQuery);
   const statusFilter = useUIStore((state) => state.statusFilter);
@@ -108,6 +109,7 @@ export const ActionBar: React.FC<ActionBarProps> = ({ hideFilters }) => {
           });
         }
       }
+      clearSelection();
     } finally {
       setDisabled(false);
     }
@@ -135,6 +137,7 @@ export const ActionBar: React.FC<ActionBarProps> = ({ hideFilters }) => {
           });
         }
       }
+      clearSelection();
     } finally {
       setDisabled(false);
     }
