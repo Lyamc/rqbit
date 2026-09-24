@@ -160,7 +160,8 @@ pub struct Session {
     #[cfg(feature = "disable-upload")]
     _disable_upload: bool,
     pub ipv4_only: bool,
-    pub peer_limit: Option<usize>,
+    /// 0 = no session default (unlimited / engine default). Live-updatable via preferences.
+    peer_limit: AtomicUsize,
     client_name_and_version: String,
 }
 
@@ -810,6 +811,11 @@ impl Session {
                 folder.join("preferences.json")
             };
             let preferences = SessionPreferencesStore::load_or_default(preferences_path.clone()).await;
+            let initial_peer_limit = preferences
+                .get()
+                .peer_limit
+                .or(opts.peer_limit)
+                .unwrap_or(0);
             let admin_path = preferences_path
                 .parent()
                 .map(|p| p.join("admin.json"))
@@ -855,7 +861,7 @@ impl Session {
                 ipv4_only: opts.ipv4_only,
                 trackers: opts.trackers,
                 disable_trackers: opts.disable_trackers,
-                peer_limit: opts.peer_limit,
+                peer_limit: AtomicUsize::new(initial_peer_limit),
                 client_name_and_version,
 
                 #[cfg(feature = "disable-upload")]
@@ -1417,7 +1423,7 @@ impl Session {
                     output_folder: output_folder.clone(),
                     ratelimits: opts.ratelimits,
                     initial_peers: opts.initial_peers.clone().unwrap_or_default(),
-                    peer_limit: opts.peer_limit.or(self.peer_limit),
+                    peer_limit: opts.peer_limit.or_else(|| self.session_peer_limit()),
                     #[cfg(feature = "disable-upload")]
                     _disable_upload: self._disable_upload,
                 },
@@ -1670,13 +1676,28 @@ impl Session {
         self.preferences.get()
     }
 
+    pub fn session_peer_limit(&self) -> Option<usize> {
+        match self.peer_limit.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => None,
+            n => Some(n),
+        }
+    }
+
+    pub fn set_session_peer_limit(&self, limit: Option<usize>) {
+        self.peer_limit
+            .store(limit.unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub async fn update_preferences(&self, prefs: SessionPreferences) -> anyhow::Result<()> {
+        self.set_session_peer_limit(prefs.peer_limit);
         self.preferences.update(prefs).await
     }
 
 
     pub async fn reload_preferences(&self) -> anyhow::Result<SessionPreferences> {
-        self.preferences.reload_from_disk().await
+        let prefs = self.preferences.reload_from_disk().await?;
+        self.set_session_peer_limit(prefs.peer_limit);
+        Ok(prefs)
     }
 
     pub fn preferences_path(&self) -> &std::path::Path {

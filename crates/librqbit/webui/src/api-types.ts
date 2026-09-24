@@ -128,6 +128,26 @@ export interface AdminConfigPublic {
   basic_auth_enabled: boolean;
   basic_auth_user?: string | null;
   basic_auth_password_set: boolean;
+  listen_port?: number | null;
+  announce_port?: number | null;
+  disable_dht?: boolean | null;
+  disable_dht_persistence?: boolean | null;
+  disable_lsd?: boolean | null;
+  disable_trackers?: boolean | null;
+  enable_utp_listen?: boolean | null;
+  disable_tcp_listen?: boolean | null;
+  disable_tcp_connect?: boolean | null;
+  disable_upnp_port_forward?: boolean | null;
+  socks_proxy_url?: string | null;
+  ipv4_only?: boolean | null;
+  bind_device?: string | null;
+  peer_limit?: number | null;
+  concurrent_init_limit?: number | null;
+  peer_connect_timeout_secs?: number | null;
+  peer_read_write_timeout_secs?: number | null;
+  blocklist_url?: string | null;
+  allowlist_url?: string | null;
+  fastresume?: boolean | null;
 }
 
 export interface AdminStatus {
@@ -147,6 +167,42 @@ export interface AdminConfigUpdate {
   basic_auth_enabled?: boolean | null;
   basic_auth_user?: string | null;
   basic_auth_password?: string | null;
+  listen_port?: number | null;
+  clear_listen_port?: boolean | null;
+  announce_port?: number | null;
+  clear_announce_port?: boolean | null;
+  disable_dht?: boolean | null;
+  clear_disable_dht?: boolean | null;
+  disable_dht_persistence?: boolean | null;
+  clear_disable_dht_persistence?: boolean | null;
+  disable_lsd?: boolean | null;
+  clear_disable_lsd?: boolean | null;
+  disable_trackers?: boolean | null;
+  clear_disable_trackers?: boolean | null;
+  enable_utp_listen?: boolean | null;
+  clear_enable_utp_listen?: boolean | null;
+  disable_tcp_listen?: boolean | null;
+  clear_disable_tcp_listen?: boolean | null;
+  disable_tcp_connect?: boolean | null;
+  clear_disable_tcp_connect?: boolean | null;
+  disable_upnp_port_forward?: boolean | null;
+  clear_disable_upnp_port_forward?: boolean | null;
+  socks_proxy_url?: string | null;
+  ipv4_only?: boolean | null;
+  clear_ipv4_only?: boolean | null;
+  bind_device?: string | null;
+  peer_limit?: number | null;
+  clear_peer_limit?: boolean | null;
+  concurrent_init_limit?: number | null;
+  clear_concurrent_init_limit?: boolean | null;
+  peer_connect_timeout_secs?: number | null;
+  clear_peer_connect_timeout_secs?: boolean | null;
+  peer_read_write_timeout_secs?: number | null;
+  clear_peer_read_write_timeout_secs?: boolean | null;
+  blocklist_url?: string | null;
+  allowlist_url?: string | null;
+  fastresume?: boolean | null;
+  clear_fastresume?: boolean | null;
 }
 
 export interface LimitsConfig {
@@ -189,6 +245,8 @@ export interface SessionPreferences {
   auto_organize_folders?: AutoOrganizeFolders;
   incomplete_extension?: string | null;
   completion_actions?: CompletionAction[];
+  /** Live default max peers per newly added torrent. */
+  peer_limit?: number | null;
 }
 
 // Interface for the Torrent Stats API response

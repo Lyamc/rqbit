@@ -41,10 +41,10 @@ export const DownloadsTab: React.FC<DownloadsTabProps> = ({
       </Fieldset>
 
       <p className="text-sm text-tertiary">
-        DHT, connections, persistence, and other server options are configured
-        via{" "}
-        <code className="bg-surface-sunken px-1 rounded text-sm">rqbit</code>{" "}
-        CLI arguments when starting the server.
+        Connection, DHT/LSD/trackers, ports, and proxy settings live under the{" "}
+        <strong className="text-text">Connection</strong> tab (admin.json,
+        restart required). Peer limits and timeouts are under{" "}
+        <strong className="text-text">BitTorrent</strong>.
       </p>
     </div>
   );

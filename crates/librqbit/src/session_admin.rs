@@ -7,7 +7,9 @@ use tracing::{info, warn};
 /// Process/server settings that typically need a restart to apply.
 /// Persisted as `admin.json` next to `preferences.json`.
 ///
-/// Precedence at startup: process environment / CLI flags override these values.
+/// Precedence at startup: process environment variables override these values.
+/// CLI flags that map to the same env keys are already resolved by clap before
+/// we overlay — we only apply admin.json when the corresponding env is unset.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AdminConfig {
     /// e.g. "0.0.0.0:9030". Applied on next process start if env/CLI unset.
@@ -18,26 +20,70 @@ pub struct AdminConfig {
     /// Applied on next process start if `RQBIT_HTTP_BASIC_AUTH_USERPASS` unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub basic_auth_userpass: Option<String>,
+
+    // ---- Connection (restart required) ----
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announce_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_dht: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_dht_persistence: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_lsd: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_trackers: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_utp_listen: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_tcp_listen: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_tcp_connect: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_upnp_port_forward: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socks_proxy_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv4_only: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_device: Option<String>,
+
+    // ---- BitTorrent / peers (mostly restart; peer_limit also in preferences for live) ----
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_limit: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrent_init_limit: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_connect_timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_read_write_timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocklist_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowlist_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fastresume: Option<bool>,
 }
 
 impl AdminConfig {
     pub fn sanitize(mut self) -> Self {
-        if let Some(s) = self.http_api_listen_addr.as_mut() {
-            let t = s.trim().to_owned();
-            if t.is_empty() {
-                self.http_api_listen_addr = None;
-            } else {
-                *s = t;
+        fn trim_opt(v: &mut Option<String>) {
+            if let Some(s) = v {
+                let t = s.trim().to_owned();
+                if t.is_empty() {
+                    *v = None;
+                } else {
+                    *s = t;
+                }
             }
         }
-        if let Some(s) = self.basic_auth_userpass.as_mut() {
-            let t = s.trim().to_owned();
-            if t.is_empty() {
-                self.basic_auth_userpass = None;
-            } else {
-                *s = t;
-            }
-        }
+        trim_opt(&mut self.http_api_listen_addr);
+        trim_opt(&mut self.basic_auth_userpass);
+        trim_opt(&mut self.socks_proxy_url);
+        trim_opt(&mut self.bind_device);
+        trim_opt(&mut self.blocklist_url);
+        trim_opt(&mut self.allowlist_url);
         self
     }
 
@@ -62,6 +108,26 @@ impl AdminConfig {
             basic_auth_enabled: self.basic_auth_enabled(),
             basic_auth_user: user,
             basic_auth_password_set: has_password,
+            listen_port: self.listen_port,
+            announce_port: self.announce_port,
+            disable_dht: self.disable_dht,
+            disable_dht_persistence: self.disable_dht_persistence,
+            disable_lsd: self.disable_lsd,
+            disable_trackers: self.disable_trackers,
+            enable_utp_listen: self.enable_utp_listen,
+            disable_tcp_listen: self.disable_tcp_listen,
+            disable_tcp_connect: self.disable_tcp_connect,
+            disable_upnp_port_forward: self.disable_upnp_port_forward,
+            socks_proxy_url: self.socks_proxy_url.clone(),
+            ipv4_only: self.ipv4_only,
+            bind_device: self.bind_device.clone(),
+            peer_limit: self.peer_limit,
+            concurrent_init_limit: self.concurrent_init_limit,
+            peer_connect_timeout_secs: self.peer_connect_timeout_secs,
+            peer_read_write_timeout_secs: self.peer_read_write_timeout_secs,
+            blocklist_url: self.blocklist_url.clone(),
+            allowlist_url: self.allowlist_url.clone(),
+            fastresume: self.fastresume,
         }
     }
 }
@@ -72,6 +138,26 @@ pub struct AdminConfigPublic {
     pub basic_auth_enabled: bool,
     pub basic_auth_user: Option<String>,
     pub basic_auth_password_set: bool,
+    pub listen_port: Option<u16>,
+    pub announce_port: Option<u16>,
+    pub disable_dht: Option<bool>,
+    pub disable_dht_persistence: Option<bool>,
+    pub disable_lsd: Option<bool>,
+    pub disable_trackers: Option<bool>,
+    pub enable_utp_listen: Option<bool>,
+    pub disable_tcp_listen: Option<bool>,
+    pub disable_tcp_connect: Option<bool>,
+    pub disable_upnp_port_forward: Option<bool>,
+    pub socks_proxy_url: Option<String>,
+    pub ipv4_only: Option<bool>,
+    pub bind_device: Option<String>,
+    pub peer_limit: Option<usize>,
+    pub concurrent_init_limit: Option<usize>,
+    pub peer_connect_timeout_secs: Option<u64>,
+    pub peer_read_write_timeout_secs: Option<u64>,
+    pub blocklist_url: Option<String>,
+    pub allowlist_url: Option<String>,
+    pub fastresume: Option<bool>,
 }
 
 /// PATCH body for admin config. Password is write-only.
@@ -79,14 +165,88 @@ pub struct AdminConfigPublic {
 pub struct AdminConfigUpdate {
     #[serde(default)]
     pub http_api_listen_addr: Option<String>,
-    /// When Some(false), clears auth. When Some(true), expects user (+ optional password).
     #[serde(default)]
     pub basic_auth_enabled: Option<bool>,
     #[serde(default)]
     pub basic_auth_user: Option<String>,
-    /// If None while enabling/keeping auth, preserve existing password.
     #[serde(default)]
     pub basic_auth_password: Option<String>,
+
+    #[serde(default)]
+    pub listen_port: Option<u16>,
+    /// When true, clear listen_port override (use CLI/env default).
+    #[serde(default)]
+    pub clear_listen_port: Option<bool>,
+    #[serde(default)]
+    pub announce_port: Option<u16>,
+    #[serde(default)]
+    pub clear_announce_port: Option<bool>,
+
+    #[serde(default)]
+    pub disable_dht: Option<bool>,
+    #[serde(default)]
+    pub clear_disable_dht: Option<bool>,
+    #[serde(default)]
+    pub disable_dht_persistence: Option<bool>,
+    #[serde(default)]
+    pub clear_disable_dht_persistence: Option<bool>,
+    #[serde(default)]
+    pub disable_lsd: Option<bool>,
+    #[serde(default)]
+    pub clear_disable_lsd: Option<bool>,
+    #[serde(default)]
+    pub disable_trackers: Option<bool>,
+    #[serde(default)]
+    pub clear_disable_trackers: Option<bool>,
+    #[serde(default)]
+    pub enable_utp_listen: Option<bool>,
+    #[serde(default)]
+    pub clear_enable_utp_listen: Option<bool>,
+    #[serde(default)]
+    pub disable_tcp_listen: Option<bool>,
+    #[serde(default)]
+    pub clear_disable_tcp_listen: Option<bool>,
+    #[serde(default)]
+    pub disable_tcp_connect: Option<bool>,
+    #[serde(default)]
+    pub clear_disable_tcp_connect: Option<bool>,
+    #[serde(default)]
+    pub disable_upnp_port_forward: Option<bool>,
+    #[serde(default)]
+    pub clear_disable_upnp_port_forward: Option<bool>,
+    #[serde(default)]
+    pub socks_proxy_url: Option<String>,
+    #[serde(default)]
+    pub ipv4_only: Option<bool>,
+    #[serde(default)]
+    pub clear_ipv4_only: Option<bool>,
+    #[serde(default)]
+    pub bind_device: Option<String>,
+
+    #[serde(default)]
+    pub peer_limit: Option<usize>,
+    #[serde(default)]
+    pub clear_peer_limit: Option<bool>,
+    #[serde(default)]
+    pub concurrent_init_limit: Option<usize>,
+    #[serde(default)]
+    pub clear_concurrent_init_limit: Option<bool>,
+    #[serde(default)]
+    pub peer_connect_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub clear_peer_connect_timeout_secs: Option<bool>,
+    #[serde(default)]
+    pub peer_read_write_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub clear_peer_read_write_timeout_secs: Option<bool>,
+    #[serde(default)]
+    pub blocklist_url: Option<String>,
+    #[serde(default)]
+    pub allowlist_url: Option<String>,
+    #[serde(default)]
+    pub fastresume: Option<bool>,
+    #[serde(default)]
+    pub clear_fastresume: Option<bool>,
 }
 
 pub struct AdminConfigStore {
@@ -118,6 +278,7 @@ impl AdminConfigStore {
             ?path,
             has_listen = config.http_api_listen_addr.is_some(),
             basic_auth = config.basic_auth_enabled(),
+            listen_port = ?config.listen_port,
             "loaded admin config"
         );
         Self {
@@ -192,7 +353,6 @@ impl AdminConfigStore {
                 cfg.basic_auth_userpass = Some(format!("{user}:{pass}"));
             }
             None => {
-                // Allow updating user/password without toggling enabled flag
                 if patch.basic_auth_user.is_some() || patch.basic_auth_password.is_some() {
                     if !cfg.basic_auth_enabled() && patch.basic_auth_password.is_none() {
                         // ignore partial updates when auth disabled
@@ -224,6 +384,94 @@ impl AdminConfigStore {
                 }
             }
         }
+
+        macro_rules! opt_u {
+            ($clear:expr, $set:expr, $field:ident) => {
+                if $clear == Some(true) {
+                    cfg.$field = None;
+                } else if let Some(v) = $set {
+                    cfg.$field = Some(v);
+                }
+            };
+        }
+        macro_rules! opt_bool {
+            ($clear:expr, $set:expr, $field:ident) => {
+                if $clear == Some(true) {
+                    cfg.$field = None;
+                } else if let Some(v) = $set {
+                    cfg.$field = Some(v);
+                }
+            };
+        }
+        macro_rules! opt_str {
+            ($set:expr, $field:ident) => {
+                if let Some(s) = $set {
+                    cfg.$field = if s.trim().is_empty() {
+                        None
+                    } else {
+                        Some(s)
+                    };
+                }
+            };
+        }
+
+        opt_u!(patch.clear_listen_port, patch.listen_port, listen_port);
+        opt_u!(patch.clear_announce_port, patch.announce_port, announce_port);
+        opt_bool!(patch.clear_disable_dht, patch.disable_dht, disable_dht);
+        opt_bool!(
+            patch.clear_disable_dht_persistence,
+            patch.disable_dht_persistence,
+            disable_dht_persistence
+        );
+        opt_bool!(patch.clear_disable_lsd, patch.disable_lsd, disable_lsd);
+        opt_bool!(
+            patch.clear_disable_trackers,
+            patch.disable_trackers,
+            disable_trackers
+        );
+        opt_bool!(
+            patch.clear_enable_utp_listen,
+            patch.enable_utp_listen,
+            enable_utp_listen
+        );
+        opt_bool!(
+            patch.clear_disable_tcp_listen,
+            patch.disable_tcp_listen,
+            disable_tcp_listen
+        );
+        opt_bool!(
+            patch.clear_disable_tcp_connect,
+            patch.disable_tcp_connect,
+            disable_tcp_connect
+        );
+        opt_bool!(
+            patch.clear_disable_upnp_port_forward,
+            patch.disable_upnp_port_forward,
+            disable_upnp_port_forward
+        );
+        opt_str!(patch.socks_proxy_url, socks_proxy_url);
+        opt_bool!(patch.clear_ipv4_only, patch.ipv4_only, ipv4_only);
+        opt_str!(patch.bind_device, bind_device);
+        opt_u!(patch.clear_peer_limit, patch.peer_limit, peer_limit);
+        opt_u!(
+            patch.clear_concurrent_init_limit,
+            patch.concurrent_init_limit,
+            concurrent_init_limit
+        );
+        opt_u!(
+            patch.clear_peer_connect_timeout_secs,
+            patch.peer_connect_timeout_secs,
+            peer_connect_timeout_secs
+        );
+        opt_u!(
+            patch.clear_peer_read_write_timeout_secs,
+            patch.peer_read_write_timeout_secs,
+            peer_read_write_timeout_secs
+        );
+        opt_str!(patch.blocklist_url, blocklist_url);
+        opt_str!(patch.allowlist_url, allowlist_url);
+        opt_bool!(patch.clear_fastresume, patch.fastresume, fastresume);
+
         self.update(cfg.clone()).await?;
         Ok(cfg)
     }

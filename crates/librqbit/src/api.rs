@@ -426,8 +426,9 @@ impl Api {
             persisted: admin.public_view(),
             restart_supported: self.restart_tx.is_some(),
             notes: vec![
-                "Session preferences and rate limits apply immediately and persist to disk.".into(),
-                "HTTP listen address and basic auth from admin.json apply on next process start; environment variables override admin.json.".into(),
+                "Live: rate limits (limits.json), soft-recover, incomplete extension, organize/completion actions, and default peer limit (preferences.json).".into(),
+                "Restart required (admin.json, env overrides file): listen/announce ports, DHT/LSD/trackers, TCP/uTP, SOCKS proxy, UPnP forward, timeouts, block/allow lists, fastresume, HTTP listen/auth.".into(),
+                "Not in engine yet (no fake toggles): protocol encryption, seeding ratio/time limits, download queue / max active, sequential-download default, disk preallocation toggle, PeX disable.".into(),
                 "Process restart exits with code 75 so systemd Restart=on-failure can bring the service back.".into(),
             ],
         }

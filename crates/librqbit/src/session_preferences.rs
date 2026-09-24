@@ -75,6 +75,11 @@ pub struct SessionPreferences {
     /// synthesized from legacy fields + toggles for backward compatibility.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub completion_actions: Vec<CompletionAction>,
+
+    /// Default max connected peers per torrent for newly added torrents.
+    /// Applied live when preferences are saved. None / unset = engine default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_limit: Option<usize>,
 }
 
 impl Default for SessionPreferences {
@@ -89,6 +94,7 @@ impl Default for SessionPreferences {
             auto_organize_folders: AutoOrganizeFolders::default(),
             incomplete_extension: None,
             completion_actions: Vec::new(),
+            peer_limit: None,
         }
     }
 }
