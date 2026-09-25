@@ -289,7 +289,12 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
     index: number,
     opts?: { files?: number[]; scope?: "damaged" | "all" },
   ): Promise<RepairStartResponse> => {
-    return makeRequest("POST", `/torrents/${index}/repair_files`, opts ?? {});
+    return makeRequest(
+      "POST",
+      `/torrents/${index}/repair_files`,
+      opts ?? {},
+      true,
+    );
   },
 
   forget: (index: number): Promise<void> => {
