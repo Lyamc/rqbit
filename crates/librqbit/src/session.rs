@@ -1587,6 +1587,10 @@ impl Session {
             if !job.try_commit(id) {
                 bail!("add cancelled before the torrent was committed");
             }
+            job.set_commit_step(
+                "opening_files",
+                this.spawner.semaphore().available_permits() == 0,
+            );
 
             let span = debug_span!(parent: this.rs(), "torrent", id);
             let peer_opts = this.merge_peer_opts(opts.peer_opts);
@@ -1657,6 +1661,7 @@ impl Session {
             (handle, metadata, id)
         };
 
+        job.set_commit_step("saving", this.spawner.semaphore().available_permits() == 0);
         if let Some(p) = this.persistence.as_ref()
             && let Err(e) = p.store(id, &managed_torrent).await
         {
@@ -1664,6 +1669,7 @@ impl Session {
             return Err(e);
         }
 
+        job.set_commit_step("starting", this.spawner.semaphore().available_permits() == 0);
         let _e = managed_torrent.shared.span.clone().entered();
 
         managed_torrent

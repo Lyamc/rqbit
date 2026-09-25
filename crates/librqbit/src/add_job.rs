@@ -36,8 +36,14 @@ pub enum AddJobStage {
     Adopting,
     /// Waiting for a disk I/O slot (other torrents are being hash-checked).
     WaitingForServer,
-    /// Committed: creating files and persisting. Can no longer be cancelled.
-    Adding { torrent_id: usize },
+    /// Committed: can no longer be cancelled. `step` is opening_files,
+    /// saving or starting; `busy` = all disk I/O slots were taken by other
+    /// torrents (hash checks) when the step began.
+    Adding {
+        torrent_id: usize,
+        step: &'static str,
+        busy: bool,
+    },
     Added { torrent_id: usize },
     AlreadyManaged { torrent_id: usize },
     ListOnly,
@@ -139,9 +145,26 @@ impl AddJob {
             return false;
         }
         g.committed = Some(torrent_id);
-        g.stage = AddJobStage::Adding { torrent_id };
+        g.stage = AddJobStage::Adding {
+            torrent_id,
+            step: "opening_files",
+            busy: false,
+        };
         g.stage_since = Instant::now();
         true
+    }
+
+    /// Report progress within the committed phase.
+    pub fn set_commit_step(&self, step: &'static str, busy: bool) {
+        let mut g = self.inner.lock();
+        if let AddJobStage::Adding { torrent_id, .. } = g.stage {
+            g.stage = AddJobStage::Adding {
+                torrent_id,
+                step,
+                busy,
+            };
+            g.stage_since = Instant::now();
+        }
     }
 
     pub fn cancel(&self, reason: &str) -> AddJobCancelOutcome {

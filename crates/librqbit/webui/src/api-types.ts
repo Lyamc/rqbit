@@ -443,6 +443,10 @@ export interface AddJobStatus {
   job_id?: string | null;
   stage: AddJobStage;
   torrent_id?: number;
+  /** "adding" only: opening_files | saving | starting. */
+  step?: string;
+  /** "adding" only: all disk I/O slots were busy (other torrents checking). */
+  busy?: boolean;
   error?: string;
   reason?: string;
   stage_secs: number;

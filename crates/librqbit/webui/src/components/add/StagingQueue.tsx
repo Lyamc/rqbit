@@ -43,6 +43,9 @@ export type StagingItem = {
   serverStage?: AddJobStage;
   /** Epoch ms when the server entered `serverStage`. */
   stageSince?: number;
+  /** "adding" sub-step and whether the server's disk slots were all busy. */
+  serverStep?: string;
+  serverBusy?: boolean;
   /** Set when the torrent ended up in rqbit (e.g. a cancel came too late). */
   addedTorrentId?: number;
   /** Informational note (not an error). */
@@ -52,7 +55,11 @@ export type StagingItem = {
 };
 
 /** In-flight label from what the server reports it is doing. */
-const stageLabel = (st: AddJobStage | undefined): string => {
+const stageLabel = (
+  st: AddJobStage | undefined,
+  step?: string,
+  busy?: boolean,
+): string => {
   switch (st) {
     case "fetching_torrent":
       return "downloading .torrent…";
@@ -62,8 +69,15 @@ const stageLabel = (st: AddJobStage | undefined): string => {
       return "checking existing files…";
     case "waiting_for_server":
       return "waiting for server (busy checking other torrents)…";
-    case "adding":
-      return "adding (creating files, saving)…";
+    case "adding": {
+      const what =
+        step === "saving"
+          ? "saving"
+          : step === "starting"
+            ? "starting"
+            : "creating files";
+      return `adding: ${what}${busy ? " (server busy checking other torrents)" : ""}…`;
+    }
     case "added":
     case "already_managed":
       return "added, finishing…";
@@ -74,7 +88,9 @@ const stageLabel = (st: AddJobStage | undefined): string => {
 
 const itemLabel = (item: StagingItem) => {
   if (item.status === "running" || item.status === "resolving") {
-    return item.cancelling ? "cancelling…" : stageLabel(item.serverStage);
+    return item.cancelling
+      ? "cancelling…"
+      : stageLabel(item.serverStage, item.serverStep, item.serverBusy);
   }
   return statusLabel(item.status);
 };

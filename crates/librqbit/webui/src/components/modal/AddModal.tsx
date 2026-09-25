@@ -842,6 +842,8 @@ export const AddModal: React.FC<Props> = ({
                   if (inFlightRef.current.get(item.id) !== job) return;
                   setItem(item.id, {
                     serverStage: st.stage,
+                    serverStep: st.step,
+                    serverBusy: st.busy,
                     stageSince: Date.now() - st.stage_secs * 1000,
                   });
                 } catch {
