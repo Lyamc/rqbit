@@ -5,7 +5,9 @@ import { statusClass, statusDetailOf } from "../helper/status";
 export const StatusBadge: React.FC<{
   stats?: TorrentStats | null;
   className?: string;
-}> = ({ stats, className = "" }) => {
+  /** Drop the "(#n)" suffix (e.g. in the table, which has a "#" column). */
+  compact?: boolean;
+}> = ({ stats, className = "", compact = false }) => {
   const d = statusDetailOf(stats);
   if (!d) return null;
   const tip = [
@@ -22,7 +24,7 @@ export const StatusBadge: React.FC<{
       data-testid="status-badge"
       data-status={d.kind}
     >
-      {d.label}
+      {compact ? d.label.replace(/ \(#\d+\)$/, "") : d.label}
     </span>
   );
 };

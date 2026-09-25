@@ -124,7 +124,7 @@ const TorrentTableRowUnmemoized: React.FC<TorrentTableRowProps> = ({
         )}
       </div>
       <div role="gridcell" className={cellBase}>
-        <StatusBadge stats={stats} />
+        <StatusBadge stats={stats} compact />
       </div>
       <div role="gridcell" className={numericCell}>
         {formatBytes(totalBytes)}
