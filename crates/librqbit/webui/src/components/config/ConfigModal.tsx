@@ -28,6 +28,7 @@ export interface ConfigModalProps {
 const defaultPreferences = (): SessionPreferences => ({
   soft_recover_on_io_error: false,
   auto_repair_damaged_files: false,
+  event_log_max_mb: 10,
   recovery_backoff_base_secs: 60,
   recovery_backoff_cap_secs: 21600,
   recovery_max_attempts: 8,

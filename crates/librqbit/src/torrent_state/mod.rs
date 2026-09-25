@@ -211,6 +211,73 @@ pub struct ManagedTorrentShared {
 }
 
 impl ManagedTorrentShared {
+    pub(crate) fn torrent_ref(&self, name: Option<String>) -> crate::event_log::TorrentRef {
+        crate::event_log::TorrentRef {
+            id: Some(self.id),
+            info_hash: self.info_hash.as_string(),
+            name,
+        }
+    }
+
+    /// Append to the session event log (no-op when the session is gone).
+    pub(crate) fn emit_event(&self, ev: crate::event_log::NewEvent) {
+        if let Some(s) = self.session.upgrade() {
+            s.events.emit(ev);
+        }
+    }
+
+    pub(crate) fn event_log(&self) -> Option<Arc<crate::event_log::EventLog>> {
+        self.session.upgrade().map(|s| s.events.clone())
+    }
+
+    /// A read error while checking files (fastresume validation / full check). On EIO the
+    /// file is marked damaged, so automatic repair (when enabled) can fix it once the
+    /// torrent is running.
+    pub(crate) fn note_check_read_error(
+        &self,
+        file_id: usize,
+        piece: u32,
+        e: &anyhow::Error,
+        name: Option<String>,
+        relative: Option<PathBuf>,
+    ) {
+        use crate::event_log::{NewEvent, Severity, kind};
+        let eio = crate::repair::anyhow_is_eio(e);
+        let msg = format!("{e:#}");
+        let newly = self.damage.record_failure(Some(file_id), piece, eio, &msg);
+        if !newly {
+            return;
+        }
+        let path = self
+            .file_rename(file_id)
+            .or(relative)
+            .map(|p| self.output_folder().join(p).to_string_lossy().into_owned());
+        warn!(
+            id = self.id,
+            info_hash = ?self.info_hash,
+            file_id,
+            piece,
+            "file marked as damaged: unreadable data found while checking files: {msg}"
+        );
+        self.emit_event(
+            NewEvent::new(
+                kind::DAMAGE_DETECTED,
+                Severity::Warning,
+                format!(
+                    "Unreadable data found while checking files (file {file_id}); marked damaged"
+                ),
+            )
+            .torrent(self.torrent_ref(name))
+            .file(Some(file_id), path)
+            .details(serde_json::json!({
+                "source": "check",
+                "piece": piece,
+                "eio": eio,
+                "error": msg,
+            })),
+        );
+    }
+
     pub(crate) fn client_name_and_version(&self) -> &str {
         &self.client_name_and_version
     }
@@ -442,6 +509,15 @@ impl ManagedTorrent {
 
         self.state_change_notify.notify_waiters();
 
+        self.shared.emit_event(
+            crate::event_log::NewEvent::new(
+                crate::event_log::kind::TORRENT_ERROR,
+                crate::event_log::Severity::Error,
+                format!("Torrent stopped with an error: {error:#}"),
+            )
+            .torrent(self.shared.torrent_ref(self.name())),
+        );
+
         g.state = ManagedTorrentState::Error(error)
     }
 
@@ -651,6 +727,7 @@ impl ManagedTorrent {
             damage: None,
             status_detail: None,
             queue_position: None,
+            repair_count: None,
         };
         use crate::torrent_status as ts;
         let mut engine = ts::EngineState::Error;
@@ -734,11 +811,14 @@ impl ManagedTorrent {
                 .unwrap_or_else(|| format!("file {file_id}"))
         });
 
-        resp.queue_position = self
-            .shared
-            .session
-            .upgrade()
+        let session = self.shared.session.upgrade();
+        resp.queue_position = session
+            .as_ref()
             .and_then(|s| s.queue.position(&self.shared.info_hash));
+        resp.repair_count = session
+            .as_ref()
+            .map(|s| s.events.repair_count(&self.shared.info_hash.as_string()))
+            .filter(|c| *c > 0);
         let _ = user_paused;
         let damage = resp.damage.as_ref();
         let repair = damage

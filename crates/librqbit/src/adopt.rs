@@ -95,6 +95,9 @@ pub struct AdoptSummary {
     pub ambiguous: Vec<String>,
     pub rejected: Vec<String>,
     pub skipped_target_exists: Vec<String>,
+    /// (from, to, evidence) of each rename done, for the event log.
+    #[serde(skip)]
+    pub renames: Vec<(PathBuf, PathBuf, serde_json::Value)>,
 }
 
 fn with_suffix(p: &Path, suffix: &str) -> PathBuf {
@@ -453,6 +456,11 @@ pub(crate) fn apply_adoption(
         std::fs::rename(&r.from, &r.to)
             .with_context(|| format!("error renaming {:?} to {:?}", r.from, r.to))?;
         info!(from = ?r.from, to = ?r.to, evidence = ?r.evidence, info_hash, "adopt: renamed partial file");
+        summary.renames.push((
+            r.from.clone(),
+            r.to.clone(),
+            serde_json::to_value(&r.evidence).unwrap_or_default(),
+        ));
         if let Some(lp) = log_path {
             let line = LogLine {
                 ts: rfc3339_now(),

@@ -2,6 +2,7 @@ mod admin;
 mod fs;
 mod configure;
 mod dht;
+mod events;
 mod logging;
 mod other;
 mod playlist;
@@ -118,6 +119,8 @@ pub fn make_api_router(state: ApiState) -> Router {
             get(configure::h_get_session_preferences),
         )
         .route("/add_jobs/{job_id}", get(torrents::h_add_job_status))
+        .route("/events", get(events::h_events))
+        .route("/events/summary", get(events::h_events_summary))
         .route("/admin", get(admin::h_admin_status))
         .route("/fs/roots", get(fs::h_fs_roots))
         .route("/fs/list", get(fs::h_fs_list));
@@ -140,6 +143,10 @@ pub fn make_api_router(state: ApiState) -> Router {
                 post(admin::h_admin_reload_preferences),
             )
             .route("/admin/config", post(admin::h_admin_update_config))
+            .route(
+                "/events/counters/reset",
+                post(events::h_events_counters_reset),
+            )
             .route("/admin/restart", post(admin::h_admin_restart))
             .route(
                 "/torrents/{id}/pause",

@@ -52,6 +52,7 @@ mod error;
 pub mod file_info;
 mod file_ops;
 mod adopt;
+pub mod event_log;
 pub mod repair;
 pub mod torrent_queue;
 pub mod torrent_status;

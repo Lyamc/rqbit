@@ -98,6 +98,7 @@ impl<'a> FileOps<'a> {
         &self,
         progress: &AtomicU64,
         pause_requested: &AtomicBool,
+        on_read_error: &mut dyn FnMut(usize, ValidPieceIndex, &anyhow::Error),
     ) -> anyhow::Result<BF> {
         let mut have_pieces =
             BF::from_boxed_slice(vec![0u8; self.torrent.lengths().piece_bitfield_bytes()].into());
@@ -181,6 +182,7 @@ impl<'a> FileOps<'a> {
                         "error reading from file {} ({:?}) at {}: {:#}",
                         current_file.index, current_file.fi.relative_filename, pos, &err
                     );
+                    on_read_error(current_file.index, piece_info.piece_index, &err);
                     current_file.is_broken = true;
                     some_files_broken = true;
                 }

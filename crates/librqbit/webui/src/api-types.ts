@@ -242,6 +242,8 @@ export interface SessionPreferences {
   recovery_backoff_cap_secs?: number;
   /** Stop automatic recovery after this many consecutive failures. */
   recovery_max_attempts?: number;
+  /** Total size cap of the event log in MiB (default 10). */
+  event_log_max_mb?: number;
   /** Queueing (active limits). Off by default. */
   queueing_enabled?: boolean;
   queue_max_active_downloads?: number | null;
@@ -432,6 +434,8 @@ export interface TorrentStats {
   status_detail?: StatusDetail;
   /** 1-based queue position. */
   queue_position?: number;
+  /** Repair runs on this torrent since the counters were reset. */
+  repair_count?: number;
 }
 
 /** Client-side request options (not sent to the server). */
@@ -651,6 +655,10 @@ export interface RqbitAPI {
     ids: number[],
     action: QueueMoveAction,
   ) => Promise<{ order: number[] }>;
+  /** Event log (repairs, recovery failures, I/O errors). */
+  getEvents?: (q: EventQuery) => Promise<EventPage>;
+  getEventsSummary?: (sinceSeq?: number) => Promise<EventSummary>;
+  resetEventCounters?: () => Promise<RepairCounters>;
   /** Scan the torrent's files for unreadable ranges and repair them (background job). */
   repairFiles?: (
     index: number,
@@ -667,4 +675,64 @@ export interface RqbitAPI {
   updateAdminConfig: (patch: AdminConfigUpdate) => Promise<AdminConfigPublic>;
   reloadPreferences: () => Promise<SessionPreferences>;
   restartProcess: () => Promise<void>;
+}
+
+export type EventSeverity = "info" | "warning" | "error";
+
+export interface EventRecord {
+  seq: number;
+  time: string;
+  kind: string;
+  severity: EventSeverity;
+  torrent_id?: number;
+  info_hash?: string;
+  torrent_name?: string;
+  file_id?: number;
+  path?: string;
+  message: string;
+  /** Occurrences this record stands for (aggregated errors); 1 when omitted. */
+  count?: number;
+  details?: any;
+}
+
+export interface EventQuery {
+  kind?: string;
+  torrent_id?: number;
+  info_hash?: string;
+  severity?: EventSeverity;
+  since?: string;
+  since_seq?: number;
+  before_seq?: number;
+  limit?: number;
+}
+
+export interface EventPage {
+  events: EventRecord[];
+  next_before_seq: number | null;
+  latest_seq: number;
+}
+
+export interface RepairCounters {
+  since: string;
+  auto_repairs: number;
+  manual_repairs: number;
+  repair_failures: number;
+  files_repaired: number;
+  bytes_unreadable: number;
+  bytes_zeroed: number;
+  bytes_redownload: number;
+  pieces_requeued: number;
+  give_ups: number;
+  piece_retries: number;
+  io_errors: number;
+  per_torrent: Record<string, number>;
+}
+
+export interface EventSummary {
+  counters: RepairCounters;
+  latest_seq: number;
+  unseen: { repairs: number; errors: number; warnings: number; total: number };
+  log_bytes: number;
+  log_cap_bytes: number;
+  log_segments: number;
 }

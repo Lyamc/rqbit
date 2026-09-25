@@ -58,6 +58,11 @@ pub struct SessionPreferences {
     #[serde(default = "default_recovery_max_attempts")]
     pub recovery_max_attempts: u32,
 
+    /// Total size cap of the event log (events.jsonl + rotated segments), in MiB.
+    /// Oldest segments are deleted to stay under it. Clamped to 1..=1024.
+    #[serde(default = "default_event_log_max_mb")]
+    pub event_log_max_mb: u64,
+
     /// Queueing (qBittorrent-style active limits). **Off by default** (no limits).
     #[serde(default)]
     pub queueing_enabled: bool,
@@ -128,6 +133,9 @@ fn default_recovery_backoff_cap_secs() -> u64 {
 fn default_recovery_max_attempts() -> u32 {
     8
 }
+fn default_event_log_max_mb() -> u64 {
+    10
+}
 
 impl Default for SessionPreferences {
     fn default() -> Self {
@@ -137,6 +145,7 @@ impl Default for SessionPreferences {
             recovery_backoff_base_secs: default_recovery_backoff_base_secs(),
             recovery_backoff_cap_secs: default_recovery_backoff_cap_secs(),
             recovery_max_attempts: default_recovery_max_attempts(),
+            event_log_max_mb: default_event_log_max_mb(),
             queueing_enabled: false,
             queue_max_active_downloads: None,
             queue_max_active_uploads: None,
@@ -273,6 +282,11 @@ impl SessionPreferencesStore {
         self.prefs.read().auto_repair_damaged_files
     }
 
+    /// Event log size cap in bytes.
+    pub fn event_log_max_bytes(&self) -> u64 {
+        event_log_cap_bytes(self.prefs.read().event_log_max_mb)
+    }
+
     /// Queue limits, or None when queueing is off.
     pub fn queue_limits(&self) -> Option<crate::torrent_queue::QueueLimits> {
         let p = self.prefs.read();
@@ -353,6 +367,10 @@ impl SessionPreferencesStore {
         info!(path=?self.path, "reloaded session preferences from disk");
         Ok(prefs)
     }
+}
+
+pub fn event_log_cap_bytes(mb: u64) -> u64 {
+    crate::event_log::clamp_cap(mb.clamp(1, 1024) * 1024 * 1024)
 }
 
 /// Build incomplete-extension renames for newly added torrents.

@@ -70,6 +70,18 @@ export const DownloadsTab: React.FC<DownloadsTabProps> = ({
               onChange({ recovery_max_attempts: Math.floor(v) });
           }}
         />
+        <FormInput
+          name="event_log_max_mb"
+          label="Event log size limit (MB)"
+          inputType="number"
+          value={(preferences.event_log_max_mb ?? 10).toString()}
+          help="Repairs, recovery failures and (rate-limited) I/O errors are kept in events.jsonl next to preferences.json, rotated so all segments together never exceed this size; the oldest events are dropped first. 1–1024, default 10."
+          onChange={(e) => {
+            const v = e.target.valueAsNumber;
+            if (!isNaN(v) && v >= 1 && v <= 1024)
+              onChange({ event_log_max_mb: Math.floor(v) });
+          }}
+        />
       </Fieldset>
 
       <Fieldset label="Incomplete files">

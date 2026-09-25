@@ -698,18 +698,61 @@ impl TorrentStateLive {
     }
     /// Record a disk I/O failure: marks the file "damaged" on EIO (or when the same piece
     /// keeps failing) and, if enabled, starts an automatic repair.
-    pub(crate) fn note_io_failure(&self, e: &anyhow::Error, piece: ValidPieceIndex) {
+    pub(crate) fn note_io_failure(&self, e: &anyhow::Error, piece: ValidPieceIndex, op: &str) {
+        use crate::event_log::{AggKey, NewEvent, Severity, kind};
         let file_id = e
             .downcast_ref::<crate::file_ops::FileIoError>()
             .map(|c| c.file_id);
         let eio = crate::repair::anyhow_is_eio(e);
+        let msg = format!("{e:#}");
         let newly = self
             .shared
             .damage
-            .record_failure(file_id, piece.get(), eio, &format!("{e:#}"));
+            .record_failure(file_id, piece.get(), eio, &msg);
+        let path = file_id.map(|f| self.file_full_path(f));
+        if let Some(log) = self.shared.event_log() {
+            // Aggregated per (torrent, file, op, error) per minute.
+            let root = e.root_cause().to_string();
+            let fname = path
+                .as_deref()
+                .and_then(|p| std::path::Path::new(p).file_name())
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "unknown file".to_owned());
+            log.io_error(
+                AggKey {
+                    torrent: Some(self.shared.info_hash.as_string()),
+                    file_id,
+                    op: op.to_owned(),
+                    error: root.clone(),
+                },
+                NewEvent::new(
+                    kind::IO_ERROR,
+                    Severity::Error,
+                    format!("I/O {op} error on {fname}: {root}"),
+                )
+                .torrent(self.torrent_ref())
+                .file(file_id, path.clone())
+                .details(serde_json::json!({
+                    "op": op,
+                    "piece": piece.get(),
+                    "eio": eio,
+                    "error": msg,
+                })),
+            );
+        }
         if !newly {
             return;
         }
+        self.shared.emit_event(
+            NewEvent::new(
+                kind::DAMAGE_DETECTED,
+                Severity::Warning,
+                format!("File marked damaged after an I/O {op} error"),
+            )
+            .torrent(self.torrent_ref())
+            .file(file_id, path)
+            .details(serde_json::json!({"source": op, "piece": piece.get(), "eio": eio, "error": msg})),
+        );
         warn!(
             id = self.shared.id,
             info_hash = ?self.shared.info_hash,
@@ -719,6 +762,24 @@ impl TorrentStateLive {
             "file marked as damaged (unreadable/unwritable data); use \"Repair damaged files\""
         );
         self.spawn_auto_repair_if_enabled();
+    }
+
+    fn torrent_ref(&self) -> crate::event_log::TorrentRef {
+        self.shared
+            .torrent_ref(self.metadata.info.name().map(|n| n.into_owned()))
+    }
+
+    fn file_full_path(&self, file_id: usize) -> String {
+        let rel = self.shared.file_rename(file_id).or_else(|| {
+            self.metadata
+                .file_infos
+                .get(file_id)
+                .map(|fi| fi.relative_filename.clone())
+        });
+        match rel {
+            Some(r) => self.shared.output_folder().join(r).to_string_lossy().into_owned(),
+            None => format!("file {file_id}"),
+        }
     }
 
     fn soft_recover_enabled(&self) -> bool {
@@ -777,6 +838,7 @@ impl TorrentStateLive {
             let mut g = self.lock_write("soft_recover_io");
             g.get_pieces_mut()?.defer_piece(piece);
         }
+        self.log_recovery_decision(piece, e, op, &decision, attempts, cfg.max_attempts);
         match decision {
             crate::repair::BackoffDecision::RetryAfter(d) => warn!(
                 id = self.shared.id,
@@ -798,6 +860,74 @@ impl TorrentStateLive {
             ),
         }
         Ok(())
+    }
+
+    fn log_recovery_decision(
+        &self,
+        piece: ValidPieceIndex,
+        e: &anyhow::Error,
+        op: &str,
+        decision: &crate::repair::BackoffDecision,
+        attempts: u32,
+        max_attempts: u32,
+    ) {
+        use crate::event_log::{AggKey, NewEvent, Severity, kind};
+        let Some(log) = self.shared.event_log() else {
+            return;
+        };
+        let file_id = e
+            .downcast_ref::<crate::file_ops::FileIoError>()
+            .map(|c| c.file_id);
+        let path = file_id.map(|f| self.file_full_path(f));
+        let root = e.root_cause().to_string();
+        let (k, sev, message, retry_in) = match decision {
+            crate::repair::BackoffDecision::RetryAfter(d) => {
+                log.record_piece_retry();
+                (
+                    kind::PIECE_RETRY,
+                    Severity::Warning,
+                    format!(
+                        "Piece {} held back after I/O {op} error; retry {attempts}/{max_attempts} in {}s",
+                        piece.get(),
+                        d.as_secs()
+                    ),
+                    Some(d.as_secs()),
+                )
+            }
+            crate::repair::BackoffDecision::GiveUp => {
+                log.record_give_up();
+                (
+                    kind::NEEDS_ATTENTION,
+                    Severity::Error,
+                    format!(
+                        "Gave up automatic retries for piece {} after {attempts} I/O {op} errors (needs attention: use Fix errors)",
+                        piece.get()
+                    ),
+                    None,
+                )
+            }
+        };
+        // Soft piece recovery failures are aggregated like I/O errors (storms).
+        let ev = NewEvent::new(k, sev, message)
+            .torrent(self.torrent_ref())
+            .file(file_id, path)
+            .details(serde_json::json!({
+                "op": op,
+                "piece": piece.get(),
+                "attempt": attempts,
+                "max_attempts": max_attempts,
+                "retry_in_secs": retry_in,
+                "error": format!("{e:#}"),
+            }));
+        log.aggregated(
+            AggKey {
+                torrent: Some(self.shared.info_hash.as_string()),
+                file_id,
+                op: format!("{k}:{op}"),
+                error: root,
+            },
+            ev,
+        );
     }
 
     /// Put pieces whose backoff elapsed back into the download queue.
@@ -2041,7 +2171,7 @@ impl PeerHandler {
                 match state.file_ops().write_chunk(addr, piece, chunk_info) {
                     Ok(()) => {}
                     Err(e) => {
-                        state.note_io_failure(&e, chunk_info.piece_index);
+                        state.note_io_failure(&e, chunk_info.piece_index, "write");
                         if state.soft_recover_enabled() {
                             state.soft_recover_piece(chunk_info.piece_index, &e, "write")?;
                             // Drop this peer/chunk path without fatally erroring the torrent.
@@ -2098,7 +2228,7 @@ impl PeerHandler {
             let check_result = match state.file_ops().check_piece(chunk_info.piece_index) {
                 Ok(r) => r,
                 Err(e) => {
-                    state.note_io_failure(&e, chunk_info.piece_index);
+                    state.note_io_failure(&e, chunk_info.piece_index, "read");
                     if state.soft_recover_enabled() {
                         state.soft_recover_piece(chunk_info.piece_index, &e, "read")?;
                     }

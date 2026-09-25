@@ -149,6 +149,8 @@ pub struct Session {
     pub preferences: SessionPreferencesStore,
     /// Queueing (active torrent limits) and persisted queue order.
     pub(crate) queue: Arc<crate::torrent_queue::TorrentQueue>,
+    /// Rolling event log (repairs, recovery failures, I/O errors) + repair counters.
+    pub(crate) events: Arc<crate::event_log::EventLog>,
 
     /// Admin/server settings (persisted as admin.json). Restart often required.
     pub admin: AdminConfigStore,
@@ -862,6 +864,20 @@ impl Session {
                     .map(|p| p.join("queue.json"))
                     .unwrap_or_else(|| PathBuf::from("queue.json")),
             ));
+            let events = {
+                let dir = preferences_path
+                    .parent()
+                    .map(|p| p.to_owned())
+                    .unwrap_or_else(|| PathBuf::from("."));
+                let cap = preferences.event_log_max_bytes();
+                Arc::new(
+                    tokio::task::spawn_blocking(move || {
+                        crate::event_log::EventLog::open(&dir, cap)
+                    })
+                    .await
+                    .context("event log open task panicked")?,
+                )
+            };
             let limits_path = preferences_path
                 .parent()
                 .map(|p| p.join("limits.json"))
@@ -899,6 +915,7 @@ impl Session {
                 add_jobs: AddJobs::default(),
                 preferences,
                 queue,
+                events,
                 admin,
                 limits_path,
                 ipv4_only: opts.ipv4_only,
@@ -913,6 +930,24 @@ impl Session {
                 allowlist,
                 lsd,
             });
+
+            // Event log: close I/O-error aggregation windows, persist counters.
+            session.spawn(
+                debug_span!(parent: session.rs(), "event_log_tick"),
+                "event_log_tick",
+                {
+                    let events = session.events.clone();
+                    async move {
+                        loop {
+                            tokio::time::sleep(Duration::from_secs(15)).await;
+                            let ev = events.clone();
+                            let _ = tokio::task::spawn_blocking(move || ev.tick()).await;
+                        }
+                        #[allow(unreachable_code)]
+                        Ok::<_, anyhow::Error>(())
+                    }
+                },
+            );
 
             if let Some(mut listen) = listen_result {
                 if let Some(tcp) = listen.tcp_socket.take() {
@@ -1501,7 +1536,7 @@ impl Session {
                     .collect();
                 let ext = self.preferences.incomplete_extension();
                 let lengths = metadata.info.lengths();
-                let log_path = self.preferences_path().parent().map(|d| d.join("adopt-log.jsonl"));
+                let log_path: Option<PathBuf> = None;
                 let info_hash_str = info_hash.as_string();
                 let torrent_name = metadata.info.name().map(|n| n.to_string());
                 let (keep, summary) = self.spawner.block_in_place(|| {
@@ -1526,6 +1561,32 @@ impl Session {
                         torrent_name.as_deref(),
                     )
                 })?;
+                for (from, to, evidence) in &summary.renames {
+                    let fname = |p: &Path| {
+                        p.file_name()
+                            .map(|f| f.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    };
+                    self.events.emit(
+                        crate::event_log::NewEvent::new(
+                            crate::event_log::kind::ADOPTION,
+                            crate::event_log::Severity::Info,
+                            format!("Adopted partial file {} → {}", fname(from), fname(to)),
+                        )
+                        .torrent(crate::event_log::TorrentRef {
+                            id: None,
+                            info_hash: info_hash_str.clone(),
+                            name: torrent_name.clone(),
+                        })
+                        .file(None, Some(to.to_string_lossy().into_owned()))
+                        .details(serde_json::json!({
+                            "from": from,
+                            "to": to,
+                            "output_folder": output_folder,
+                            "evidence": evidence,
+                        })),
+                    );
+                }
                 job.set_adopt_summary(summary);
                 adopted_keep_final = keep;
             }
@@ -1911,13 +1972,19 @@ impl Session {
 
     pub async fn update_preferences(&self, prefs: SessionPreferences) -> anyhow::Result<()> {
         self.set_session_peer_limit(prefs.peer_limit);
-        self.preferences.update(prefs).await
+        let cap = crate::session_preferences::event_log_cap_bytes(prefs.event_log_max_mb);
+        self.preferences.update(prefs).await?;
+        let events = self.events.clone();
+        let _ = tokio::task::spawn_blocking(move || events.set_cap(cap)).await;
+        Ok(())
     }
 
 
     pub async fn reload_preferences(&self) -> anyhow::Result<SessionPreferences> {
         let prefs = self.preferences.reload_from_disk().await?;
         self.set_session_peer_limit(prefs.peer_limit);
+        self.events
+            .set_cap(crate::session_preferences::event_log_cap_bytes(prefs.event_log_max_mb));
         Ok(prefs)
     }
 

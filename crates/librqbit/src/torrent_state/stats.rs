@@ -91,6 +91,9 @@ pub struct TorrentStats {
     /// 1-based queue position (queueing order; persisted).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queue_position: Option<usize>,
+    /// Repair runs on this torrent since the counters were last reset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repair_count: Option<u64>,
 }
 
 impl std::fmt::Display for TorrentStats {
@@ -167,6 +170,7 @@ mod tests {
             damage: None,
             status_detail: None,
             queue_position: None,
+            repair_count: None,
         }
     }
 

@@ -20,6 +20,10 @@ import {
   FsListResponse,
   ExtractResponse,
   QueueMoveAction,
+  EventQuery,
+  EventPage,
+  EventSummary,
+  RepairCounters,
 } from "./api-types";
 
 // Define API URL and base path
@@ -288,6 +292,26 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
 
   fixErrors: (index: number): Promise<void> => {
     return makeRequest("POST", `/torrents/${index}/fix_errors`);
+  },
+
+  getEvents: (q: EventQuery): Promise<EventPage> => {
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(q)) {
+      if (v !== undefined && v !== null && v !== "") params.set(k, String(v));
+    }
+    const qs = params.toString();
+    return makeRequest("GET", `/events${qs ? "?" + qs : ""}`);
+  },
+
+  getEventsSummary: (sinceSeq?: number): Promise<EventSummary> => {
+    return makeRequest(
+      "GET",
+      `/events/summary${sinceSeq !== undefined ? `?since_seq=${sinceSeq}` : ""}`,
+    );
+  },
+
+  resetEventCounters: (): Promise<RepairCounters> => {
+    return makeRequest("POST", "/events/counters/reset");
   },
 
   repairFiles: (

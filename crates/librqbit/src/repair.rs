@@ -1111,6 +1111,19 @@ impl DamageTracker {
         files
     }
 
+    /// Of `files`, those still damaged whose automatic repairs were given up.
+    pub fn auto_repair_given_up(&self, files: &[usize]) -> Vec<usize> {
+        let g = self.inner.lock();
+        files
+            .iter()
+            .copied()
+            .filter(|f| {
+                g.files.contains_key(f)
+                    && g.file_backoff.get(*f).map(|e| e.gave_up).unwrap_or(false)
+            })
+            .collect()
+    }
+
     /// Whether some damaged file could be auto-repaired now.
     pub fn auto_repair_due(&self) -> bool {
         let g = self.inner.lock();
@@ -1329,37 +1342,63 @@ pub struct RepairStartResponse {
     pub total_bytes: u64,
 }
 
-#[derive(Serialize)]
-struct RepairLogRecord<'a> {
-    time: String,
-    torrent_id: usize,
-    info_hash: String,
-    file_id: usize,
-    path: String,
-    bytes_total: u64,
-    bytes_unreadable: u64,
-    bytes_zeroed: u64,
-    ranges_zeroed: &'a [[u64; 2]],
-    pieces_affected: &'a [u32],
-    method: RepairMethod,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    note: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<&'a str>,
-}
-
-fn append_log(path: &Path, line: &impl Serialize) -> anyhow::Result<()> {
-    use std::io::Write;
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .with_context(|| format!("open {path:?}"))?;
-    let mut s = serde_json::to_string(line)?;
-    s.push('\n');
-    f.write_all(s.as_bytes())?;
-    f.sync_data()?;
-    Ok(())
+fn file_repair_event(
+    tref: &crate::event_log::TorrentRef,
+    full: &Path,
+    o: &FileRepairOutcome,
+    auto: bool,
+) -> crate::event_log::NewEvent {
+    use crate::event_log::{NewEvent, Severity, kind};
+    use size_format::SizeFormatterBinary as SF;
+    let fname = full
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let method = serde_json::to_value(o.method)
+        .ok()
+        .and_then(|v| v.as_str().map(|s| s.to_owned()))
+        .unwrap_or_default();
+    let (sev, msg) = match o.method {
+        RepairMethod::Failed => (
+            Severity::Error,
+            format!(
+                "Repair failed for {fname}: {}",
+                o.error.as_deref().unwrap_or("unknown error")
+            ),
+        ),
+        RepairMethod::None => (
+            Severity::Info,
+            format!(
+                "{fname}: nothing repaired{}",
+                o.error.as_deref().map(|e| format!(" ({e})")).unwrap_or_default()
+            ),
+        ),
+        _ => (
+            Severity::Warning,
+            format!(
+                "Repaired {fname} ({method}): {} unreadable in {} range(s), {} piece(s) to re-download",
+                SF::new(o.bytes_unreadable),
+                o.ranges_zeroed.len(),
+                o.pieces.len()
+            ),
+        ),
+    };
+    NewEvent::new(kind::REPAIR_FILE, sev, msg)
+        .torrent(tref.clone())
+        .file(Some(o.file_id), Some(full.to_string_lossy().into_owned()))
+        .details(serde_json::json!({
+            "auto": auto,
+            "method": method,
+            "bytes_total": o.bytes_total,
+            "bytes_unreadable": o.bytes_unreadable,
+            "bytes_zeroed": o.bytes_zeroed,
+            "ranges_count": o.ranges_zeroed.len(),
+            "ranges_zeroed": o.ranges_zeroed.iter().take(200).collect::<Vec<_>>(),
+            "pieces_count": o.pieces.len(),
+            "pieces_affected": o.pieces.iter().take(500).collect::<Vec<_>>(),
+            "note": o.note,
+            "error": o.error,
+        }))
 }
 
 /// Held-back pieces (waiting for an I/O-error backoff) to requeue after a repair.
@@ -1452,7 +1491,13 @@ impl Session {
                     None
                 };
                 h.shared.damage.set_waiting_for_slot(false);
-                let r = session.run_repair(&h, metadata, files, held).await;
+                let started = std::time::Instant::now();
+                let piece_len = metadata.lengths().default_piece_length() as u64;
+                let tref = h.shared.torrent_ref(h.name());
+                let run_files = files.clone();
+                let r = session.run_repair(&h, metadata, files, held, auto).await;
+                let duration = started.elapsed();
+                session.log_repair_run(&h, tref, auto, &r, duration, piece_len, &run_files);
                 match r {
                     Ok(s) => {
                         info!(
@@ -1507,12 +1552,149 @@ impl Session {
         }
     }
 
+    /// Event log + counters for a finished repair run.
+    #[allow(clippy::too_many_arguments)]
+    fn log_repair_run(
+        &self,
+        handle: &ManagedTorrentHandle,
+        tref: crate::event_log::TorrentRef,
+        auto: bool,
+        r: &anyhow::Result<RepairSummary>,
+        duration: Duration,
+        piece_len: u64,
+        files: &[usize],
+    ) {
+        use crate::event_log::{NewEvent, RepairRunStats, Severity, kind};
+        use size_format::SizeFormatterBinary as SF;
+        let who = if auto { "Automatic" } else { "Manual" };
+        let secs = duration.as_secs_f64();
+        let ih = tref.info_hash.clone();
+        match r {
+            Ok(s) => {
+                let sev = if s.files_failed > 0 {
+                    Severity::Error
+                } else if s.files_repaired > 0 {
+                    Severity::Warning
+                } else {
+                    Severity::Info
+                };
+                let msg = if s.files_repaired == 0 && s.files_failed == 0 {
+                    format!(
+                        "{who} repair: {} file(s) scanned, nothing unreadable ({secs:.1}s)",
+                        s.files_scanned
+                    )
+                } else {
+                    format!(
+                        "{who} repair: {} file(s) repaired{}, {} unreadable, {} piece(s) to re-download ({secs:.1}s)",
+                        s.files_repaired,
+                        if s.files_failed > 0 {
+                            format!(", {} failed", s.files_failed)
+                        } else {
+                            String::new()
+                        },
+                        SF::new(s.bytes_unreadable),
+                        s.pieces_to_redownload
+                    )
+                };
+                let file_summaries: Vec<serde_json::Value> = s
+                    .files
+                    .iter()
+                    .map(|o| {
+                        serde_json::json!({
+                            "file_id": o.file_id,
+                            "path": o.path,
+                            "method": o.method,
+                            "bytes_unreadable": o.bytes_unreadable,
+                            "bytes_zeroed": o.bytes_zeroed,
+                            "ranges": o.ranges_zeroed.len(),
+                            "pieces": o.pieces.len(),
+                            "error": o.error,
+                        })
+                    })
+                    .collect();
+                self.events.emit(
+                    NewEvent::new(kind::REPAIR_RUN, sev, msg)
+                        .torrent(tref)
+                        .details(serde_json::json!({
+                            "auto": auto,
+                            "result": if s.files_failed > 0 { "partial" } else { "ok" },
+                            "duration_secs": (secs * 10.0).round() / 10.0,
+                            "files_requested": files.len(),
+                            "files_scanned": s.files_scanned,
+                            "files_repaired": s.files_repaired,
+                            "files_failed": s.files_failed,
+                            "bytes_unreadable": s.bytes_unreadable,
+                            "bytes_zeroed": s.bytes_zeroed,
+                            "pieces_requeued": s.pieces_to_redownload,
+                            "pieces_invalidated": s.pieces_invalidated,
+                            "files": file_summaries,
+                        })),
+                );
+                self.events.record_repair_run(
+                    &ih,
+                    &RepairRunStats {
+                        auto,
+                        failed: s.files_failed > 0,
+                        files_repaired: s.files_repaired as u64,
+                        bytes_unreadable: s.bytes_unreadable,
+                        bytes_zeroed: s.bytes_zeroed,
+                        pieces_requeued: s.pieces_to_redownload as u64,
+                        bytes_redownload: s.pieces_to_redownload as u64 * piece_len,
+                    },
+                );
+            }
+            Err(e) => {
+                self.events.emit(
+                    NewEvent::new(
+                        kind::REPAIR_RUN,
+                        Severity::Error,
+                        format!("{who} repair failed: {e:#}"),
+                    )
+                    .torrent(tref.clone())
+                    .details(serde_json::json!({
+                        "auto": auto,
+                        "result": "failed",
+                        "duration_secs": (secs * 10.0).round() / 10.0,
+                        "files_requested": files.len(),
+                        "error": format!("{e:#}"),
+                    })),
+                );
+                self.events.record_repair_run(
+                    &ih,
+                    &RepairRunStats {
+                        auto,
+                        failed: true,
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+        // Automatic repair used up its attempts on files that are still damaged.
+        if auto {
+            for f in handle.shared.damage.auto_repair_given_up(files) {
+                self.events.record_give_up();
+                self.events.emit(
+                    NewEvent::new(
+                        kind::NEEDS_ATTENTION,
+                        Severity::Error,
+                        format!(
+                            "Gave up automatic repair of file {f} (still damaged after the maximum attempts); needs attention"
+                        ),
+                    )
+                    .torrent(handle.shared.torrent_ref(handle.name()))
+                    .file(Some(f), None),
+                );
+            }
+        }
+    }
+
     async fn run_repair(
         self: &Arc<Self>,
         handle: &ManagedTorrentHandle,
         metadata: Arc<TorrentMetadata>,
         files: Vec<usize>,
         held: HeldPieces,
+        auto: bool,
     ) -> anyhow::Result<RepairSummary> {
         let was_live = handle.live().is_some();
         let was_error = handle.with_state(|s| matches!(s, ManagedTorrentState::Error(_)));
@@ -1521,7 +1703,9 @@ impl Session {
                 .await
                 .context("error pausing torrent before repair")?;
         }
-        let result = self.run_repair_stopped(handle, metadata, files, held).await;
+        let result = self
+            .run_repair_stopped(handle, metadata, files, held, auto)
+            .await;
         if was_live || was_error {
             if let Err(e) = self.unpause(handle).await {
                 warn!(id = handle.id(), "error resuming torrent after repair: {e:#}");
@@ -1539,11 +1723,10 @@ impl Session {
         metadata: Arc<TorrentMetadata>,
         files: Vec<usize>,
         held: HeldPieces,
+        auto: bool,
     ) -> anyhow::Result<RepairSummary> {
-        let log_path = self
-            .preferences_path()
-            .parent()
-            .map(|d| d.join("repair-log.jsonl"));
+        let events = self.events.clone();
+        let tref = handle.shared.torrent_ref(handle.name());
         let h = handle.clone();
         let md = metadata.clone();
         let outcomes = tokio::task::spawn_blocking(move || {
@@ -1593,26 +1776,7 @@ impl Session {
                             "repaired damaged file"
                         ),
                     }
-                    if let Some(lp) = log_path.as_deref() {
-                        let rec = RepairLogRecord {
-                            time: crate::adopt::rfc3339_now(),
-                            torrent_id: shared.id,
-                            info_hash: shared.info_hash.as_string(),
-                            file_id,
-                            path: full.to_string_lossy().into_owned(),
-                            bytes_total: o.bytes_total,
-                            bytes_unreadable: o.bytes_unreadable,
-                            bytes_zeroed: o.bytes_zeroed,
-                            ranges_zeroed: &o.ranges_zeroed,
-                            pieces_affected: &o.pieces,
-                            method: o.method,
-                            note: o.note.as_deref(),
-                            error: o.error.as_deref(),
-                        };
-                        if let Err(e) = append_log(lp, &rec) {
-                            warn!(path=?lp, "error writing repair log: {e:#}");
-                        }
-                    }
+                    events.emit(file_repair_event(&tref, &full, &o, auto));
                 }
                 outcomes.push(o);
             }
