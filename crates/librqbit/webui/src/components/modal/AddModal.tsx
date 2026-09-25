@@ -30,12 +30,14 @@ import {
 const DEFAULT_CONCURRENCY = 4;
 
 // POST /torrents for a magnet doesn't return until the torrent's metadata has
-// been fetched from peers (DHT/trackers), and the server applies no timeout.
-// Give up after this long so a dead magnet shows an error instead of hanging.
-// Aborting the request closes the connection, which also cancels the
-// server-side resolve.
+// been fetched from peers (DHT/trackers). Ask the server to give up a bit
+// before our own client-side timeout so a dead magnet fails with a clear
+// server error (an aborted HTTP request does not stop the server-side add).
 const MAGNET_TIMEOUT_MS = 3 * 60_000;
-const OTHER_TIMEOUT_MS = 2 * 60_000;
+const MAGNET_SERVER_TIMEOUT_SECS = 170;
+// Other adds can legitimately wait a long time for a server init slot while
+// other torrents are being hash-checked.
+const OTHER_TIMEOUT_MS = 15 * 60_000;
 
 const STOPPED = "Stopped";
 
@@ -85,6 +87,7 @@ type ItemOpts = {
   overwrite: boolean;
   output_folder?: string;
   adopt_foreign_incomplete?: "qbit";
+  magnet_timeout_secs?: number;
 };
 
 const formatDuration = (ms: number) => {
@@ -765,6 +768,7 @@ export const AddModal: React.FC<Props> = ({
             status: magnet ? "resolving" : "running",
             startedAt: Date.now(),
           });
+          if (magnet) itemOpts.magnet_timeout_secs = MAGNET_SERVER_TIMEOUT_SECS;
           const init = { signal: ctrl.signal };
           try {
             await addOne(item, itemOpts, init);
@@ -773,7 +777,7 @@ export const AddModal: React.FC<Props> = ({
               throw new Error(
                 magnet
                   ? `Timed out after ${formatDuration(timeoutMs)} waiting for torrent metadata — no peer sent it. The magnet may be dead or poorly seeded; retry later or use a .torrent file.`
-                  : `Timed out after ${formatDuration(timeoutMs)} waiting for the server.`,
+                  : `No response after ${formatDuration(timeoutMs)} (the server may still be busy checking other torrents; it may still get added — refresh before retrying).`,
               );
             }
             if (ctrl.signal.aborted) throw new Error(STOPPED);

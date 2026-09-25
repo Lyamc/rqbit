@@ -30,6 +30,8 @@ pub struct TorrentAddQueryParams {
     /// Adopt another client's data in output_folder before the initial check
     /// (transfer from other client). Supported: "qbit" (renames `.!qB` partials).
     pub adopt_foreign_incomplete: Option<String>,
+    /// Fail a magnet add if metadata can't be fetched within this many seconds.
+    pub magnet_timeout_secs: Option<u64>,
 }
 
 impl Serialize for OnlyFiles {
@@ -115,6 +117,7 @@ impl TorrentAddQueryParams {
             }),
             torznab_category: self.torznab_category,
             adopt_foreign_incomplete: self.adopt_foreign_incomplete,
+            magnet_resolve_timeout: self.magnet_timeout_secs.map(Duration::from_secs),
             ..Default::default()
         }
     }

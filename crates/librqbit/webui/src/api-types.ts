@@ -296,7 +296,7 @@ export interface TorrentStats {
 
 /** Client-side request options (not sent to the server). */
 export interface RequestOptions {
-  /** Abort the in-flight HTTP request (closing it also cancels the server-side add). */
+  /** Abort the in-flight HTTP request (client side only; the server may still finish the add). */
   signal?: AbortSignal;
 }
 
@@ -332,6 +332,8 @@ export interface AddTorrentOptions {
   /** Transfer from another client: adopt its files in output_folder before
    *  the initial check ("qbit" renames `name.!qB` partials). */
   adopt_foreign_incomplete?: "qbit" | null;
+  /** Server gives up resolving magnet metadata after this many seconds. */
+  magnet_timeout_secs?: number | null;
 }
 
 export type Value = string | number | boolean;

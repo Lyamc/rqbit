@@ -319,6 +319,10 @@ pub struct AddTorrentOptions {
     /// the torrent expects make the add fail instead of being truncated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adopt_foreign_incomplete: Option<String>,
+
+    /// Give up resolving magnet metadata after this long (default: wait forever).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub magnet_resolve_timeout: Option<Duration>,
 }
 
 pub struct ListOnlyResponse {
@@ -1330,9 +1334,16 @@ impl Session {
                     let peer_rx = make_peer_rx().context(
                         "no known way to resolve peers (no DHT, no trackers, no initial_peers)",
                     )?;
-                    let resolved_magnet = self
-                        .resolve_magnet(info_hash, peer_rx, &trackers, opts.peer_opts)
-                        .await?;
+                    let resolve = self.resolve_magnet(info_hash, peer_rx, &trackers, opts.peer_opts);
+                    let resolved_magnet = match opts.magnet_resolve_timeout {
+                        Some(t) => tokio::time::timeout(t, resolve).await.map_err(|_| {
+                            anyhow::anyhow!(
+                                "timed out after {}s waiting for torrent metadata from peers (magnet may be dead or poorly seeded)",
+                                t.as_secs()
+                            )
+                        })??,
+                        None => resolve.await?,
+                    };
 
                     // Add back seen_peers into the peer stream, as we consumed some peers
                     // while resolving the magnet.
@@ -1437,7 +1448,9 @@ impl Session {
         let (managed_torrent, metadata) = {
             let mut g = self.db.write();
             if let Some((id, handle)) = g.torrents.iter().find_map(|(eid, t)| {
-                if t.info_hash() == info_hash || *eid == id {
+                if t.info_hash() == info_hash
+                    || (opts.preferred_id.is_some() && *eid == id)
+                {
                     Some((*eid, t.clone()))
                 } else {
                     None
@@ -1445,6 +1458,18 @@ impl Session {
             }) {
                 return Ok(AddTorrentResponse::AlreadyManaged(id, handle));
             }
+            // The JSON persistence store derives next_id from what it has
+            // persisted so far, so concurrent adds (or adds racing a torrent
+            // that isn't persisted yet) get the same id. That used to return
+            // AlreadyManaged for a *different* torrent and silently drop the
+            // add. Allocate a free id under the db lock instead.
+            let id = if opts.preferred_id.is_none() && g.torrents.contains_key(&id) {
+                let free = g.torrents.keys().copied().max().map(|m| m + 1).unwrap_or(0);
+                debug!(requested = id, allocated = free, "torrent id already in use, allocating a new one");
+                free
+            } else {
+                id
+            };
 
             let span = debug_span!(parent: self.rs(), "torrent", id);
             let peer_opts = self.merge_peer_opts(opts.peer_opts);

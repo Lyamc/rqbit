@@ -162,6 +162,9 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
     if (opts?.adopt_foreign_incomplete) {
       url += `&adopt_foreign_incomplete=${opts.adopt_foreign_incomplete}`;
     }
+    if (opts?.magnet_timeout_secs) {
+      url += `&magnet_timeout_secs=${opts.magnet_timeout_secs}`;
+    }
     if (typeof data === "string") {
       url += "&is_url=true";
     }
