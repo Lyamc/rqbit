@@ -54,16 +54,17 @@ export function formatEventTime(iso: string): string {
       });
 }
 
-/** Current torrent id for an event (ids can change across restarts; match by hash). */
-export function useResolveTorrentId(): (e: EventRecord) => number | null {
+/** Current torrent (id, name) for an event (ids can change across restarts; match by hash). */
+export function useResolveTorrent(): (
+  e: EventRecord,
+) => { id: number | null; name: string | null } {
   const torrents = useTorrentStore((s) => s.torrents);
   return (e: EventRecord) => {
     if (e.info_hash && torrents) {
       const t = torrents.find((t) => t.info_hash === e.info_hash);
-      if (t) return t.id;
-      return null;
+      return { id: t?.id ?? null, name: e.torrent_name ?? t?.name ?? null };
     }
-    return e.torrent_id ?? null;
+    return { id: e.torrent_id ?? null, name: e.torrent_name ?? null };
   };
 }
 

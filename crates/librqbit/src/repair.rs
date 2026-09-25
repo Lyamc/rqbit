@@ -2200,6 +2200,42 @@ mod tests {
         assert!(t.auto_repair_due());
     }
 
+    #[test]
+    fn auto_repair_one_at_a_time_and_give_up() {
+        // Only one automatic repair at a time across all torrents.
+        let sem = auto_repair_semaphore();
+        assert_eq!(sem.available_permits(), 1);
+        let p1 = sem.clone().try_acquire_owned().unwrap();
+        assert!(sem.clone().try_acquire_owned().is_err(), "second auto repair must wait");
+        drop(p1);
+        assert!(sem.clone().try_acquire_owned().is_ok());
+
+        // Per torrent: nothing is claimed while a repair is running.
+        let t = DamageTracker::default();
+        assert!(t.record_failure(Some(1), 5, true, "eio"));
+        t.try_begin(100, 1, true).unwrap();
+        assert!(!t.auto_repair_due());
+        let c = BackoffConfig {
+            base: Duration::from_millis(1),
+            cap: Duration::from_millis(1),
+            max_attempts: 2,
+        };
+        assert!(t.claim_auto_repair_files(&c).is_empty(), "repair running");
+        t.finish(Err("x".into()));
+        // Two attempts, then automatic repair gives up on the still-damaged file.
+        assert_eq!(t.claim_auto_repair_files(&c), vec![1]);
+        assert!(t.auto_repair_given_up(&[1]).is_empty());
+        std::thread::sleep(Duration::from_millis(5));
+        assert_eq!(t.claim_auto_repair_files(&c), vec![1]);
+        assert_eq!(t.auto_repair_given_up(&[1]), vec![1]);
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(t.claim_auto_repair_files(&c).is_empty(), "gave up");
+        assert!(!t.auto_repair_due());
+        // A file found clean is not reported as given up.
+        t.clear_after_repair(&[1]);
+        assert!(t.auto_repair_given_up(&[1]).is_empty());
+    }
+
     fn cfg(base: u64, cap: u64, max: u32) -> BackoffConfig {
         BackoffConfig {
             base: Duration::from_secs(base),

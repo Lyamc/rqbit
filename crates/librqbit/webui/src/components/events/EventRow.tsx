@@ -7,7 +7,7 @@ import {
   severityDot,
   severityText,
   useOpenTorrent,
-  useResolveTorrentId,
+  useResolveTorrent,
 } from "./eventHelpers";
 
 export const EventRow: React.FC<{
@@ -17,9 +17,9 @@ export const EventRow: React.FC<{
   compact?: boolean;
 }> = ({ event: e, onNavigate, compact }) => {
   const [expanded, setExpanded] = useState(false);
-  const resolve = useResolveTorrentId();
+  const resolve = useResolveTorrent();
   const openTorrent = useOpenTorrent();
-  const tid = resolve(e);
+  const { id: tid, name: torrentName } = resolve(e);
   const count = e.count ?? 1;
   const hasDetails =
     e.details !== undefined && e.details !== null || !!e.path || !!e.info_hash;
@@ -52,7 +52,7 @@ export const EventRow: React.FC<{
           {KIND_LABELS[e.kind] ?? e.kind}
         </span>
         <span className="min-w-0 flex-1">
-          {!compact && e.torrent_name && (
+          {!compact && torrentName && (
             <>
               {tid !== null ? (
                 <a
@@ -66,10 +66,10 @@ export const EventRow: React.FC<{
                   }}
                   title="Open torrent details"
                 >
-                  {e.torrent_name}
+                  {torrentName}
                 </a>
               ) : (
-                <span className="text-secondary">{e.torrent_name}</span>
+                <span className="text-secondary">{torrentName}</span>
               )}
               <span className="text-tertiary"> · </span>
             </>
