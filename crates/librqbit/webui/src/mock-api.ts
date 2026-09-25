@@ -539,7 +539,21 @@ export const MockAPI: RqbitAPI & { getVersion: () => Promise<string> } = {
     };
   },
 
-  uploadTorrent: async (): Promise<AddTorrentResponse> => {
+  uploadTorrent: async (data, _opts, init): Promise<AddTorrentResponse> => {
+    // Simulate magnet metadata resolution: magnets whose text contains "dead"
+    // never resolve (until aborted); other magnets resolve after ~3s.
+    if (typeof data === "string" && data.startsWith("magnet:")) {
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = () => reject({ text: "request aborted" });
+        if (init?.signal?.aborted) return onAbort();
+        init?.signal?.addEventListener("abort", onAbort);
+        if (!data.includes("dead")) setTimeout(resolve, 3000);
+      });
+      return {
+        id: null,
+        details: { info_hash: "0".repeat(40), files: [] },
+      } as unknown as AddTorrentResponse;
+    }
     throw { text: "Upload not supported in mock mode", status: 501 };
   },
 
@@ -608,13 +622,22 @@ export const MockAPI: RqbitAPI & { getVersion: () => Promise<string> } = {
   },
 
   getPreferences: async (): Promise<SessionPreferences> => {
-    return { soft_recover_on_io_error: false,
-    auto_organize_enabled: false,
-    auto_organize_root: null,
-    incomplete_extension: null,
-    completion_actions: [], on_complete_hook: null, move_completed_path: null, move_completed_copy: false };
+    return {
+      soft_recover_on_io_error: false,
+      auto_organize_enabled: false,
+      auto_organize_root: null,
+      incomplete_extension: null,
+      completion_actions: [],
+      on_complete_hook: null,
+      move_completed_path: null,
+      move_completed_copy: false,
+    };
   },
-  renameFile: async (_index: number, _fileId: number, _newPath: string): Promise<void> => {},
+  renameFile: async (
+    _index: number,
+    _fileId: number,
+    _newPath: string,
+  ): Promise<void> => {},
   relocateTorrent: async (
     _index: number,
     _destination: string,
@@ -665,13 +688,26 @@ export const MockAPI: RqbitAPI & { getVersion: () => Promise<string> } = {
   uploadTorrentFromServerPath: async (): Promise<AddTorrentResponse> => {
     throw new Error("not implemented in mock");
   },
-  fsRoots: async () => ({ roots: [{ label: "Downloads", path: "/downloads" }] }),
+  fsRoots: async () => ({
+    roots: [{ label: "Downloads", path: "/downloads" }],
+  }),
   fsList: async (path: string) => ({
     path,
     parent: path === "/downloads" ? null : "/downloads",
     entries: [
-      { name: "sample.torrent", path: `${path}/sample.torrent`, is_dir: false, is_torrent: true, size: 100 },
-      { name: "subdir", path: `${path}/subdir`, is_dir: true, is_torrent: false },
+      {
+        name: "sample.torrent",
+        path: `${path}/sample.torrent`,
+        is_dir: false,
+        is_torrent: true,
+        size: 100,
+      },
+      {
+        name: "subdir",
+        path: `${path}/subdir`,
+        is_dir: true,
+        is_torrent: false,
+      },
     ],
   }),
   extractUpload: async () => ({ items: [] }),

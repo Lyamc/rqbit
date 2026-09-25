@@ -211,10 +211,7 @@ export interface LimitsConfig {
 }
 
 export type CompletionActionType =
-  | "shell"
-  | "move"
-  | "organize"
-  | "drop_incomplete_ext";
+  "shell" | "move" | "organize" | "drop_incomplete_ext";
 
 export interface CompletionAction {
   type: CompletionActionType;
@@ -297,6 +294,12 @@ export interface TorrentStats {
   live: LiveTorrentStats | null;
 }
 
+/** Client-side request options (not sent to the server). */
+export interface RequestOptions {
+  /** Abort the in-flight HTTP request (closing it also cancels the server-side add). */
+  signal?: AbortSignal;
+}
+
 export interface ErrorDetails {
   id?: number;
   method?: string;
@@ -370,7 +373,6 @@ export interface JSONLogLine {
   spans: Span[];
 }
 
-
 export interface FsRoot {
   label: string;
   path: string;
@@ -425,10 +427,12 @@ export interface RqbitAPI {
   uploadTorrent: (
     data: string | File,
     opts?: AddTorrentOptions,
+    init?: RequestOptions,
   ) => Promise<AddTorrentResponse>;
   uploadTorrentFromServerPath: (
     path: string,
     opts?: AddTorrentOptions,
+    init?: RequestOptions,
   ) => Promise<AddTorrentResponse>;
   fsRoots: () => Promise<FsRootsResponse>;
   fsList: (
@@ -440,7 +444,11 @@ export interface RqbitAPI {
   pause: (index: number) => Promise<void>;
   updateOnlyFiles: (index: number, files: number[]) => Promise<void>;
   renameFile: (index: number, fileId: number, newPath: string) => Promise<void>;
-  relocateTorrent: (index: number, destination: string, copy?: boolean) => Promise<void>;
+  relocateTorrent: (
+    index: number,
+    destination: string,
+    copy?: boolean,
+  ) => Promise<void>;
   start: (index: number) => Promise<void>;
   restart: (index: number) => Promise<void>;
   fixErrors: (index: number) => Promise<void>;

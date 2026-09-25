@@ -1,4 +1,4 @@
-import { useContext, useMemo, useRef, useState } from "react";
+import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import { APIContext } from "../../context";
 import { useTorrentStore } from "../../stores/torrentStore";
 import { Modal } from "./Modal";
@@ -25,6 +25,35 @@ import {
 } from "../../helper/bulkImportQueue";
 
 const DEFAULT_CONCURRENCY = 4;
+
+// POST /torrents for a magnet doesn't return until the torrent's metadata has
+// been fetched from peers (DHT/trackers), and the server applies no timeout.
+// Give up after this long so a dead magnet shows an error instead of hanging.
+// Aborting the request closes the connection, which also cancels the
+// server-side resolve.
+const MAGNET_TIMEOUT_MS = 3 * 60_000;
+const OTHER_TIMEOUT_MS = 2 * 60_000;
+
+const STOPPED = "Stopped";
+
+const ADVANCED_OPEN_KEY = "rqbit.addModal.advancedOpen";
+const readAdvancedOpen = () => {
+  try {
+    return window.sessionStorage.getItem(ADVANCED_OPEN_KEY) === "1";
+  } catch {
+    return false;
+  }
+};
+
+const isMagnetItem = (i: StagingItem) =>
+  i.kind === "magnet" ||
+  (!!i.text &&
+    (i.text.startsWith("magnet:") || /^[0-9a-fA-F]{40}$/.test(i.text)));
+
+const formatDuration = (ms: number) => {
+  const m = Math.round(ms / 60_000);
+  return m >= 1 ? `${m} min` : `${Math.round(ms / 1000)} s`;
+};
 
 export type AddModalTab = "upload" | "urls" | "browse";
 type Tab = AddModalTab;
@@ -99,6 +128,19 @@ export const AddModal: React.FC<Props> = ({
   const [uploadBusy, setUploadBusy] = useState(false);
   const [uploadMsg, setUploadMsg] = useState<string | null>(null);
   const cancelRef = useRef({ cancelled: false });
+  // In-flight add requests, so Stop / close can abort them.
+  const abortersRef = useRef(new Map<string, AbortController>());
+  const [advancedOpen, setAdvancedOpen] = useState(readAdvancedOpen);
+  useEffect(() => {
+    try {
+      window.sessionStorage.setItem(
+        ADVANCED_OPEN_KEY,
+        advancedOpen ? "1" : "0",
+      );
+    } catch {
+      // ignore (private mode etc.)
+    }
+  }, [advancedOpen]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -108,10 +150,29 @@ export const AddModal: React.FC<Props> = ({
     [pasteText],
   );
 
-  const readyCount = queue.filter(
-    (i) => i.status === "ready" || i.status === "pending",
-  ).length;
+  // Sources typed/pasted in the URL field but not staged yet: the footer Add
+  // button stages and starts them in one click.
+  const pastedNotQueued = useMemo(() => {
+    const queued = new Set(queue.map((q) => q.text).filter(Boolean));
+    return detectedUrls.filter((s) => !queued.has(s.value));
+  }, [detectedUrls, queue]);
+
+  const readyCount =
+    queue.filter((i) => i.status === "ready" || i.status === "pending").length +
+    pastedNotQueued.length;
   const canStart = !running && readyCount > 0;
+  const inFlight = queue.filter(
+    (i) => i.status === "running" || i.status === "resolving",
+  );
+  const advancedSummary = [
+    transferMode ? "transfer from other client" : null,
+    outputFolder.trim() ? "custom output folder" : null,
+    !overwrite ? "no overwrite" : null,
+    concurrency !== DEFAULT_CONCURRENCY ? `${concurrency} at once` : null,
+  ].filter((x): x is string => !!x);
+  const resolvingCount = inFlight.filter(
+    (i) => i.status === "resolving",
+  ).length;
 
   const mergeIntoQueue = (incoming: StagingItem[]) => {
     setQueue((prev) => {
@@ -160,9 +221,15 @@ export const AddModal: React.FC<Props> = ({
     setUploadMsg(null);
   };
 
+  const abortAll = () => {
+    for (const c of abortersRef.current.values()) c.abort();
+    abortersRef.current.clear();
+  };
+
   const handleClose = () => {
     if (running) {
       cancelRef.current.cancelled = true;
+      abortAll();
     }
     resetForm();
     onClose();
@@ -443,23 +510,43 @@ export const AddModal: React.FC<Props> = ({
     }
   };
 
+  const setItem = (id: string, patch: Partial<StagingItem>) =>
+    setQueue((prev) => prev.map((i) => (i.id === id ? { ...i, ...patch } : i)));
+
   const startImport = async () => {
     cancelRef.current = { cancelled: false };
     setRunning(true);
     setProgress(null);
 
-    const workItems = queue.filter(
-      (i) => i.status === "ready" || i.status === "pending",
-    );
+    const pasted: StagingItem[] = pastedNotQueued.map((s) => ({
+      id: nextId(),
+      label: displayNameForSource(s.value),
+      source: "url",
+      status: "pending",
+      kind: s.kind,
+      text: s.value,
+    }));
+    if (pasted.length > 0) setPasteText("");
 
-    // Mark them pending in UI
-    setQueue((prev) =>
-      prev.map((i) =>
+    const workItems = [
+      ...queue.filter((i) => i.status === "ready" || i.status === "pending"),
+      ...pasted,
+    ];
+
+    // Mark them queued in UI
+    setQueue((prev) => [
+      ...prev.map((i) =>
         workItems.some((w) => w.id === i.id)
-          ? { ...i, status: "pending", error: undefined }
+          ? {
+              ...i,
+              status: "pending" as const,
+              error: undefined,
+              startedAt: undefined,
+            }
           : i,
       ),
-    );
+      ...pasted,
+    ]);
 
     const work: BulkWorkItem<StagingItem>[] = workItems.map((i) => ({
       id: i.id,
@@ -479,11 +566,16 @@ export const AddModal: React.FC<Props> = ({
             return prev.map((item) => {
               const st = byId.get(item.id);
               if (!st) return item;
-              return {
-                ...item,
-                status: st.status as StagingItem["status"],
-                error: st.error,
-              };
+              // The worker refines "running" into "resolving" for magnets.
+              const status =
+                st.status === "running" && item.status === "resolving"
+                  ? "resolving"
+                  : (st.status as StagingItem["status"]);
+              // User-initiated Stop is a cancel, not a failure.
+              if (st.status === "error" && st.error === STOPPED) {
+                return { ...item, status: "cancelled", error: undefined };
+              }
+              return { ...item, status, error: st.error };
             });
           });
         },
@@ -492,29 +584,35 @@ export const AddModal: React.FC<Props> = ({
             overwrite: transferMode ? true : overwrite,
             output_folder: item.matchedPath || outputFolder.trim() || undefined,
           };
-          if (item.kind === "server_path" && item.serverPath) {
-            await API.uploadTorrentFromServerPath(item.serverPath, itemOpts);
-          } else if (item.kind === "torrent_bytes" && item.bytes) {
-            const name = item.label.endsWith(".torrent")
-              ? item.label
-              : `${item.label}.torrent`;
-            const file = new File(
-              [
-                item.bytes.buffer.slice(
-                  item.bytes.byteOffset,
-                  item.bytes.byteOffset + item.bytes.byteLength,
-                ) as ArrayBuffer,
-              ],
-              name,
-              { type: "application/x-bittorrent" },
-            );
-            await API.uploadTorrent(file, itemOpts);
-          } else if (item.file) {
-            await API.uploadTorrent(item.file, itemOpts);
-          } else if (item.text) {
-            await API.uploadTorrent(item.text, itemOpts);
-          } else {
-            throw new Error("nothing to upload");
+          const magnet = isMagnetItem(item) && !item.file && !item.bytes;
+          const timeoutMs = magnet ? MAGNET_TIMEOUT_MS : OTHER_TIMEOUT_MS;
+          const ctrl = new AbortController();
+          let timedOut = false;
+          const timer = window.setTimeout(() => {
+            timedOut = true;
+            ctrl.abort();
+          }, timeoutMs);
+          abortersRef.current.set(item.id, ctrl);
+          setItem(item.id, {
+            status: magnet ? "resolving" : "running",
+            startedAt: Date.now(),
+          });
+          const init = { signal: ctrl.signal };
+          try {
+            await addOne(item, itemOpts, init);
+          } catch (e) {
+            if (timedOut) {
+              throw new Error(
+                magnet
+                  ? `Timed out after ${formatDuration(timeoutMs)} waiting for torrent metadata — no peer sent it. The magnet may be dead or poorly seeded; retry later or use a .torrent file.`
+                  : `Timed out after ${formatDuration(timeoutMs)} waiting for the server.`,
+              );
+            }
+            if (ctrl.signal.aborted) throw new Error(STOPPED);
+            throw e;
+          } finally {
+            window.clearTimeout(timer);
+            abortersRef.current.delete(item.id);
           }
         },
       });
@@ -523,12 +621,45 @@ export const AddModal: React.FC<Props> = ({
         refreshTorrents();
       }
     } finally {
+      abortAll();
       setRunning(false);
+    }
+  };
+
+  const addOne = async (
+    item: StagingItem,
+    itemOpts: { overwrite: boolean; output_folder?: string },
+    init: { signal: AbortSignal },
+  ) => {
+    if (item.kind === "server_path" && item.serverPath) {
+      await API.uploadTorrentFromServerPath(item.serverPath, itemOpts, init);
+    } else if (item.kind === "torrent_bytes" && item.bytes) {
+      const name = item.label.endsWith(".torrent")
+        ? item.label
+        : `${item.label}.torrent`;
+      const file = new File(
+        [
+          item.bytes.buffer.slice(
+            item.bytes.byteOffset,
+            item.bytes.byteOffset + item.bytes.byteLength,
+          ) as ArrayBuffer,
+        ],
+        name,
+        { type: "application/x-bittorrent" },
+      );
+      await API.uploadTorrent(file, itemOpts, init);
+    } else if (item.file) {
+      await API.uploadTorrent(item.file, itemOpts, init);
+    } else if (item.text) {
+      await API.uploadTorrent(item.text, itemOpts, init);
+    } else {
+      throw new Error("nothing to upload");
     }
   };
 
   const stopQueue = () => {
     cancelRef.current.cancelled = true;
+    abortAll();
   };
 
   const pct =
@@ -562,44 +693,6 @@ export const AddModal: React.FC<Props> = ({
             onClick={() => !running && setTab("browse")}
           />
         </TabList>
-
-        <div className="mb-3 flex flex-col gap-2">
-          <FormCheckbox
-            name="add_transfer"
-            label="Transfer from other client"
-            checked={transferMode}
-            disabled={running || transferBusy}
-            onChange={() => {
-              const next = !transferMode;
-              setTransferMode(next);
-              if (!next) clearTransferMatches();
-              else setOverwrite(true);
-            }}
-          />
-          {transferMode && (
-            <div className="border border-divider rounded p-2">
-              <div className="text-sm text-secondary mb-2">
-                Select folders that already contain downloads (or a parent of
-                many). We&apos;ll fuzzy-match them to the queue and set each
-                item&apos;s output folder.
-              </div>
-              <FilesystemBrowser
-                mode="select-directories"
-                multi
-                confirmLabel="Match folders"
-                onConfirm={(paths) => {
-                  void onTransferFolders(paths);
-                }}
-              />
-              {transferMsg && (
-                <div className="text-sm text-secondary mt-2">{transferMsg}</div>
-              )}
-              {transferBusy && (
-                <div className="text-sm text-secondary mt-1">Working…</div>
-              )}
-            </div>
-          )}
-        </div>
 
         {tab === "upload" && (
           <div className="flex flex-col gap-2 mb-3">
@@ -694,16 +787,18 @@ export const AddModal: React.FC<Props> = ({
                   ? "Paste one URL, or several (one per line)."
                   : detectedUrls.length === 0
                     ? "No magnets or torrent URLs detected yet."
-                    : `${detectedUrls.length} source${detectedUrls.length === 1 ? "" : "s"} detected.`}
+                    : `${detectedUrls.length} source${detectedUrls.length === 1 ? "" : "s"} detected — press Add to start.`}
               </div>
-              <Button
-                size="sm"
-                variant="primary"
-                disabled={running || detectedUrls.length === 0}
-                onClick={addDetectedUrls}
-              >
-                Add to queue
-              </Button>
+              {transferMode && (
+                <Button
+                  size="sm"
+                  variant="primary"
+                  disabled={running || detectedUrls.length === 0}
+                  onClick={addDetectedUrls}
+                >
+                  Add to queue
+                </Button>
+              )}
             </div>
           </div>
         )}
@@ -731,55 +826,141 @@ export const AddModal: React.FC<Props> = ({
               onDismissErrors={() =>
                 setQueue((prev) => prev.filter((i) => i.status !== "error"))
               }
+              onRetry={(id) =>
+                setItem(id, {
+                  status: "ready",
+                  error: undefined,
+                  startedAt: undefined,
+                })
+              }
             />
-
-            <div className="mt-3">
-              <FormInput
-                label="Output folder (optional)"
-                name="add_output_folder"
-                value={outputFolder}
-                disabled={running}
-                onChange={(e) => setOutputFolder(e.target.value)}
-                placeholder="Leave empty for session default"
-              />
-            </div>
-
-            <div className="mb-3">
-              <FormCheckbox
-                name="add_overwrite"
-                label="Overwrite existing files on disk"
-                checked={overwrite}
-                disabled={running}
-                onChange={() => setOverwrite(!overwrite)}
-              />
-            </div>
-
-            <div className="flex flex-col gap-1 mb-3">
-              <label htmlFor="add_concurrency">
-                Concurrent adds: {concurrency}
-              </label>
-              <input
-                id="add_concurrency"
-                type="range"
-                min={2}
-                max={8}
-                step={1}
-                value={concurrency}
-                disabled={running}
-                onChange={(e) => setConcurrency(Number(e.target.value))}
-                className="w-full"
-              />
-            </div>
           </>
         )}
 
+        <div className="mt-3">
+          <button
+            type="button"
+            className="flex items-center gap-1 text-sm text-secondary hover:text-text cursor-pointer"
+            aria-expanded={advancedOpen}
+            onClick={() => setAdvancedOpen((v) => !v)}
+          >
+            <span
+              className={`inline-block transition-transform ${advancedOpen ? "rotate-90" : ""}`}
+            >
+              ▸
+            </span>
+            Advanced
+            {!advancedOpen && advancedSummary.length > 0 && (
+              <span className="text-primary">
+                · {advancedSummary.join(" · ")}
+              </span>
+            )}
+          </button>
+          {advancedOpen && (
+            <div className="mt-2 flex flex-col gap-3 border-l-2 border-divider pl-3">
+              <div className="flex flex-col gap-2">
+                <FormCheckbox
+                  name="add_transfer"
+                  label="Transfer from other client"
+                  checked={transferMode}
+                  disabled={running || transferBusy}
+                  onChange={() => {
+                    const next = !transferMode;
+                    setTransferMode(next);
+                    if (!next) clearTransferMatches();
+                    else setOverwrite(true);
+                  }}
+                />
+                {transferMode && (
+                  <div className="border border-divider rounded p-2">
+                    <div className="text-sm text-secondary mb-2">
+                      Select folders that already contain downloads (or a parent
+                      of many). We&apos;ll fuzzy-match them to the queue and set
+                      each item&apos;s output folder.
+                    </div>
+                    <FilesystemBrowser
+                      mode="select-directories"
+                      multi
+                      confirmLabel="Match folders"
+                      onConfirm={(paths) => {
+                        void onTransferFolders(paths);
+                      }}
+                    />
+                    {transferMsg && (
+                      <div className="text-sm text-secondary mt-2">
+                        {transferMsg}
+                      </div>
+                    )}
+                    {transferBusy && (
+                      <div className="text-sm text-secondary mt-1">
+                        Working…
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+              <div>
+                <FormInput
+                  label="Output folder (optional)"
+                  name="add_output_folder"
+                  value={outputFolder}
+                  disabled={running}
+                  onChange={(e) => setOutputFolder(e.target.value)}
+                  placeholder="Leave empty for session default"
+                />
+              </div>
+
+              <div>
+                <FormCheckbox
+                  name="add_overwrite"
+                  label="Overwrite existing files on disk"
+                  checked={overwrite}
+                  disabled={running}
+                  onChange={() => setOverwrite(!overwrite)}
+                />
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <label htmlFor="add_concurrency">
+                  Concurrent adds: {concurrency}
+                </label>
+                <input
+                  id="add_concurrency"
+                  type="range"
+                  min={2}
+                  max={8}
+                  step={1}
+                  value={concurrency}
+                  disabled={running}
+                  onChange={(e) => setConcurrency(Number(e.target.value))}
+                  className="w-full"
+                />
+              </div>
+            </div>
+          )}
+        </div>
+
         {progress && (
-          <div className="mt-2 mb-2">
+          <div className="mt-3 mb-2 flex flex-col gap-1">
+            <div className="text-sm text-secondary">
+              {[
+                `${progress.done}/${progress.total} done`,
+                resolvingCount > 0
+                  ? `${resolvingCount} resolving metadata`
+                  : null,
+                inFlight.length - resolvingCount > 0
+                  ? `${inFlight.length - resolvingCount} adding`
+                  : null,
+                `${progress.ok} added`,
+                progress.failed > 0 ? `${progress.failed} failed` : null,
+                progress.cancelled ? `${progress.cancelled} cancelled` : null,
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            </div>
             <ProgressBar
               now={pct}
-              label={`${progress.done}/${progress.total} · ${progress.ok} ok · ${progress.failed} failed${
-                progress.cancelled ? ` · ${progress.cancelled} cancelled` : ""
-              }`}
+              label=""
               variant={
                 progress.failed > 0
                   ? "warn"

@@ -1,7 +1,8 @@
+import { useEffect, useState } from "react";
 import { Button } from "../buttons/Button";
 
 export type StagingStatus =
-  "pending" | "ready" | "error" | "running" | "ok" | "cancelled";
+  "pending" | "ready" | "error" | "running" | "resolving" | "ok" | "cancelled";
 
 export type StagingKind =
   "magnet" | "url" | "file" | "server_path" | "torrent_bytes";
@@ -26,22 +27,42 @@ export type StagingItem = {
   matchStatus?: TransferMatchStatus;
   matchConfidence?: number;
   matchReason?: string;
+  /** Epoch ms when the add request for this item was sent. */
+  startedAt?: number;
 };
 
 const statusLabel = (s: StagingStatus) => {
   switch (s) {
     case "pending":
+      return "queued";
     case "ready":
       return "ready";
     case "error":
-      return "error";
+      return "failed";
     case "running":
       return "adding…";
+    case "resolving":
+      return "resolving metadata…";
     case "ok":
-      return "ok";
+      return "added";
     case "cancelled":
       return "cancelled";
   }
+};
+
+const formatElapsed = (ms: number) => {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+};
+
+/** Live "m:ss" since `since`, ticking every second. */
+const Elapsed: React.FC<{ since: number }> = ({ since }) => {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+  return <span className="tabular-nums">{formatElapsed(now - since)}</span>;
 };
 
 const statusClass = (s: StagingStatus) => {
@@ -51,6 +72,7 @@ const statusClass = (s: StagingStatus) => {
     case "ok":
       return "text-green-600 dark:text-green-400";
     case "running":
+    case "resolving":
       return "text-primary";
     case "cancelled":
       return "text-secondary";
@@ -65,7 +87,8 @@ export const StagingQueue: React.FC<{
   onRemove: (id: string) => void;
   onClear: () => void;
   onDismissErrors?: () => void;
-}> = ({ items, running, onRemove, onClear, onDismissErrors }) => {
+  onRetry?: (id: string) => void;
+}> = ({ items, running, onRemove, onClear, onDismissErrors, onRetry }) => {
   const errorCount = items.filter((i) => i.status === "error").length;
   const readyCount = items.filter(
     (i) => i.status === "ready" || i.status === "pending",
@@ -118,6 +141,13 @@ export const StagingQueue: React.FC<{
                 <span>{item.source}</span>
                 <span className={statusClass(item.status)}>
                   {statusLabel(item.status)}
+                  {(item.status === "running" || item.status === "resolving") &&
+                    item.startedAt && (
+                      <>
+                        {" "}
+                        <Elapsed since={item.startedAt} />
+                      </>
+                    )}
                 </span>
                 {item.matchStatus === "matched" && item.matchedPath && (
                   <span
@@ -142,17 +172,36 @@ export const StagingQueue: React.FC<{
                 {item.matchStatus === "unmatched" && (
                   <span className="text-secondary">unmatched</span>
                 )}
+                {item.status === "resolving" && (
+                  <span className="text-secondary">
+                    waiting for peers to send torrent info
+                  </span>
+                )}
                 {item.error && (
-                  <span className="text-red-600 dark:text-red-400 break-all">
+                  <span className="text-red-600 dark:text-red-400 break-words">
                     {item.error}
                   </span>
                 )}
+                {(item.status === "error" || item.status === "cancelled") &&
+                  onRetry &&
+                  !running && (
+                    <button
+                      type="button"
+                      className="text-primary hover:underline cursor-pointer"
+                      onClick={() => onRetry(item.id)}
+                    >
+                      retry
+                    </button>
+                  )}
               </div>
             </div>
             <button
               type="button"
               className="flex-shrink-0 text-secondary hover:text-text px-1 disabled:opacity-40"
-              disabled={running && item.status === "running"}
+              disabled={
+                running &&
+                (item.status === "running" || item.status === "resolving")
+              }
               aria-label="Remove"
               onClick={() => onRemove(item.id)}
             >

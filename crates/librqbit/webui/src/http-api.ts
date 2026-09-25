@@ -9,6 +9,7 @@ import {
   ListTorrentsResponse,
   PeerStatsSnapshot,
   RqbitAPI,
+  RequestOptions,
   SessionStats,
   TorrentDetails,
   TorrentStats,
@@ -56,6 +57,7 @@ const makeRequest = async (
   path: string,
   data?: any,
   isJson?: boolean,
+  init?: RequestOptions,
 ): Promise<any> => {
   console.log(method, path);
   const url = apiUrl + path;
@@ -64,6 +66,7 @@ const makeRequest = async (
     headers: {
       Accept: "application/json",
     },
+    signal: init?.signal,
   };
   if (isJson) {
     options.headers = {
@@ -86,7 +89,10 @@ const makeRequest = async (
   try {
     response = await fetch(url, options);
   } catch (e) {
-    error.text = "network error";
+    error.text =
+      init?.signal?.aborted || (e as Error)?.name === "AbortError"
+        ? "request aborted"
+        : "network error";
     return Promise.reject(error);
   }
 
@@ -131,7 +137,7 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
     return makeRequest("GET", "/stats");
   },
 
-  uploadTorrent: (data, opts): Promise<AddTorrentResponse> => {
+  uploadTorrent: (data, opts, init): Promise<AddTorrentResponse> => {
     // Prefer caller overwrite; default true to match prior webui behavior.
     const overwrite = opts?.overwrite ?? true;
     let url = `/torrents?overwrite=${overwrite}`;
@@ -156,10 +162,14 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
     if (typeof data === "string") {
       url += "&is_url=true";
     }
-    return makeRequest("POST", url, data);
+    return makeRequest("POST", url, data, false, init);
   },
 
-  uploadTorrentFromServerPath: (path, opts): Promise<AddTorrentResponse> => {
+  uploadTorrentFromServerPath: (
+    path,
+    opts,
+    init,
+  ): Promise<AddTorrentResponse> => {
     const overwrite = opts?.overwrite ?? true;
     let url = `/torrents?overwrite=${overwrite}&from_server_path=${encodeURIComponent(path)}`;
     if (opts?.list_only) {
@@ -168,7 +178,7 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
     if (opts?.output_folder) {
       url += `&output_folder=${encodeURIComponent(opts.output_folder)}`;
     }
-    return makeRequest("POST", url, "");
+    return makeRequest("POST", url, "", false, init);
   },
 
   fsRoots: (): Promise<FsRootsResponse> => {
@@ -283,7 +293,11 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
   getPreferences: (): Promise<SessionPreferences> => {
     return makeRequest("GET", "/torrents/preferences");
   },
-  renameFile: (index: number, fileId: number, newPath: string): Promise<void> => {
+  renameFile: (
+    index: number,
+    fileId: number,
+    newPath: string,
+  ): Promise<void> => {
     return makeRequest("POST", `/torrents/${index}/rename_file`, {
       file_id: fileId,
       new_path: newPath,
