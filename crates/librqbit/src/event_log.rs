@@ -65,6 +65,7 @@ pub mod kind {
     pub const DAMAGE_DETECTED: &str = "damage_detected";
     pub const ADOPTION: &str = "adoption";
     pub const TORRENT_ERROR: &str = "torrent_error";
+    pub const RECHECK: &str = "recheck";
 }
 
 fn one() -> u64 {

@@ -11,6 +11,7 @@ export const KIND_LABELS: Record<string, string> = {
   damage_detected: "Damaged",
   adoption: "Adoption",
   torrent_error: "Torrent error",
+  recheck: "Recheck",
 };
 
 export const KIND_FILTERS: { label: string; value: string }[] = [

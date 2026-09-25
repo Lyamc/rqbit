@@ -371,6 +371,19 @@ impl Api {
         Ok(Default::default())
     }
 
+    /// Force a full recheck (re-verify every piece; unreadable data marks files damaged).
+    pub async fn api_torrent_action_recheck(
+        &self,
+        idx: TorrentIdOrHash,
+    ) -> Result<EmptyJsonResponse> {
+        let handle = self.mgr_handle(idx)?;
+        self.session
+            .force_recheck(&handle)
+            .await
+            .with_status(StatusCode::BAD_REQUEST)?;
+        Ok(Default::default())
+    }
+
     /// Move torrents in the queue (multi-select): up / down / top / bottom.
     pub fn api_queue_move(&self, req: QueueMoveRequest) -> Result<QueueOrderResponse> {
         self.session

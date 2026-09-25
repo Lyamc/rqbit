@@ -2158,6 +2158,27 @@ impl Session {
         Ok(())
     }
 
+    /// Force a full recheck of all pieces (like qBittorrent's "Force recheck").
+    pub async fn force_recheck(self: &Arc<Self>, handle: &ManagedTorrentHandle) -> anyhow::Result<()> {
+        let user_paused = handle.is_paused();
+        handle.prepare_recheck()?;
+        info!(id = handle.id(), "full recheck requested");
+        self.events.emit(
+            crate::event_log::NewEvent::new(
+                crate::event_log::kind::RECHECK,
+                crate::event_log::Severity::Info,
+                "Full recheck requested",
+            )
+            .torrent(handle.shared.torrent_ref(handle.name())),
+        );
+        if user_paused {
+            handle.start(None, true)?;
+            Ok(())
+        } else {
+            self.unpause(handle).await
+        }
+    }
+
     pub async fn unpause(self: &Arc<Self>, handle: &ManagedTorrentHandle) -> anyhow::Result<()> {
         let peer_rx = self.make_peer_rx_managed_torrent(handle, true);
         handle.start(peer_rx, false)?;

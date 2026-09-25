@@ -669,6 +669,29 @@ impl ManagedTorrent {
         )
     }
 
+    /// Stop the torrent so that the next start re-verifies every piece from scratch
+    /// (fastresume bitfield cleared). Unreadable data found by that check marks files
+    /// damaged.
+    pub(crate) fn prepare_recheck(&self) -> anyhow::Result<()> {
+        if self.shared.damage.is_repair_running() {
+            bail!("a repair is running; retry when it finishes");
+        }
+        let mut g = self.locked.write();
+        match &g.state {
+            ManagedTorrentState::Initializing(_) => bail!("torrent is already checking its files"),
+            ManagedTorrentState::None => bail!("bug: torrent is in empty state"),
+            ManagedTorrentState::Live(live) => {
+                // Dropping the paused state closes the files.
+                let _paused = live.pause()?;
+            }
+            ManagedTorrentState::Paused(_) | ManagedTorrentState::Error(_) => {}
+        }
+        // The Error state restarts through a full check with the bitfield cleared.
+        g.state = ManagedTorrentState::Error(anyhow::anyhow!("full recheck requested"));
+        self.state_change_notify.notify_waiters();
+        Ok(())
+    }
+
     /// User-paused (persisted). Torrents held by queue limits are not user-paused.
     pub fn is_paused(&self) -> bool {
         self.locked.read().paused && !self.shared.runtime.queue_held()

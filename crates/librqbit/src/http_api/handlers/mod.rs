@@ -164,6 +164,10 @@ pub fn make_api_router(state: ApiState) -> Router {
                 "/torrents/{id}/fix_errors",
                 post(torrents::h_torrent_action_fix_errors),
             )
+            .route(
+                "/torrents/{id}/recheck",
+                post(torrents::h_torrent_action_recheck),
+            )
             .route("/torrents/queue", get(torrents::h_queue_order))
             .route("/torrents/queue/move", post(torrents::h_queue_move))
             .route(

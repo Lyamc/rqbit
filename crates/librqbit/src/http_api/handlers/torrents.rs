@@ -274,6 +274,17 @@ pub async fn h_torrent_action_fix_errors(
         .map(axum::Json)
 }
 
+pub async fn h_torrent_action_recheck(
+    State(state): State<ApiState>,
+    Path(idx): Path<TorrentIdOrHash>,
+) -> Result<impl IntoResponse> {
+    state
+        .api
+        .api_torrent_action_recheck(idx)
+        .await
+        .map(axum::Json)
+}
+
 /// Body (optional): `{"files": [idx, ...]}` or `{"scope": "damaged" | "all"}`.
 /// Default: scan all files and repair whatever is unreadable.
 pub async fn h_torrent_action_repair_files(
