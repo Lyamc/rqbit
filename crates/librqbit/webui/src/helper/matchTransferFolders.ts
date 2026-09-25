@@ -175,21 +175,27 @@ function scoreWithMetadata(
   // Multi-file torrent: data lives in a folder whose direct children are the
   // torrent's top-level entries.
   if (c.kind !== "dir") return null;
-  const tops = new Map<string, { isDir: boolean; length?: number }>();
+  // Top-level entries with their total size (a directory's size is the sum
+  // of the torrent files under it).
+  const tops = new Map<string, { isDir: boolean; bytes: number }>();
+  let totalBytes = 0;
   for (const f of files) {
     const top = f.components[0];
-    if (f.components.length === 1)
-      tops.set(top, { isDir: false, length: f.length });
-    else if (!tops.has(top)) tops.set(top, { isDir: true });
+    const isDir = f.components.length > 1;
+    const cur = tops.get(top) ?? { isDir, bytes: 0 };
+    cur.bytes += f.length;
+    tops.set(top, cur);
+    totalBytes += f.length;
   }
   const children = new Map((c.children ?? []).map((ch) => [ch.name, ch]));
   let hits = 0;
+  let hitBytes = 0;
   let conflicts = 0;
   for (const [name, info] of tops) {
     const ch = children.get(name);
     if (!ch || ch.isDir !== info.isDir) continue;
-    if (!info.isDir && info.length !== undefined) {
-      const fit = sizeFits(ch.size, info.length, ch.partial);
+    if (!info.isDir) {
+      const fit = sizeFits(ch.size, info.bytes, ch.partial);
       if (fit === "too_big") {
         conflicts++;
         continue;
@@ -198,25 +204,34 @@ function scoreWithMetadata(
       if (fit === "mismatch") continue;
     }
     hits++;
+    hitBytes += info.bytes;
   }
   if (conflicts > 0) return null;
-  const overlap = tops.size ? hits / tops.size : 0;
+  const countOverlap = tops.size ? hits / tops.size : 0;
+  // Weigh by size so shared boilerplate (nfo/jpg/txt that many releases
+  // carry) doesn't make an unrelated folder look like a match.
+  const byteOverlap = totalBytes > 0 ? hitBytes / totalBytes : countOverlap;
   const nameScore = fuzzyScore(t.name ?? t.label, c.name);
   const exactName = !!t.name && t.name === c.name;
-  if (overlap === 0) {
+  if (hits === 0) {
     // Nothing on disk matches; a same-named empty folder isn't a match.
     return {
       score: Math.min(0.4, nameScore * 0.4),
       reason: "no matching files",
     };
   }
-  const score = Math.min(
+  let score = Math.min(
     1,
-    0.6 * overlap + 0.3 * nameScore + (exactName ? 0.1 : 0),
+    0.55 * byteOverlap +
+      0.15 * countOverlap +
+      0.3 * nameScore +
+      (exactName ? 0.15 : 0),
   );
+  // Without the exact torrent name, require most of the data to be there.
+  if (!exactName && byteOverlap < 0.5) score = Math.min(score, 0.44);
   return {
     score,
-    reason: `${hits}/${tops.size} entries present${exactName ? ", same name" : ""}`,
+    reason: `${hits}/${tops.size} entries (${Math.round(byteOverlap * 100)}% of size) present${exactName ? ", same name" : ""}`,
   };
 }
 
