@@ -63,7 +63,10 @@ const stageLabel = (st: AddJobStage | undefined): string => {
     case "waiting_for_server":
       return "waiting for server (busy checking other torrents)…";
     case "adding":
-      return "adding…";
+      return "adding (creating files, saving)…";
+    case "added":
+    case "already_managed":
+      return "added, finishing…";
     default:
       return "sending to server…";
   }
