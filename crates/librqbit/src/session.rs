@@ -1556,7 +1556,10 @@ impl Session {
         let job = job.clone();
         let commit = async move {
         let _permit = _permit;
-        let (managed_torrent, metadata) = {
+        // NOTE: `id` may be re-allocated inside this block (see below), so the
+        // block returns the final id; everything after it must use that one
+        // (persisting under the stale id overwrote other torrents' entries).
+        let (managed_torrent, metadata, id) = {
             let mut g = this.db.write();
             if let Some((id, handle)) = g.torrents.iter().find_map(|(eid, t)| {
                 if t.info_hash() == info_hash
@@ -1651,7 +1654,7 @@ impl Session {
             });
 
             g.add_torrent(handle.clone(), id);
-            (handle, metadata)
+            (handle, metadata, id)
         };
 
         if let Some(p) = this.persistence.as_ref()
