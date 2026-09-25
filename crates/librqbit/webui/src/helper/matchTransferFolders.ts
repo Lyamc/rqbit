@@ -34,6 +34,8 @@ export type TransferCandidate = {
   partial?: boolean;
   /** Directories only: direct children, when listed. */
   children?: TransferCandidateChild[];
+  /** A folder the user selected (e.g. qBittorrent's Complete/Incomplete). */
+  isRoot?: boolean;
 };
 
 export type TransferTorrentFile = {
@@ -136,7 +138,6 @@ function scoreWithMetadata(
     const fname = f.components[0];
     if (c.kind === "file") {
       const exactName = c.name === fname;
-      const nameScore = exactName ? 1 : fuzzyScore(fname, c.name);
       const fit = sizeFits(c.size, f.length, c.partial);
       if (fit === "too_big") return null;
       if (exactName && (fit === "exact" || fit === "partial"))
@@ -144,23 +145,29 @@ function scoreWithMetadata(
           score: 1,
           reason: fit === "exact" ? "same name and size" : "partial (.!qB)",
         };
-      if (exactName) return { score: 0.8, reason: "same name, size differs" };
-      if (fit === "exact" && nameScore >= 0.6)
+      if (exactName)
+        // Smaller but not marked partial: could be different data; writing
+        // missing pieces would overwrite it. Show it, don't auto-match.
         return {
-          score: 0.6 + 0.3 * nameScore,
-          reason: "same size, similar name",
+          score: 0.4,
+          reason: "same name, smaller and not a .!qB partial",
         };
-      return { score: nameScore * 0.6, reason: "similar name" };
+      if (fit !== "exact") return null;
+      const nameScore = fuzzyScore(fname, c.name);
+      if (nameScore < 0.6) return null;
+      return {
+        score: 0.5 + 0.4 * nameScore,
+        reason: "same size, similar name",
+      };
     }
-    // A folder holding the single file (qBit "always create subfolder").
+    // A subfolder holding the single file (qBit "always create subfolder").
+    // Not for the selected folders themselves: their files are candidates.
+    if (c.isRoot) return null;
     const child = c.children?.find((ch) => !ch.isDir && ch.name === fname);
     if (child) {
       const fit = sizeFits(child.size, f.length, child.partial);
-      if (fit === "too_big") return null;
-      return {
-        score: fit === "exact" || fit === "partial" ? 0.95 : 0.75,
-        reason: "folder contains the file",
-      };
+      if (fit === "exact" || fit === "partial")
+        return { score: 0.95, reason: "folder contains the file" };
     }
     return null;
   }
@@ -187,6 +194,8 @@ function scoreWithMetadata(
         conflicts++;
         continue;
       }
+      // Smaller and not a .!qB partial: don't count it as evidence.
+      if (fit === "mismatch") continue;
     }
     hits++;
   }

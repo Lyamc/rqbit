@@ -39,6 +39,10 @@ const OTHER_TIMEOUT_MS = 2 * 60_000;
 
 const STOPPED = "Stopped";
 
+// Transfer-from-other-client folder scan limits (selected folder = depth 0).
+const MAX_TRANSFER_SCAN_DEPTH = 3;
+const MAX_TRANSFER_SCAN_DIRS = 3000;
+
 const ADVANCED_OPEN_KEY = "rqbit.addModal.advancedOpen";
 const readAdvancedOpen = () => {
   try {
@@ -490,7 +494,6 @@ export const AddModal: React.FC<Props> = ({
     try {
       const candidates: TransferCandidate[] = [];
       const seen = new Set<string>();
-      const subdirs: FsEntry[] = [];
       const discoveredTorrents: StagingItem[] = [];
       const errors: string[] = [];
       const toChild = (e: FsEntry): TransferCandidateChild => ({
@@ -500,74 +503,92 @@ export const AddModal: React.FC<Props> = ({
         partial: !!e.partial_of,
       });
 
-      for (const p of selectedPaths) {
-        const name = p.split(/[/\\]/).pop() || p;
-        try {
-          const listing = await API.fsList(p);
-          if (!seen.has(listing.path)) {
-            seen.add(listing.path);
+      // Breadth-first scan: the selected folders, their subfolders, and so on
+      // (completed data is often sorted into category folders, e.g.
+      // Complete/Movies/<torrent>). Each listed folder is a candidate; files
+      // are candidates for single-file torrents.
+      type ScanDir = { path: string; name: string; depth: number };
+      let level: ScanDir[] = selectedPaths.map((p) => ({
+        path: p,
+        name: p.split(/[/\\]/).pop() || p,
+        depth: 0,
+      }));
+      let scanned = 0;
+      let scanTruncated = false;
+      while (level.length > 0) {
+        const room = MAX_TRANSFER_SCAN_DIRS - scanned;
+        if (room <= 0) {
+          scanTruncated = true;
+          break;
+        }
+        if (level.length > room) scanTruncated = true;
+        const batch = level.slice(0, room);
+        const nextLevel: ScanDir[] = [];
+        await mapLimit(batch, 8, async (d) => {
+          try {
+            const listing = await API.fsList(d.path);
+            if (seen.has(`dir:${listing.path}`)) return;
+            seen.add(`dir:${listing.path}`);
             candidates.push({
               entryPath: listing.path,
               path: listing.path,
-              name,
+              name: d.name,
               kind: "dir",
+              isRoot: d.depth === 0,
               children: listing.entries.map(toChild),
             });
-          }
-          for (const e of listing.entries) {
-            if (e.is_torrent) {
-              discoveredTorrents.push({
-                id: nextId(),
-                label: e.name.replace(/\.torrent$/i, ""),
-                source: "transfer",
-                status: "ready",
-                kind: "server_path",
-                serverPath: e.path,
-              });
-              continue;
+            for (const e of listing.entries) {
+              if (e.is_torrent) {
+                if (d.depth === 0) {
+                  discoveredTorrents.push({
+                    id: nextId(),
+                    label: e.name.replace(/\.torrent$/i, ""),
+                    source: "transfer",
+                    status: "ready",
+                    kind: "server_path",
+                    serverPath: e.path,
+                  });
+                }
+                continue;
+              }
+              if (seen.has(e.path)) continue;
+              seen.add(e.path);
+              if (e.is_dir) {
+                if (d.depth < MAX_TRANSFER_SCAN_DEPTH) {
+                  nextLevel.push({
+                    path: e.path,
+                    name: e.name,
+                    depth: d.depth + 1,
+                  });
+                }
+              } else {
+                // Single-file torrent data: the containing folder is the
+                // output folder.
+                candidates.push({
+                  entryPath: e.path,
+                  path: listing.path,
+                  name: stripPartialSuffix(e.name),
+                  kind: "file",
+                  size: e.size,
+                  partial: !!e.partial_of,
+                });
+              }
             }
-            if (seen.has(e.path)) continue;
-            seen.add(e.path);
-            if (e.is_dir) {
-              subdirs.push(e);
-            } else {
-              // Single-file torrent data sits directly in the folder; that
-              // folder is the output folder.
-              candidates.push({
-                entryPath: e.path,
-                path: listing.path,
-                name: stripPartialSuffix(e.name),
-                kind: "file",
-                size: e.size,
-                partial: !!e.partial_of,
-              });
-            }
+          } catch (err: unknown) {
+            errors.push(`${d.name}: ${errText(err)}`);
+          } finally {
+            scanned++;
+            if (scanned % 25 === 0)
+              setTransferMsg(`Scanning folders… ${scanned}`);
           }
-        } catch (err: unknown) {
-          errors.push(`${name}: ${errText(err)}`);
-        }
+        });
+        level = nextLevel;
       }
-
-      setTransferMsg(`Scanning ${subdirs.length} folders…`);
-      await mapLimit(subdirs, 8, async (e) => {
-        try {
-          const sub = await API.fsList(e.path);
-          candidates.push({
-            entryPath: e.path,
-            path: e.path,
-            name: e.name,
-            kind: "dir",
-            children: sub.entries.map(toChild),
-          });
-        } catch {
-          candidates.push({
-            entryPath: e.path,
-            path: e.path,
-            name: e.name,
-            kind: "dir",
-          });
-        }
-      });
+      if (scanTruncated) {
+        errors.push(
+          `scan stopped after ${MAX_TRANSFER_SCAN_DIRS} folders — select narrower folders`,
+        );
+      }
 
       // Merge newly discovered .torrent paths, then read metadata for every
       // staged torrent that doesn't have it yet.
