@@ -3,6 +3,7 @@ import { APIContext } from "../../context";
 import { FsEntry, FsRoot } from "../../api-types";
 import { Button } from "../buttons/Button";
 import { Spinner } from "../Spinner";
+import { formatBytes } from "../../helper/formatBytes";
 
 export type FilesystemBrowserMode =
   "select-torrents" | "select-directory" | "select-directories";
@@ -42,7 +43,12 @@ export const FilesystemBrowser: React.FC<FilesystemBrowserProps> = ({
   const [entries, setEntries] = useState<FsEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Selection is kept across navigation (keyed by full path) so folders in
+  // different places/roots can be picked together.
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [selectedEntries, setSelectedEntries] = useState<Map<string, FsEntry>>(
+    new Map(),
+  );
   const [truncated, setTruncated] = useState(false);
 
   const loadRoots = useCallback(async () => {
@@ -72,7 +78,6 @@ export const FilesystemBrowser: React.FC<FilesystemBrowserProps> = ({
         setParent(r.parent ?? null);
         setEntries(r.entries);
         setTruncated(!!r.truncated);
-        setSelected(new Set());
       } catch (e: unknown) {
         const err = e as { text?: string; message?: string };
         setError(err?.text || err?.message || String(e));
@@ -90,6 +95,27 @@ export const FilesystemBrowser: React.FC<FilesystemBrowserProps> = ({
   useEffect(() => {
     if (path) loadList(path);
   }, [path, loadList]);
+
+  useEffect(() => {
+    setSelectedEntries((prev) => {
+      const next = new Map<string, FsEntry>();
+      for (const p of selected) {
+        const e = prev.get(p) ?? entries.find((x) => x.path === p);
+        if (e) next.set(p, e);
+      }
+      return next;
+    });
+  }, [selected, entries]);
+
+  const isSelectable = (e: FsEntry) =>
+    mode === "select-directory" || mode === "select-directories"
+      ? e.is_dir
+      : e.is_dir || e.is_torrent;
+
+  const selectAllHere = () => {
+    const here = entries.filter(isSelectable).map((e) => e.path);
+    setSelected((prev) => new Set([...prev, ...here]));
+  };
 
   const toggle = (entry: FsEntry) => {
     if (mode === "select-directory") {
@@ -131,7 +157,7 @@ export const FilesystemBrowser: React.FC<FilesystemBrowserProps> = ({
     // Expand selected folders into torrent paths
     const paths: string[] = [];
     for (const p of selected) {
-      const ent = entries.find((e) => e.path === p);
+      const ent = selectedEntries.get(p) ?? entries.find((e) => e.path === p);
       if (ent?.is_dir) {
         try {
           const r = await API.fsList(p, {
@@ -151,6 +177,7 @@ export const FilesystemBrowser: React.FC<FilesystemBrowserProps> = ({
       }
     }
     onConfirm(paths);
+    setSelected(new Set());
   };
 
   const canConfirm =
@@ -203,10 +230,7 @@ export const FilesystemBrowser: React.FC<FilesystemBrowserProps> = ({
         ) : (
           <ul className="divide-y divide-divider">
             {entries.map((e) => {
-              const selectable =
-                mode === "select-directory" || mode === "select-directories"
-                  ? e.is_dir
-                  : e.is_dir || e.is_torrent;
+              const selectable = isSelectable(e);
               const isSelected = selected.has(e.path);
               return (
                 <li
@@ -243,6 +267,19 @@ export const FilesystemBrowser: React.FC<FilesystemBrowserProps> = ({
                   >
                     {e.name}
                   </span>
+                  {e.partial_of && (
+                    <span
+                      className="text-xs text-amber-600 dark:text-amber-400 whitespace-nowrap"
+                      title={`qBittorrent incomplete file for ${e.partial_of}`}
+                    >
+                      partial (qBittorrent)
+                    </span>
+                  )}
+                  {!e.is_dir && e.size !== undefined && (
+                    <span className="text-xs text-secondary whitespace-nowrap tabular-nums">
+                      {formatBytes(e.size)}
+                    </span>
+                  )}
                   {e.is_dir && (
                     <Button
                       size="sm"
@@ -259,6 +296,34 @@ export const FilesystemBrowser: React.FC<FilesystemBrowserProps> = ({
           </ul>
         )}
       </div>
+
+      {(mode === "select-directories" || mode === "select-torrents") &&
+        multi && (
+          <div className="flex flex-wrap items-center gap-1 text-xs">
+            <Button size="sm" variant="secondary" onClick={selectAllHere}>
+              Select all here
+            </Button>
+            {selected.size > 0 && (
+              <Button
+                size="sm"
+                variant="cancel"
+                onClick={() => setSelected(new Set())}
+              >
+                Clear selection
+              </Button>
+            )}
+            {mode === "select-directories" &&
+              [...selected].map((p) => (
+                <span
+                  key={p}
+                  className="font-mono bg-primary/10 text-primary rounded px-1.5 py-0.5"
+                  title={p}
+                >
+                  {p.split(/[/\\]/).filter(Boolean).slice(-2).join("/")}
+                </span>
+              ))}
+          </div>
+        )}
 
       {truncated && (
         <div className="text-sm text-secondary">

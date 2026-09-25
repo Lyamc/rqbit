@@ -15,9 +15,12 @@ import { UrlLinesEditor } from "../add/UrlLinesEditor";
 import { extractTorrentSources } from "../../helper/parseTorrentSources";
 import {
   TransferCandidate,
+  TransferCandidateChild,
   displayNameForSource,
   matchTransferFolders,
+  stripPartialSuffix,
 } from "../../helper/matchTransferFolders";
+import { AddTorrentResponse, FsEntry } from "../../api-types";
 import {
   BulkImportProgress,
   BulkWorkItem,
@@ -49,6 +52,36 @@ const isMagnetItem = (i: StagingItem) =>
   i.kind === "magnet" ||
   (!!i.text &&
     (i.text.startsWith("magnet:") || /^[0-9a-fA-F]{40}$/.test(i.text)));
+
+/** Run `fn` over `items` with at most `limit` in flight. */
+async function mapLimit<T>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<void>,
+): Promise<void> {
+  let next = 0;
+  const workers = Array.from(
+    { length: Math.min(limit, items.length) },
+    async () => {
+      while (next < items.length) {
+        const i = next++;
+        await fn(items[i]);
+      }
+    },
+  );
+  await Promise.all(workers);
+}
+
+const errText = (e: unknown) => {
+  const err = e as { text?: string; message?: string };
+  return String(err?.text || err?.message || e);
+};
+
+type ItemOpts = {
+  overwrite: boolean;
+  output_folder?: string;
+  adopt_foreign_incomplete?: "qbit";
+};
 
 const formatDuration = (ms: number) => {
   const m = Math.round(ms / 60_000);
@@ -117,6 +150,8 @@ export const AddModal: React.FC<Props> = ({
     }
     return items;
   });
+  const queueRef = useRef(queue);
+  queueRef.current = queue;
   const [outputFolder, setOutputFolder] = useState("");
   const [overwrite, setOverwrite] = useState(true);
   const [transferMode, setTransferMode] = useState(false);
@@ -157,9 +192,14 @@ export const AddModal: React.FC<Props> = ({
     return detectedUrls.filter((s) => !queued.has(s.value));
   }, [detectedUrls, queue]);
 
+  // In transfer mode only items matched to existing data are added; the rest
+  // stay staged for review (turn transfer off to add them as fresh downloads).
+  const isStartable = (i: StagingItem) =>
+    (i.status === "ready" || i.status === "pending") &&
+    (!transferMode || i.matchStatus === "matched");
   const readyCount =
-    queue.filter((i) => i.status === "ready" || i.status === "pending").length +
-    pastedNotQueued.length;
+    queue.filter(isStartable).length +
+    (transferMode ? 0 : pastedNotQueued.length);
   const canStart = !running && readyCount > 0;
   const inFlight = queue.filter(
     (i) => i.status === "running" || i.status === "resolving",
@@ -402,9 +442,45 @@ export const AddModal: React.FC<Props> = ({
         matchStatus: undefined,
         matchConfidence: undefined,
         matchReason: undefined,
+        matchEntryPath: undefined,
+        matchAlternates: undefined,
       })),
     );
     setTransferMsg(null);
+  };
+
+  /** Read name + file list for a staged item without adding it. */
+  const readTorrentMeta = async (
+    item: StagingItem,
+  ): Promise<StagingItem["meta"] | undefined> => {
+    let r: AddTorrentResponse | undefined;
+    if (item.kind === "server_path" && item.serverPath) {
+      r = await API.uploadTorrentFromServerPath(item.serverPath, {
+        list_only: true,
+      });
+    } else if (item.kind === "file" && item.file) {
+      r = await API.uploadTorrent(item.file, { list_only: true });
+    } else if (item.kind === "torrent_bytes" && item.bytes) {
+      const file = new File(
+        [
+          item.bytes.buffer.slice(
+            item.bytes.byteOffset,
+            item.bytes.byteOffset + item.bytes.byteLength,
+          ) as ArrayBuffer,
+        ],
+        "t.torrent",
+      );
+      r = await API.uploadTorrent(file, { list_only: true });
+    }
+    // Magnets would need a (possibly very slow) metadata resolve; they fall
+    // back to name-only matching.
+    if (!r) return undefined;
+    return {
+      name: r.details.name ?? undefined,
+      files: r.details.files
+        .filter((f) => !f.attributes?.padding)
+        .map((f) => ({ components: f.components, length: f.length })),
+    };
   };
 
   const onTransferFolders = async (selectedPaths: string[]) => {
@@ -414,69 +490,128 @@ export const AddModal: React.FC<Props> = ({
     try {
       const candidates: TransferCandidate[] = [];
       const seen = new Set<string>();
-      const pushCand = (path: string, name: string, children?: string[]) => {
-        if (seen.has(path)) return;
-        seen.add(path);
-        candidates.push({ path, name, children });
-      };
-
+      const subdirs: FsEntry[] = [];
       const discoveredTorrents: StagingItem[] = [];
+      const errors: string[] = [];
+      const toChild = (e: FsEntry): TransferCandidateChild => ({
+        name: stripPartialSuffix(e.name),
+        isDir: e.is_dir,
+        size: e.size,
+        partial: !!e.partial_of,
+      });
 
       for (const p of selectedPaths) {
         const name = p.split(/[/\\]/).pop() || p;
         try {
           const listing = await API.fsList(p);
-          const children = listing.entries.map((e) => e.name);
-          pushCand(p, name, children);
-          for (const e of listing.entries) {
-            if (!e.is_dir) continue;
-            try {
-              const sub = await API.fsList(e.path);
-              pushCand(
-                e.path,
-                e.name,
-                sub.entries.map((x) => x.name),
-              );
-            } catch {
-              pushCand(e.path, e.name);
-            }
-          }
-          for (const e of listing.entries) {
-            if (!e.is_torrent) continue;
-            discoveredTorrents.push({
-              id: nextId(),
-              label: e.name.replace(/\.torrent$/i, ""),
-              source: "transfer",
-              status: "ready",
-              kind: "server_path",
-              serverPath: e.path,
+          if (!seen.has(listing.path)) {
+            seen.add(listing.path);
+            candidates.push({
+              entryPath: listing.path,
+              path: listing.path,
+              name,
+              kind: "dir",
+              children: listing.entries.map(toChild),
             });
           }
+          for (const e of listing.entries) {
+            if (e.is_torrent) {
+              discoveredTorrents.push({
+                id: nextId(),
+                label: e.name.replace(/\.torrent$/i, ""),
+                source: "transfer",
+                status: "ready",
+                kind: "server_path",
+                serverPath: e.path,
+              });
+              continue;
+            }
+            if (seen.has(e.path)) continue;
+            seen.add(e.path);
+            if (e.is_dir) {
+              subdirs.push(e);
+            } else {
+              // Single-file torrent data sits directly in the folder; that
+              // folder is the output folder.
+              candidates.push({
+                entryPath: e.path,
+                path: listing.path,
+                name: stripPartialSuffix(e.name),
+                kind: "file",
+                size: e.size,
+                partial: !!e.partial_of,
+              });
+            }
+          }
         } catch (err: unknown) {
-          const e = err as { text?: string; message?: string };
-          pushCand(p, name);
-          setTransferMsg(e?.text || e?.message || String(err));
+          errors.push(`${name}: ${errText(err)}`);
         }
       }
 
-      setQueue((prev) => {
-        // Merge newly discovered .torrent paths (dedupe by serverPath/text).
-        const seenKeys = new Set(
-          prev.map((p) => {
-            if (p.serverPath) return `srv:${p.serverPath}`;
-            if (p.text) return `text:${p.text}`;
-            return p.id;
-          }),
-        );
-        const merged = [...prev];
-        for (const item of discoveredTorrents) {
-          const key = item.serverPath ? `srv:${item.serverPath}` : item.id;
-          if (seenKeys.has(key)) continue;
-          seenKeys.add(key);
-          merged.push(item);
+      setTransferMsg(`Scanning ${subdirs.length} folders…`);
+      await mapLimit(subdirs, 8, async (e) => {
+        try {
+          const sub = await API.fsList(e.path);
+          candidates.push({
+            entryPath: e.path,
+            path: e.path,
+            name: e.name,
+            kind: "dir",
+            children: sub.entries.map(toChild),
+          });
+        } catch {
+          candidates.push({
+            entryPath: e.path,
+            path: e.path,
+            name: e.name,
+            kind: "dir",
+          });
         }
+      });
 
-        const hints = merged.map((i) => ({ id: i.id, label: i.label }));
+      // Merge newly discovered .torrent paths, then read metadata for every
+      // staged torrent that doesn't have it yet.
+      const key = (i: StagingItem) =>
+        i.serverPath ? `srv:${i.serverPath}` : i.text ? `text:${i.text}` : i.id;
+      const current = queueRef.current;
+      const known = new Set(current.map(key));
+      const newItems = discoveredTorrents.filter((d) => {
+        const k = key(d);
+        if (known.has(k)) return false;
+        known.add(k);
+        return true;
+      });
+      const needMeta = [...current, ...newItems].filter((i) => !i.meta);
+      const metaById = new Map<string, StagingItem["meta"]>();
+      let metaDone = 0;
+      await mapLimit(needMeta, 4, async (i) => {
+        try {
+          const m = await readTorrentMeta(i);
+          if (m) metaById.set(i.id, m);
+        } catch (err: unknown) {
+          errors.push(`${i.label}: ${errText(err)}`);
+        }
+        metaDone++;
+        setTransferMsg(
+          `Reading torrent metadata… ${metaDone}/${needMeta.length}`,
+        );
+      });
+
+      setQueue((prev) => {
+        const prevKeys = new Set(prev.map(key));
+        const merged = [
+          ...prev,
+          ...newItems.filter((n) => !prevKeys.has(key(n))),
+        ].map((i) =>
+          metaById.has(i.id) ? { ...i, meta: metaById.get(i.id) } : i,
+        );
+
+        const hints = merged.map((i) => ({
+          id: i.id,
+          label: i.label,
+          name: i.meta?.name,
+          files: i.meta?.files,
+        }));
         const matches = matchTransferFolders(hints, candidates);
         const byId = new Map(matches.map((m) => [m.torrentId, m]));
         let matched = 0;
@@ -491,16 +626,19 @@ export const AddModal: React.FC<Props> = ({
           return {
             ...item,
             matchedPath: m.path,
+            matchEntryPath: m.entryPath,
             matchStatus: m.status,
             matchConfidence: m.confidence,
             matchReason: m.reason,
+            matchAlternates: m.alternates?.map((a) => a.entryPath),
           };
         });
         setTransferMsg(
-          `Transfer: ${candidates.length} folder${candidates.length === 1 ? "" : "s"} · ` +
+          `Transfer: ${selectedPaths.length} folder${selectedPaths.length === 1 ? "" : "s"} scanned (${candidates.length} candidates) · ` +
             `${matched} matched · ${ambiguous} ambiguous · ${unmatched} unmatched` +
-            (discoveredTorrents.length
-              ? ` · ${discoveredTorrents.length} .torrent found`
+            (newItems.length ? ` · ${newItems.length} .torrent found` : "") +
+            (errors.length
+              ? ` · ${errors.length} error(s): ${errors.slice(0, 3).join("; ")}`
               : ""),
         );
         return next;
@@ -518,20 +656,19 @@ export const AddModal: React.FC<Props> = ({
     setRunning(true);
     setProgress(null);
 
-    const pasted: StagingItem[] = pastedNotQueued.map((s) => ({
-      id: nextId(),
-      label: displayNameForSource(s.value),
-      source: "url",
-      status: "pending",
-      kind: s.kind,
-      text: s.value,
-    }));
+    const pasted: StagingItem[] = (transferMode ? [] : pastedNotQueued).map(
+      (s) => ({
+        id: nextId(),
+        label: displayNameForSource(s.value),
+        source: "url",
+        status: "pending",
+        kind: s.kind,
+        text: s.value,
+      }),
+    );
     if (pasted.length > 0) setPasteText("");
 
-    const workItems = [
-      ...queue.filter((i) => i.status === "ready" || i.status === "pending"),
-      ...pasted,
-    ];
+    const workItems = [...queue.filter(isStartable), ...pasted];
 
     // Mark them queued in UI
     setQueue((prev) => [
@@ -580,10 +717,20 @@ export const AddModal: React.FC<Props> = ({
           });
         },
         worker: async (item) => {
-          const itemOpts = {
-            overwrite: transferMode ? true : overwrite,
-            output_folder: item.matchedPath || outputFolder.trim() || undefined,
-          };
+          const adopt = transferMode && item.matchStatus === "matched";
+          const itemOpts: ItemOpts = adopt
+            ? {
+                // Reuse the other client's files in place: the server renames
+                // qBittorrent `.!qB` partials and refuses files larger than
+                // the torrent expects, then hash-checks before writing.
+                overwrite: true,
+                output_folder: item.matchedPath,
+                adopt_foreign_incomplete: "qbit",
+              }
+            : {
+                overwrite,
+                output_folder: outputFolder.trim() || undefined,
+              };
           const magnet = isMagnetItem(item) && !item.file && !item.bytes;
           const timeoutMs = magnet ? MAGNET_TIMEOUT_MS : OTHER_TIMEOUT_MS;
           const ctrl = new AbortController();
@@ -628,7 +775,7 @@ export const AddModal: React.FC<Props> = ({
 
   const addOne = async (
     item: StagingItem,
-    itemOpts: { overwrite: boolean; output_folder?: string },
+    itemOpts: ItemOpts,
     init: { signal: AbortSignal },
   ) => {
     if (item.kind === "server_path" && item.serverPath) {

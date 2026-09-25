@@ -159,6 +159,9 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
     if (opts?.output_folder) {
       url += `&output_folder=${encodeURIComponent(opts.output_folder)}`;
     }
+    if (opts?.adopt_foreign_incomplete) {
+      url += `&adopt_foreign_incomplete=${opts.adopt_foreign_incomplete}`;
+    }
     if (typeof data === "string") {
       url += "&is_url=true";
     }
@@ -177,6 +180,9 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
     }
     if (opts?.output_folder) {
       url += `&output_folder=${encodeURIComponent(opts.output_folder)}`;
+    }
+    if (opts?.adopt_foreign_incomplete) {
+      url += `&adopt_foreign_incomplete=${opts.adopt_foreign_incomplete}`;
     }
     return makeRequest("POST", url, "", false, init);
   },

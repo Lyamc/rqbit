@@ -27,6 +27,9 @@ pub struct TorrentAddQueryParams {
     pub list_only: Option<bool>,
     /// Optional Newznab/Torznab category id (e.g. 2000=Movies, 5070=Anime).
     pub torznab_category: Option<u32>,
+    /// Adopt another client's data in output_folder before the initial check
+    /// (transfer from other client). Supported: "qbit" (renames `.!qB` partials).
+    pub adopt_foreign_incomplete: Option<String>,
 }
 
 impl Serialize for OnlyFiles {
@@ -111,6 +114,7 @@ impl TorrentAddQueryParams {
                 ..Default::default()
             }),
             torznab_category: self.torznab_category,
+            adopt_foreign_incomplete: self.adopt_foreign_incomplete,
             ..Default::default()
         }
     }

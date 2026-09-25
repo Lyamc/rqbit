@@ -27,6 +27,15 @@ export type StagingItem = {
   matchStatus?: TransferMatchStatus;
   matchConfidence?: number;
   matchReason?: string;
+  /** Folder/file the match was based on. */
+  matchEntryPath?: string;
+  /** Close alternatives when ambiguous (entry paths). */
+  matchAlternates?: string[];
+  /** Torrent name + files, read via list_only (transfer matching). */
+  meta?: {
+    name?: string;
+    files: { components: string[]; length: number }[];
+  };
   /** Epoch ms when the add request for this item was sent. */
   startedAt?: number;
 };
@@ -49,6 +58,10 @@ const statusLabel = (s: StagingStatus) => {
       return "cancelled";
   }
 };
+
+/** Last two path components, e.g. `Complete/Movie (2020)`. */
+const shortPath = (p: string) =>
+  p.split(/[/\\]/).filter(Boolean).slice(-2).join("/");
 
 const formatElapsed = (ms: number) => {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -151,26 +164,35 @@ export const StagingQueue: React.FC<{
                 </span>
                 {item.matchStatus === "matched" && item.matchedPath && (
                   <span
-                    className="text-green-600 dark:text-green-400 truncate"
-                    title={item.matchedPath}
+                    className="text-green-600 dark:text-green-400 truncate max-w-full"
+                    title={`${item.matchEntryPath ?? item.matchedPath}\n→ output folder: ${item.matchedPath}${item.matchReason ? `\n${item.matchReason}` : ""}`}
                   >
                     matched {Math.round((item.matchConfidence ?? 0) * 100)}% ·{" "}
-                    {item.matchedPath.split(/[/\\]/).pop()}
+                    {shortPath(item.matchEntryPath ?? item.matchedPath)}
+                    {item.matchReason ? ` · ${item.matchReason}` : ""}
                   </span>
                 )}
                 {item.matchStatus === "ambiguous" && (
                   <span
-                    className="text-amber-600 dark:text-amber-400 truncate"
-                    title={item.matchedPath}
+                    className="text-amber-600 dark:text-amber-400 truncate max-w-full"
+                    title={(item.matchAlternates ?? []).join("\n")}
                   >
-                    ambiguous {Math.round((item.matchConfidence ?? 0) * 100)}%
-                    {item.matchedPath
-                      ? ` · ${item.matchedPath.split(/[/\\]/).pop()}`
-                      : ""}
+                    ambiguous {Math.round((item.matchConfidence ?? 0) * 100)}% ·
+                    not added ·{" "}
+                    {(item.matchAlternates ?? [])
+                      .slice(0, 3)
+                      .map(shortPath)
+                      .join(" | ")}
                   </span>
                 )}
                 {item.matchStatus === "unmatched" && (
-                  <span className="text-secondary">unmatched</span>
+                  <span
+                    className="text-secondary"
+                    title={item.matchReason ?? undefined}
+                  >
+                    unmatched · not added
+                    {item.matchReason ? ` · ${item.matchReason}` : ""}
+                  </span>
                 )}
                 {item.status === "resolving" && (
                   <span className="text-secondary">

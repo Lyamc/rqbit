@@ -311,6 +311,14 @@ pub struct AddTorrentOptions {
     /// Optional Newznab/Torznab category id from indexer (survives session restore).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub torznab_category: Option<u32>,
+
+    /// Adopt data left by another client in `output_folder` ("transfer from
+    /// other client"). Currently only `"qbit"` is supported: before the
+    /// initial check, `<file>.!qB` partial files are renamed to the name rqbit
+    /// expects (never deleted or truncated), and existing files larger than
+    /// the torrent expects make the add fail instead of being truncated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adopt_foreign_incomplete: Option<String>,
 }
 
 pub struct ListOnlyResponse {
@@ -1373,6 +1381,42 @@ impl Session {
             }));
         }
 
+        // Transfer from another client: adopt its files before storage opens
+        // them. Skipped if the torrent is already managed (the normal
+        // AlreadyManaged response is returned below).
+        let mut adopted_keep_final: std::collections::HashSet<usize> = Default::default();
+        if let Some(client) = opts.adopt_foreign_incomplete.as_deref() {
+            let foreign_suffix = match client {
+                "qbit" | "qbittorrent" => ".!qB",
+                other => bail!("adopt_foreign_incomplete: unsupported client {other:?} (supported: qbit)"),
+            };
+            let already_managed = self
+                .db
+                .read()
+                .torrents
+                .values()
+                .any(|t| t.info_hash() == info_hash);
+            if !already_managed {
+                let files: Vec<(usize, PathBuf, u64)> = metadata
+                    .file_infos
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, fi)| {
+                        !fi.attrs.padding
+                            && only_files.as_ref().map(|o| o.contains(i)).unwrap_or(true)
+                    })
+                    .map(|(i, fi)| (i, fi.relative_filename.clone(), fi.len))
+                    .collect();
+                let ext = self.preferences.incomplete_extension();
+                adopted_keep_final = adopt_foreign_files(
+                    &output_folder,
+                    &files,
+                    foreign_suffix,
+                    ext.as_deref(),
+                )?;
+            }
+        }
+
         let storage_factory = opts
             .storage_factory
             .take()
@@ -1411,6 +1455,9 @@ impl Session {
                     .file_infos
                     .iter()
                     .enumerate()
+                    // Adopted files that already exist under their final name
+                    // (e.g. another client's completed data) keep it.
+                    .filter(|(i, _)| !adopted_keep_final.contains(i))
                     .map(|(i, fi)| (i, fi.relative_filename.clone(), fi.attrs.padding))
                     .collect();
                 file_renames = apply_incomplete_suffix_to_renames(&infos, &file_renames, &ext);
@@ -2102,6 +2149,119 @@ mod tests {
     }
 }
 
+
+fn path_with_suffix(p: &Path, suffix: &str) -> PathBuf {
+    let mut os = p.as_os_str().to_owned();
+    os.push(suffix);
+    PathBuf::from(os)
+}
+
+/// Adopt another client's files in `output_folder` for a torrent being added.
+///
+/// `files` is (file_id, relative path, expected length) for selected,
+/// non-padding files. For each file:
+/// - `<final>` exists: reused as-is (returned in the "keep final name" set so
+///   rqbit's own incomplete suffix isn't applied to it).
+/// - else `<final><foreign_suffix>` exists (e.g. qBittorrent's `.!qB`): renamed
+///   to `<final><incomplete_ext>` if rqbit's incomplete extension is enabled,
+///   else to `<final>`. Skipped with a warning if the target already exists.
+///
+/// Nothing is deleted or truncated. Before renaming anything, every existing
+/// candidate is checked: a file larger than the torrent expects means this is
+/// not the same data (rqbit would truncate it to the expected length), so the
+/// whole add is refused.
+fn adopt_foreign_files(
+    output_folder: &Path,
+    files: &[(usize, PathBuf, u64)],
+    foreign_suffix: &str,
+    incomplete_ext: Option<&str>,
+) -> anyhow::Result<std::collections::HashSet<usize>> {
+    let size_of = |p: &Path| -> anyhow::Result<Option<u64>> {
+        match std::fs::symlink_metadata(p) {
+            Ok(m) if m.is_file() => Ok(Some(m.len())),
+            Ok(_) => bail!("{p:?} exists but is not a regular file"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).with_context(|| format!("error inspecting {p:?}")),
+        }
+    };
+
+    struct Plan {
+        file_id: usize,
+        final_exists: bool,
+        rename: Option<(PathBuf, PathBuf)>,
+    }
+
+    let mut plans = Vec::with_capacity(files.len());
+    let mut too_big = Vec::new();
+    for (file_id, rel, len) in files {
+        let final_path = output_folder.join(rel);
+        let mut plan = Plan {
+            file_id: *file_id,
+            final_exists: false,
+            rename: None,
+        };
+        if let Some(sz) = size_of(&final_path)? {
+            plan.final_exists = true;
+            if sz > *len {
+                too_big.push(format!("{final_path:?} is {sz} bytes, torrent expects {len}"));
+            }
+        } else {
+            let foreign = path_with_suffix(&final_path, foreign_suffix);
+            if let Some(sz) = size_of(&foreign)? {
+                if sz > *len {
+                    too_big.push(format!("{foreign:?} is {sz} bytes, torrent expects {len}"));
+                }
+                let target = match incomplete_ext {
+                    Some(ext) => path_with_suffix(&final_path, ext),
+                    None => final_path.clone(),
+                };
+                plan.rename = Some((foreign, target));
+            }
+        }
+        plans.push(plan);
+    }
+
+    if !too_big.is_empty() {
+        let n = too_big.len();
+        too_big.truncate(5);
+        bail!(
+            "refusing to adopt existing data in {output_folder:?}: {n} file(s) are larger than the torrent expects, so this is probably different data and would be truncated: {}",
+            too_big.join("; ")
+        );
+    }
+
+    let mut keep_final = std::collections::HashSet::new();
+    let (mut renamed, mut reused) = (0usize, 0usize);
+    for plan in plans {
+        if plan.final_exists {
+            keep_final.insert(plan.file_id);
+            reused += 1;
+            continue;
+        }
+        let Some((from, to)) = plan.rename else {
+            continue;
+        };
+        if to.exists() {
+            warn!(?from, ?to, "adopt: not renaming foreign partial file, target already exists");
+            continue;
+        }
+        std::fs::rename(&from, &to)
+            .with_context(|| format!("error renaming {from:?} to {to:?}"))?;
+        info!(?from, ?to, "adopt: renamed foreign partial file");
+        renamed += 1;
+        if incomplete_ext.is_none() {
+            keep_final.insert(plan.file_id);
+        }
+    }
+    info!(
+        ?output_folder,
+        files = files.len(),
+        reused,
+        renamed,
+        "adopted data from other client"
+    );
+    Ok(keep_final)
+}
 
 fn drop_incomplete_extension(
     handle: &ManagedTorrentHandle,

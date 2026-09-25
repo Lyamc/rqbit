@@ -329,6 +329,9 @@ export interface AddTorrentOptions {
   force_tracker_interval?: Duration | null;
   initial_peers?: string[] | null; // Assuming SocketAddr is equivalent to a string in TypeScript
   preferred_id?: number | null;
+  /** Transfer from another client: adopt its files in output_folder before
+   *  the initial check ("qbit" renames `name.!qB` partials). */
+  adopt_foreign_incomplete?: "qbit" | null;
 }
 
 export type Value = string | number | boolean;
@@ -388,6 +391,8 @@ export interface FsEntry {
   is_dir: boolean;
   is_torrent: boolean;
   size?: number;
+  /** Another client's in-progress file (qBittorrent `name.!qB`): final name. */
+  partial_of?: string;
 }
 
 export interface FsListResponse {
