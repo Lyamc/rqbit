@@ -909,6 +909,9 @@ pub struct RepairSummary {
 pub struct RepairStatus {
     pub state: RepairState,
     pub auto: bool,
+    /// Automatic repair waiting for the global repair slot.
+    #[serde(default)]
+    pub waiting_for_slot: bool,
     pub started_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<String>,
@@ -1166,6 +1169,7 @@ impl DamageTracker {
         g.repair = Some(RepairStatus {
             state: RepairState::Running,
             auto,
+            waiting_for_slot: auto,
             started_at: crate::adopt::rfc3339_now(),
             finished_at: None,
             scanned_bytes: 0,
@@ -1177,6 +1181,12 @@ impl DamageTracker {
             error: None,
         });
         Ok(())
+    }
+
+    fn set_waiting_for_slot(&self, v: bool) {
+        if let Some(r) = self.inner.lock().repair.as_mut() {
+            r.waiting_for_slot = v;
+        }
     }
 
     fn set_progress(&self, scanned: u64, files_done: usize, current_file: Option<String>) {
@@ -1441,6 +1451,7 @@ impl Session {
                 } else {
                     None
                 };
+                h.shared.damage.set_waiting_for_slot(false);
                 let r = session.run_repair(&h, metadata, files, held).await;
                 match r {
                     Ok(s) => {

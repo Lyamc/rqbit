@@ -3,6 +3,7 @@ import { StatusIcon } from "../StatusIcon";
 import { formatBytes } from "../../helper/formatBytes";
 import { getCompletionETA } from "../../helper/getCompletionETA";
 import { damageShortText } from "../../helper/damage";
+import { StatusBadge } from "../StatusBadge";
 import { memo } from "react";
 import {
   TORRENT_TABLE_CELL_PAD,
@@ -96,6 +97,13 @@ const TorrentTableRowUnmemoized: React.FC<TorrentTableRowProps> = ({
       >
         {torrent.id}
       </div>
+      <div
+        role="gridcell"
+        className={`${cellBase} text-center text-tertiary whitespace-nowrap`}
+        data-testid="queue-position"
+      >
+        {stats?.queue_position ?? ""}
+      </div>
       <div role="gridcell" className={cellBase}>
         <div className="truncate" title={name}>
           {name || "Loading..."}
@@ -114,6 +122,9 @@ const TorrentTableRowUnmemoized: React.FC<TorrentTableRowProps> = ({
             {damageText}
           </div>
         )}
+      </div>
+      <div role="gridcell" className={cellBase}>
+        <StatusBadge stats={stats} />
       </div>
       <div role="gridcell" className={numericCell}>
         {formatBytes(totalBytes)}

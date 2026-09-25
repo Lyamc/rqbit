@@ -7,6 +7,7 @@ import { formatBytes } from "../helper/formatBytes";
 import { getCompletionETA } from "../helper/getCompletionETA";
 import { StatusIcon } from "./StatusIcon";
 import { DamagedFilesNotice } from "./DamagedFilesNotice";
+import { StatusBadge } from "./StatusBadge";
 
 export const TorrentCardContent: React.FC<{
   torrent: TorrentListItem;
@@ -57,6 +58,7 @@ export const TorrentCardContent: React.FC<{
             <div className="text-left text-sm sm:text-base lg:text-lg text-ellipsis break-all line-clamp-2 sm:line-clamp-none">
               {torrent.name}
             </div>
+            <StatusBadge stats={statsResponse} className="shrink-0" />
           </div>
           <DamagedFilesNotice torrent={torrent} />
           {error ? (

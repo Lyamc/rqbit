@@ -294,6 +294,17 @@ pub async fn h_torrent_action_repair_files(
         .map(axum::Json)
 }
 
+pub async fn h_queue_order(State(state): State<ApiState>) -> Result<impl IntoResponse> {
+    Ok(axum::Json(state.api.api_queue_order()))
+}
+
+pub async fn h_queue_move(
+    State(state): State<ApiState>,
+    axum::Json(req): axum::Json<crate::api::QueueMoveRequest>,
+) -> Result<impl IntoResponse> {
+    state.api.api_queue_move(req).map(axum::Json)
+}
+
 pub async fn h_torrent_action_forget(
     State(state): State<ApiState>,
     Path(idx): Path<TorrentIdOrHash>,

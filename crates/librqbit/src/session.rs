@@ -147,6 +147,8 @@ pub struct Session {
 
     /// Session-level preferences (persisted as preferences.json).
     pub preferences: SessionPreferencesStore,
+    /// Queueing (active torrent limits) and persisted queue order.
+    pub(crate) queue: Arc<crate::torrent_queue::TorrentQueue>,
 
     /// Admin/server settings (persisted as admin.json). Restart often required.
     pub admin: AdminConfigStore,
@@ -854,6 +856,12 @@ impl Session {
                 .map(|p| p.join("admin.json"))
                 .unwrap_or_else(|| PathBuf::from("admin.json"));
             let admin = AdminConfigStore::load_or_default(admin_path).await;
+            let queue = Arc::new(crate::torrent_queue::TorrentQueue::load(
+                preferences_path
+                    .parent()
+                    .map(|p| p.join("queue.json"))
+                    .unwrap_or_else(|| PathBuf::from("queue.json")),
+            ));
             let limits_path = preferences_path
                 .parent()
                 .map(|p| p.join("limits.json"))
@@ -890,6 +898,7 @@ impl Session {
                 ratelimits: Limits::new(ratelimits_config),
                 add_jobs: AddJobs::default(),
                 preferences,
+                queue,
                 admin,
                 limits_path,
                 ipv4_only: opts.ipv4_only,
@@ -986,6 +995,7 @@ impl Session {
             }
 
             session.start_speed_estimator_updater();
+            session.start_queue_manager();
 
             Ok(session)
         }
@@ -1637,6 +1647,7 @@ impl Session {
                 file_renames: RwLock::new(file_renames),
                 torznab_category: opts.torznab_category,
                 damage: Default::default(),
+                runtime: Default::default(),
             });
 
             let initializing = Arc::new(TorrentStateInitializing::new(
@@ -2069,6 +2080,12 @@ impl Session {
     }
 
     pub async fn pause(&self, handle: &ManagedTorrentHandle) -> anyhow::Result<()> {
+        if handle.shared.runtime.queue_held() {
+            // Queued torrents are already stopped; pausing makes it a user pause.
+            handle.shared.runtime.set_queue_held(false);
+            self.try_update_persistence_metadata(handle).await;
+            return Ok(());
+        }
         handle.pause()?;
         self.try_update_persistence_metadata(handle).await;
         Ok(())
@@ -2408,3 +2425,175 @@ fn auto_organize_torrent(
     Ok(dest)
 }
 
+// ---------------------------------------------------------------------------------------
+// Queueing (active torrent limits)
+// ---------------------------------------------------------------------------------------
+
+impl Session {
+    /// Whether a torrent that wants to run must be held by the queue right now.
+    pub(crate) fn queue_should_hold(&self, id: TorrentId) -> bool {
+        self.preferences.queue_limits().is_some() && !self.queue.is_admitted(id)
+    }
+
+    /// Move torrents in the queue (multi-select; relative order kept). Persisted.
+    pub fn queue_move(
+        &self,
+        ids: &[TorrentIdOrHash],
+        mv: crate::torrent_queue::QueueMove,
+    ) -> anyhow::Result<()> {
+        self.queue_sync();
+        let mut sel = HashSet::new();
+        for id in ids {
+            let h = self
+                .get(*id)
+                .with_context(|| format!("torrent {id} not found"))?;
+            sel.insert(h.info_hash());
+        }
+        self.queue.move_hashes(&sel, mv);
+        Ok(())
+    }
+
+    /// Queue order as torrent ids.
+    pub fn queue_order(&self) -> Vec<TorrentId> {
+        self.queue_sync();
+        let db = self.db.read();
+        let by_hash: HashMap<Id20, TorrentId> =
+            db.torrents.values().map(|t| (t.info_hash(), t.id())).collect();
+        self.queue
+            .order()
+            .iter()
+            .filter_map(|h| by_hash.get(h).copied())
+            .collect()
+    }
+
+    fn queue_sync(&self) {
+        let present: Vec<(TorrentId, Id20)> = self
+            .db
+            .read()
+            .torrents
+            .values()
+            .map(|t| (t.id(), t.info_hash()))
+            .collect();
+        self.queue.sync(&present);
+    }
+
+    fn start_queue_manager(self: &Arc<Self>) {
+        self.spawn(
+            debug_span!(parent: self.rs(), "queue_manager"),
+            "queue_manager",
+            {
+                let s = Arc::downgrade(self);
+                async move {
+                    loop {
+                        let kick = {
+                            let Some(s) = s.upgrade() else {
+                                return Ok(());
+                            };
+                            s.queue_tick();
+                            let q = s.queue.clone();
+                            drop(s);
+                            q
+                        };
+                        tokio::select! {
+                            _ = kick.kick.notified() => {
+                                // Let bursts of state changes settle.
+                                tokio::time::sleep(Duration::from_millis(300)).await;
+                            }
+                            _ = tokio::time::sleep(Duration::from_secs(3)) => {}
+                        }
+                    }
+                }
+            },
+        )
+    }
+
+    /// One pass of the queue manager: compute which torrents may run (in queue order) and
+    /// hold / start torrents accordingly.
+    fn queue_tick(self: &Arc<Self>) {
+        use crate::torrent_queue::{QueueCandidate, admit};
+        self.queue_sync();
+        let torrents: Vec<ManagedTorrentHandle> =
+            self.db.read().torrents.values().cloned().collect();
+        let Some(limits) = self.preferences.queue_limits() else {
+            // Queueing off: release anything still held.
+            for t in torrents.iter().filter(|t| t.shared.runtime.queue_held()) {
+                self.queue.admit_one(t.id());
+                info!(id = t.id(), "queueing disabled: starting held torrent");
+                self.queue_start(t);
+            }
+            return;
+        };
+        let pos: HashMap<Id20, usize> = self
+            .queue
+            .order()
+            .into_iter()
+            .enumerate()
+            .map(|(i, h)| (h, i))
+            .collect();
+        let now = std::time::Instant::now();
+        let mut cands: Vec<(usize, QueueCandidate)> = Vec::new();
+        for t in &torrents {
+            let held = t.shared.runtime.queue_held();
+            let (active, finished, down, up) = {
+                let g = t.locked.read();
+                match &g.state {
+                    ManagedTorrentState::Live(l) => {
+                        let hns = l.get_hns().unwrap_or_default();
+                        (
+                            true,
+                            hns.finished(),
+                            l.down_speed_estimator().mbps(),
+                            l.up_speed_estimator().mbps(),
+                        )
+                    }
+                    ManagedTorrentState::Paused(p) if held => (false, p.hns().finished(), 0., 0.),
+                    _ => {
+                        self.queue.forget_speed(t.id());
+                        continue;
+                    }
+                }
+            };
+            let to_bps = |mbps: f64| (mbps * 1024.0 * 1024.0) as u64;
+            let slow = active && self.queue.observe_speed(t.id(), to_bps(down), to_bps(up), now);
+            if !active {
+                self.queue.forget_speed(t.id());
+            }
+            cands.push((
+                pos.get(&t.info_hash()).copied().unwrap_or(usize::MAX),
+                QueueCandidate {
+                    id: t.id(),
+                    seeding: finished,
+                    active,
+                    slow,
+                },
+            ));
+        }
+        cands.sort_by_key(|(p, c)| (*p, c.id));
+        let cands: Vec<QueueCandidate> = cands.into_iter().map(|(_, c)| c).collect();
+        let admitted = admit(&cands, &limits);
+        self.queue.set_admitted(admitted.clone());
+        let by_id: HashMap<TorrentId, &ManagedTorrentHandle> =
+            torrents.iter().map(|t| (t.id(), t)).collect();
+        for c in &cands {
+            let Some(t) = by_id.get(&c.id) else { continue };
+            if c.active && !admitted.contains(&c.id) {
+                info!(id = c.id, seeding = c.seeding, "queue: over active limits, holding torrent");
+                t.shared.runtime.set_queue_held(true);
+                if let Err(e) = t.pause() {
+                    t.shared.runtime.set_queue_held(false);
+                    warn!(id = c.id, "queue: error holding torrent: {e:#}");
+                }
+            } else if !c.active && admitted.contains(&c.id) {
+                info!(id = c.id, seeding = c.seeding, "queue: slot free, starting torrent");
+                self.queue_start(t);
+            }
+        }
+    }
+
+    fn queue_start(self: &Arc<Self>, t: &ManagedTorrentHandle) {
+        let peer_rx = self.make_peer_rx_managed_torrent(t, true);
+        if let Err(e) = t.start(peer_rx, false) {
+            warn!(id = t.id(), "queue: error starting torrent: {e:#}");
+        }
+    }
+}

@@ -19,6 +19,7 @@ import {
   FsRootsResponse,
   FsListResponse,
   ExtractResponse,
+  QueueMoveAction,
 } from "./api-types";
 
 // Define API URL and base path
@@ -279,6 +280,10 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
 
   restart: (index: number): Promise<void> => {
     return makeRequest("POST", `/torrents/${index}/restart`);
+  },
+
+  queueMove: (ids: number[], action: QueueMoveAction) => {
+    return makeRequest("POST", "/torrents/queue/move", { ids, action }, true);
   },
 
   fixErrors: (index: number): Promise<void> => {

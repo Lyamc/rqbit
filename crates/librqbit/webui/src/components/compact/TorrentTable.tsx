@@ -5,6 +5,7 @@ import { TorrentTableRow } from "./TorrentTableRow";
 import { useUIStore } from "../../stores/uiStore";
 import { Spinner } from "../Spinner";
 import { TableHeader } from "./TableHeader";
+import { statusSortValue } from "../../helper/status";
 import { isTorrentVisible, SortDirection } from "../../helper/torrentFilters";
 import {
   TORRENT_TABLE_CELL_PAD,
@@ -36,7 +37,9 @@ export type TableSortColumn =
   | "upSpeed"
   | "uploadedBytes"
   | "eta"
-  | "peers";
+  | "peers"
+  | "queue"
+  | "status";
 
 const DEFAULT_SORT_COLUMN: TableSortColumn = "id";
 const DEFAULT_SORT_DIRECTION: SortDirection = "desc";
@@ -74,6 +77,10 @@ function getTableSortValue(
     }
     case "peers":
       return t.stats?.live?.snapshot.peer_stats?.live ?? 0;
+    case "queue":
+      return t.stats?.queue_position ?? Infinity;
+    case "status":
+      return statusSortValue(t.stats);
   }
 }
 
@@ -261,8 +268,24 @@ export const TorrentTable: React.FC<TorrentTableProps> = ({
             align="center"
           />
           <TableHeader
+            column="queue"
+            label="#"
+            sortColumn={sortColumn}
+            sortDirection={sortDirection}
+            onSort={handleSort}
+            align="center"
+          />
+          <TableHeader
             column="name"
             label="Name"
+            sortColumn={sortColumn}
+            sortDirection={sortDirection}
+            onSort={handleSort}
+            align="left"
+          />
+          <TableHeader
+            column="status"
+            label="Status"
             sortColumn={sortColumn}
             sortDirection={sortDirection}
             onSort={handleSort}

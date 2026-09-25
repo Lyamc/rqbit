@@ -6,8 +6,9 @@ export const Button: React.FC<{
   size?: "sm" | "default";
   className?: string;
   disabled?: boolean;
+  title?: string;
   children: ReactNode;
-}> = ({ onClick, children, className, disabled, variant, size }) => {
+}> = ({ onClick, children, className, disabled, variant, size, title }) => {
   const sizeClassNames = {
     sm: "text-sm px-2 py-1",
     default: "px-3 py-1.5",
@@ -28,6 +29,8 @@ export const Button: React.FC<{
   return (
     <button
       disabled={disabled}
+      title={title}
+      aria-label={title}
       onClick={(e) => {
         e.preventDefault();
         onClick();

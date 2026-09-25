@@ -1,5 +1,15 @@
 import { useContext, useState, useCallback, useMemo } from "react";
-import { FaPause, FaPlay, FaTrash, FaRedo, FaWrench } from "react-icons/fa";
+import {
+  FaPause,
+  FaPlay,
+  FaTrash,
+  FaRedo,
+  FaWrench,
+  FaAngleUp,
+  FaAngleDown,
+  FaAngleDoubleUp,
+  FaAngleDoubleDown,
+} from "react-icons/fa";
 import { GoSearch, GoX } from "react-icons/go";
 import debounce from "lodash.debounce";
 import { APIContext } from "../../context";
@@ -10,6 +20,7 @@ import { DeleteTorrentModal } from "../modal/DeleteTorrentModal";
 import { useKeyboardShortcuts } from "../../hooks/useKeyboardShortcuts";
 import {
   ErrorDetails,
+  QueueMoveAction,
   STATE_ERROR,
   STATE_LIVE,
   STATE_PAUSED,
@@ -158,6 +169,34 @@ export const ActionBar: React.FC<ActionBarProps> = ({ hideFilters }) => {
     }
   };
 
+  // Queue order (multi-select keeps relative order). Positions are persisted server-side.
+  const moveQueue = async (action: QueueMoveAction) => {
+    if (!API.queueMove) return;
+    setDisabled(true);
+    try {
+      await API.queueMove(Array.from(selectedTorrentIds), action);
+      refreshTorrents();
+    } catch (e) {
+      setCloseableError({
+        text: `Error moving torrents in queue`,
+        details: e as ErrorDetails,
+      });
+    } finally {
+      setDisabled(false);
+    }
+  };
+
+  const queueButtons: [QueueMoveAction, string, React.ReactNode][] = [
+    ["top", "Move to top of queue", <FaAngleDoubleUp className="w-3 h-3" />],
+    ["up", "Move up in queue", <FaAngleUp className="w-3 h-3" />],
+    ["down", "Move down in queue", <FaAngleDown className="w-3 h-3" />],
+    [
+      "bottom",
+      "Move to bottom of queue",
+      <FaAngleDoubleDown className="w-3 h-3" />,
+    ],
+  ];
+
   return (
     <div className="flex items-center gap-1.5 px-3 py-1.5 bg-surface-raised border-b border-divider">
       <Button
@@ -192,6 +231,21 @@ export const ActionBar: React.FC<ActionBarProps> = ({ hideFilters }) => {
         <FaWrench className="w-2.5 h-2.5" />
         Fix errors
       </Button>
+      {API.queueMove && (
+        <div className="flex items-center gap-0.5" data-testid="queue-buttons">
+          {queueButtons.map(([action, title, icon]) => (
+            <Button
+              key={action}
+              onClick={() => moveQueue(action)}
+              disabled={disabled || !hasSelection}
+              variant="secondary"
+              title={title}
+            >
+              {icon}
+            </Button>
+          ))}
+        </div>
+      )}
       <Button
         onClick={openDeleteModal}
         disabled={disabled || !hasSelection}

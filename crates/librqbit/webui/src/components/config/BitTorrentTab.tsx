@@ -1,6 +1,7 @@
 import React from "react";
 import { Fieldset } from "../forms/Fieldset";
 import { FormInput } from "../forms/FormInput";
+import { FormCheckbox } from "../forms/FormCheckbox";
 import {
   AdminConfigPublic,
   AdminConfigUpdate,
@@ -29,6 +30,71 @@ export const BitTorrentTab: React.FC<BitTorrentTabProps> = ({
 }) => {
   return (
     <div className="text-secondary py-2 space-y-4">
+      <Fieldset label="Queueing (live)">
+        <FormCheckbox
+          checked={!!preferences.queueing_enabled}
+          name="queueing_enabled"
+          label="Enable torrent queueing"
+          help="Off by default (no limits). When on, torrents over the limits below are held as 'Queued' (not user-paused) in queue order and start automatically when a slot frees up. Reorder with the queue buttons in the torrent list."
+          onChange={(e) => onPrefsChange({ queueing_enabled: e.target.checked })}
+        />
+        <FormInput
+          name="queue_max_active_downloads"
+          label="Maximum active downloads"
+          inputType="number"
+          value={preferences.queue_max_active_downloads?.toString() ?? ""}
+          placeholder="empty = unlimited"
+          disabled={!preferences.queueing_enabled}
+          help="Torrents downloading at the same time."
+          onChange={(e) => {
+            const v = e.target.valueAsNumber;
+            if (!e.target.value) onPrefsChange({ queue_max_active_downloads: null });
+            else if (!isNaN(v) && v >= 0)
+              onPrefsChange({ queue_max_active_downloads: Math.floor(v) });
+          }}
+        />
+        <FormInput
+          name="queue_max_active_uploads"
+          label="Maximum active uploads (seeding)"
+          inputType="number"
+          value={preferences.queue_max_active_uploads?.toString() ?? ""}
+          placeholder="empty = unlimited"
+          disabled={!preferences.queueing_enabled}
+          help="Finished torrents seeding at the same time."
+          onChange={(e) => {
+            const v = e.target.valueAsNumber;
+            if (!e.target.value) onPrefsChange({ queue_max_active_uploads: null });
+            else if (!isNaN(v) && v >= 0)
+              onPrefsChange({ queue_max_active_uploads: Math.floor(v) });
+          }}
+        />
+        <FormInput
+          name="queue_max_active_torrents"
+          label="Maximum active torrents"
+          inputType="number"
+          value={preferences.queue_max_active_torrents?.toString() ?? ""}
+          placeholder="empty = unlimited"
+          disabled={!preferences.queueing_enabled}
+          help="Downloading + seeding in total."
+          onChange={(e) => {
+            const v = e.target.valueAsNumber;
+            if (!e.target.value) onPrefsChange({ queue_max_active_torrents: null });
+            else if (!isNaN(v) && v >= 0)
+              onPrefsChange({ queue_max_active_torrents: Math.floor(v) });
+          }}
+        />
+        <FormCheckbox
+          checked={!!preferences.queue_ignore_slow_torrents}
+          name="queue_ignore_slow_torrents"
+          label="Don't count slow torrents in these limits"
+          disabled={!preferences.queueing_enabled}
+          help="Torrents below 2 KiB/s download and upload for 60 s keep running but don't take a slot."
+          onChange={(e) =>
+            onPrefsChange({ queue_ignore_slow_torrents: e.target.checked })
+          }
+        />
+      </Fieldset>
+
       <Fieldset label="Peers (live)">
         <FormInput
           name="peer_limit_live"

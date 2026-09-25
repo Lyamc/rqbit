@@ -20,7 +20,11 @@ export type StatusFilter =
   | "downloading"
   | "seeding"
   | "paused"
-  | "error";
+  | "error"
+  | "stalled"
+  | "checking"
+  | "queued"
+  | "attention";
 
 // Sort column display labels
 export const SORT_COLUMN_LABELS: Record<TorrentSortColumn, string> = {
@@ -40,6 +44,10 @@ export const STATUS_FILTER_LABELS: Record<StatusFilter, string> = {
   seeding: "Seeding",
   paused: "Paused",
   error: "Error",
+  stalled: "Stalled",
+  checking: "Checking",
+  queued: "Queued",
+  attention: "Needs attention / retrying",
 };
 
 // Get sort value for a torrent
@@ -104,6 +112,7 @@ export function matchesStatus(
 
   const state = t.stats?.state;
   const finished = t.stats?.finished;
+  const kind = t.stats?.status_detail?.kind;
 
   switch (filter) {
     case "downloading":
@@ -114,6 +123,25 @@ export function matchesStatus(
       return state === "paused";
     case "error":
       return state === "error";
+    case "stalled":
+      return kind === "stalled";
+    case "checking":
+      return kind === "checking" || kind === "queued_for_checking";
+    case "queued":
+      return (
+        kind === "queued_for_downloading" ||
+        kind === "queued_for_seeding" ||
+        kind === "queued_for_checking" ||
+        kind === "queued_for_repair"
+      );
+    case "attention":
+      return (
+        kind === "needs_attention" ||
+        kind === "waiting_to_retry" ||
+        kind === "repairing" ||
+        kind === "queued_for_repair" ||
+        !!t.stats?.damage?.needs_attention
+      );
   }
 }
 

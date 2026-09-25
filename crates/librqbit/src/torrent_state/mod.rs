@@ -206,6 +206,8 @@ pub struct ManagedTorrentShared {
 
     /// Files that hit unrecoverable I/O errors, and the state of any repair.
     pub(crate) damage: crate::repair::DamageTracker,
+    /// Queue hold flag, active move/rename, transfer activity (for status_detail).
+    pub(crate) runtime: crate::torrent_status::RuntimeFlags,
 }
 
 impl ManagedTorrentShared {
@@ -294,6 +296,10 @@ impl ManagedTorrent {
             bail!("cannot rename padding file");
         }
 
+        let _op = self
+            .shared
+            .runtime
+            .begin_op(crate::torrent_status::ActiveOp::Renaming);
         let rename = |files: &crate::type_aliases::FileStorage| -> anyhow::Result<()> {
             files.rename_file(&self.shared, metadata, file_id, &new_relative_path)?;
             self.shared.set_file_rename(file_id, new_relative_path.clone());
@@ -319,6 +325,10 @@ impl ManagedTorrent {
         let metadata = self.metadata.load();
         let metadata = metadata.as_ref().context("torrent is not resolved")?;
 
+        let _op = self
+            .shared
+            .runtime
+            .begin_op(crate::torrent_status::ActiveOp::Moving);
         let relocate = |files: &crate::type_aliases::FileStorage| -> anyhow::Result<()> {
             files.relocate_output(&self.shared, metadata, &new_output_folder, copy)?;
             self.shared.set_output_folder(new_output_folder.clone());
@@ -478,6 +488,7 @@ impl ManagedTorrent {
                                 .acquire()
                                 .await
                                 .context("bug: concurrent init semaphore was closed")?;
+                            init.mark_checking();
 
                             let check_result = init.check().await;
                             init.finish_check();
@@ -518,6 +529,18 @@ impl ManagedTorrent {
                     if start_paused {
                         return Ok(());
                     }
+                    // Queueing: over the active limits -> hold (internally paused, not
+                    // user-paused). The queue manager starts it when a slot frees up.
+                    if session.queue_should_hold(t.id()) {
+                        g.paused = true;
+                        t.shared.runtime.set_queue_held(true);
+                        t.state_change_notify.notify_waiters();
+                        session.queue.kick.notify_one();
+                        debug!(id = t.id(), "queued (over active torrent limits)");
+                        return Ok(());
+                    }
+                    t.shared.runtime.set_queue_held(false);
+                    t.shared.runtime.reset_activity();
                     let paused = g.state.take().assert_paused();
                     let (tx, rx) = tokio::sync::oneshot::channel();
                     let live = TorrentStateLive::new(paused, tx, token.clone())?;
@@ -570,8 +593,14 @@ impl ManagedTorrent {
         )
     }
 
+    /// User-paused (persisted). Torrents held by queue limits are not user-paused.
     pub fn is_paused(&self) -> bool {
-        self.locked.read().paused
+        self.locked.read().paused && !self.shared.runtime.queue_held()
+    }
+
+    /// Held by queue limits.
+    pub fn is_queue_held(&self) -> bool {
+        self.shared.runtime.queue_held()
     }
 
     /// Pause the torrent if it's live.
@@ -620,17 +649,34 @@ impl ManagedTorrent {
             finished: false,
             live: None,
             damage: None,
+            status_detail: None,
+            queue_position: None,
         };
+        use crate::torrent_status as ts;
+        let mut engine = ts::EngineState::Error;
+        let mut check_progress = 0f64;
+        let mut live_view: Option<ts::LiveView> = None;
+        let user_paused;
 
         {
             let g = self.locked.read();
+            user_paused = g.paused && !self.shared.runtime.queue_held();
             match &g.state {
                 ManagedTorrentState::Initializing(i) => {
                     resp.state = S::Initializing { paused: g.paused };
                     resp.progress_bytes = i.checked_bytes.load(Ordering::Relaxed);
+                    engine = ts::EngineState::Initializing {
+                        checking: i.is_checking(),
+                        check_requested: i.is_check_requested(),
+                        user_paused: g.paused,
+                    };
+                    if resp.total_bytes > 0 {
+                        check_progress = resp.progress_bytes as f64 / resp.total_bytes as f64;
+                    }
                 }
                 ManagedTorrentState::Paused(p) => {
                     resp.state = S::Paused;
+                    engine = ts::EngineState::Paused;
                     let hns = p.hns();
                     resp.total_bytes = hns.total();
                     resp.progress_bytes = hns.progress();
@@ -639,7 +685,17 @@ impl ManagedTorrent {
                 }
                 ManagedTorrentState::Live(l) => {
                     resp.state = S::Live;
+                    engine = ts::EngineState::Live;
                     let live_stats = LiveStats::from(l.as_ref());
+                    live_view = Some(ts::LiveView {
+                        download_bps: live_stats.download_speed.as_bytes(),
+                        upload_bps: live_stats.upload_speed.as_bytes(),
+                        peers_live: live_stats.snapshot.peer_stats.live,
+                        secs_since_data: self.shared.runtime.observe_fetched(
+                            live_stats.snapshot.fetched_bytes,
+                            std::time::Instant::now(),
+                        ),
+                    });
                     let hns = l.get_hns().unwrap_or_default();
                     resp.total_bytes = hns.total();
                     resp.progress_bytes = hns.progress();
@@ -677,6 +733,43 @@ impl ManagedTorrent {
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|| format!("file {file_id}"))
         });
+
+        resp.queue_position = self
+            .shared
+            .session
+            .upgrade()
+            .and_then(|s| s.queue.position(&self.shared.info_hash));
+        let _ = user_paused;
+        let damage = resp.damage.as_ref();
+        let repair = damage
+            .and_then(|d| d.repair.as_ref())
+            .filter(|r| r.state == crate::repair::RepairState::Running)
+            .map(|r| ts::RepairView {
+                waiting_for_slot: r.waiting_for_slot,
+                progress: if r.total_bytes > 0 {
+                    r.scanned_bytes as f64 / r.total_bytes as f64
+                } else {
+                    0.0
+                },
+            });
+        let retry = damage.and_then(|d| d.recovery.as_ref()).map(|r| ts::RetryView {
+            pieces_waiting: r.pieces_waiting,
+            next_retry_in_secs: r.next_retry_in_secs,
+        });
+        resp.status_detail = Some(ts::derive_status(&ts::StatusInputs {
+            engine,
+            metadata_resolved: metadata.is_some(),
+            finished: resp.finished,
+            check_progress,
+            queue_held: self.shared.runtime.queue_held(),
+            queue_position: resp.queue_position,
+            active_op: self.shared.runtime.active_op(),
+            repair,
+            needs_attention: damage.map(|d| d.needs_attention).unwrap_or(false),
+            retry,
+            live: live_view,
+            error: resp.error.as_deref(),
+        }));
 
         resp
     }

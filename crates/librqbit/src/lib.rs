@@ -53,6 +53,8 @@ pub mod file_info;
 mod file_ops;
 mod adopt;
 pub mod repair;
+pub mod torrent_queue;
+pub mod torrent_status;
 pub mod add_job;
 #[cfg(feature = "http-api")]
 pub mod http_api;

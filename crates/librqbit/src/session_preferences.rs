@@ -58,6 +58,22 @@ pub struct SessionPreferences {
     #[serde(default = "default_recovery_max_attempts")]
     pub recovery_max_attempts: u32,
 
+    /// Queueing (qBittorrent-style active limits). **Off by default** (no limits).
+    #[serde(default)]
+    pub queueing_enabled: bool,
+    /// Max torrents downloading at once (None = unlimited).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_max_active_downloads: Option<u32>,
+    /// Max torrents seeding at once (None = unlimited).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_max_active_uploads: Option<u32>,
+    /// Max active torrents in total (None = unlimited).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_max_active_torrents: Option<u32>,
+    /// Torrents slower than 2 KiB/s both ways for 60 s don't count toward the limits.
+    #[serde(default)]
+    pub queue_ignore_slow_torrents: bool,
+
     /// Legacy: shell command when a torrent finishes. Migrated into `completion_actions`
     /// when the actions list is empty (see [`SessionPreferences::effective_actions`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -121,6 +137,11 @@ impl Default for SessionPreferences {
             recovery_backoff_base_secs: default_recovery_backoff_base_secs(),
             recovery_backoff_cap_secs: default_recovery_backoff_cap_secs(),
             recovery_max_attempts: default_recovery_max_attempts(),
+            queueing_enabled: false,
+            queue_max_active_downloads: None,
+            queue_max_active_uploads: None,
+            queue_max_active_torrents: None,
+            queue_ignore_slow_torrents: false,
             on_complete_hook: None,
             move_completed_path: None,
             move_completed_copy: false,
@@ -250,6 +271,17 @@ impl SessionPreferencesStore {
 
     pub fn auto_repair_damaged_files(&self) -> bool {
         self.prefs.read().auto_repair_damaged_files
+    }
+
+    /// Queue limits, or None when queueing is off.
+    pub fn queue_limits(&self) -> Option<crate::torrent_queue::QueueLimits> {
+        let p = self.prefs.read();
+        p.queueing_enabled.then(|| crate::torrent_queue::QueueLimits {
+            max_downloads: p.queue_max_active_downloads,
+            max_uploads: p.queue_max_active_uploads,
+            max_active: p.queue_max_active_torrents,
+            ignore_slow: p.queue_ignore_slow_torrents,
+        })
     }
 
     /// Backoff schedule for automatic recovery (sanitized: base >= 1s, cap >= base,

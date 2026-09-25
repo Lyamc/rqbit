@@ -371,6 +371,20 @@ impl Api {
         Ok(Default::default())
     }
 
+    /// Move torrents in the queue (multi-select): up / down / top / bottom.
+    pub fn api_queue_move(&self, req: QueueMoveRequest) -> Result<QueueOrderResponse> {
+        self.session
+            .queue_move(&req.ids, req.action)
+            .with_status(StatusCode::BAD_REQUEST)?;
+        Ok(self.api_queue_order())
+    }
+
+    pub fn api_queue_order(&self) -> QueueOrderResponse {
+        QueueOrderResponse {
+            order: self.session.queue_order(),
+        }
+    }
+
     /// Start repairing damaged files (unreadable ranges) of a torrent in the background.
     /// Progress/result appear in the torrent stats under `damage.repair`.
     pub fn api_torrent_action_repair_files(
@@ -452,7 +466,8 @@ impl Api {
             notes: vec![
                 "Live: rate limits (limits.json), soft-recover, incomplete extension, organize/completion actions, and default peer limit (preferences.json).".into(),
                 "Restart required (admin.json, env overrides file): listen/announce ports, DHT/LSD/trackers, TCP/uTP, SOCKS proxy, UPnP forward, timeouts, block/allow lists, fastresume, HTTP listen/auth.".into(),
-                "Not in engine yet (no fake toggles): protocol encryption, seeding ratio/time limits, download queue / max active, sequential-download default, disk preallocation toggle, PeX disable.".into(),
+                "Not in engine yet (no fake toggles): protocol encryption, seeding ratio/time limits, sequential-download default, disk preallocation toggle, PeX disable.".into(),
+                "Queueing (max active downloads/uploads/torrents) is live (preferences.json, off by default); queue order is persisted in queue.json.".into(),
                 "Process restart exits with code 75 so systemd Restart=on-failure can bring the service back.".into(),
             ],
         }
@@ -801,4 +816,16 @@ fn torrent_file_mime_type(
             StatusCode::INTERNAL_SERVER_ERROR,
             "cannot determine mime type for file",
         ))?)
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct QueueMoveRequest {
+    pub ids: Vec<TorrentIdOrHash>,
+    pub action: crate::torrent_queue::QueueMove,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct QueueOrderResponse {
+    /// Torrent ids in queue order (first = position 1).
+    pub order: Vec<TorrentId>,
 }

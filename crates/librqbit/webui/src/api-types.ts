@@ -242,6 +242,12 @@ export interface SessionPreferences {
   recovery_backoff_cap_secs?: number;
   /** Stop automatic recovery after this many consecutive failures. */
   recovery_max_attempts?: number;
+  /** Queueing (active limits). Off by default. */
+  queueing_enabled?: boolean;
+  queue_max_active_downloads?: number | null;
+  queue_max_active_uploads?: number | null;
+  queue_max_active_torrents?: number | null;
+  queue_ignore_slow_torrents?: boolean;
   on_complete_hook?: string | null;
   move_completed_path?: string | null;
   move_completed_copy?: boolean;
@@ -380,6 +386,37 @@ export interface RepairStartResponse {
   total_bytes: number;
 }
 
+export type StatusKind =
+  | "queued_for_checking"
+  | "checking"
+  | "resolving_metadata"
+  | "initializing"
+  | "downloading"
+  | "stalled"
+  | "seeding"
+  | "complete"
+  | "paused"
+  | "error"
+  | "queued_for_repair"
+  | "repairing"
+  | "waiting_to_retry"
+  | "needs_attention"
+  | "moving"
+  | "renaming"
+  | "queued_for_downloading"
+  | "queued_for_seeding";
+
+/** Server-computed detailed status. */
+export interface StatusDetail {
+  kind: StatusKind;
+  label: string;
+  progress?: number;
+  next_retry_in_secs?: number;
+  queue_position?: number;
+}
+
+export type QueueMoveAction = "up" | "down" | "top" | "bottom";
+
 export interface TorrentStats {
   state: "initializing" | "paused" | "live" | "error";
   error: string | null;
@@ -391,6 +428,10 @@ export interface TorrentStats {
   live: LiveTorrentStats | null;
   /** Present when files are damaged (unreadable) or a repair ran. */
   damage?: DamageStats;
+  /** Detailed status computed by the server. */
+  status_detail?: StatusDetail;
+  /** 1-based queue position. */
+  queue_position?: number;
 }
 
 /** Client-side request options (not sent to the server). */
@@ -605,6 +646,11 @@ export interface RqbitAPI {
   start: (index: number) => Promise<void>;
   restart: (index: number) => Promise<void>;
   fixErrors: (index: number) => Promise<void>;
+  /** Move torrents in the queue (multi-select). Returns the new order (ids). */
+  queueMove?: (
+    ids: number[],
+    action: QueueMoveAction,
+  ) => Promise<{ order: number[] }>;
   /** Scan the torrent's files for unreadable ranges and repair them (background job). */
   repairFiles?: (
     index: number,

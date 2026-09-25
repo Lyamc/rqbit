@@ -85,6 +85,12 @@ pub struct TorrentStats {
     /// Damaged files (unrecoverable I/O errors) and repair status. Omitted when none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub damage: Option<crate::repair::DamageStats>,
+    /// Detailed, human-oriented status derived from engine state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_detail: Option<crate::torrent_status::StatusDetail>,
+    /// 1-based queue position (queueing order; persisted).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_position: Option<usize>,
 }
 
 impl std::fmt::Display for TorrentStats {
@@ -159,6 +165,8 @@ mod tests {
             finished: false,
             live: None,
             damage: None,
+            status_detail: None,
+            queue_position: None,
         }
     }
 

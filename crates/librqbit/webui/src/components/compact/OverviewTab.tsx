@@ -1,3 +1,4 @@
+import { StatusBadge } from "../StatusBadge";
 import {
   TorrentListItem,
   STATE_INITIALIZING,
@@ -84,9 +85,20 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ torrent }) => {
         <span className="truncate font-medium flex-1" title={name}>
           {name}
         </span>
-        <span className={`shrink-0 ${stateDisplay.color}`}>
-          {stateDisplay.text}
-        </span>
+        {statsResponse.status_detail ? (
+          <span className="shrink-0 flex items-center gap-2">
+            {statsResponse.queue_position ? (
+              <span className="text-tertiary" data-testid="detail-queue-position">
+                Queue #{statsResponse.queue_position}
+              </span>
+            ) : null}
+            <StatusBadge stats={statsResponse} className="text-sm" />
+          </span>
+        ) : (
+          <span className={`shrink-0 ${stateDisplay.color}`}>
+            {stateDisplay.text}
+          </span>
+        )}
       </div>
       {/* Pieces visualization */}
       {totalPieces > 0 && (

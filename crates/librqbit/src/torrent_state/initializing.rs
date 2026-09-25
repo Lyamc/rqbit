@@ -33,6 +33,8 @@ pub struct TorrentStateInitializing {
     pub(crate) checked_bytes: AtomicU64,
     pause_requested: AtomicBool,
     check_running: AtomicBool,
+    /// Holds an init slot (past the concurrent-init semaphore) and is checking.
+    checking: AtomicBool,
     previously_errored: bool,
 }
 
@@ -52,6 +54,7 @@ impl TorrentStateInitializing {
             checked_bytes: AtomicU64::new(0),
             pause_requested: AtomicBool::new(false),
             check_running: AtomicBool::new(false),
+            checking: AtomicBool::new(false),
             previously_errored,
         }
     }
@@ -80,7 +83,21 @@ impl TorrentStateInitializing {
     }
 
     pub(crate) fn finish_check(&self) {
+        self.checking.store(false, Ordering::Release);
         self.check_running.store(false, Ordering::Release);
+    }
+
+    pub(crate) fn mark_checking(&self) {
+        self.checking.store(true, Ordering::Release);
+    }
+
+    pub fn is_checking(&self) -> bool {
+        self.checking.load(Ordering::Acquire)
+    }
+
+    /// A check task was started (it may still be waiting for an init slot).
+    pub fn is_check_requested(&self) -> bool {
+        self.check_running.load(Ordering::Acquire)
     }
 
     async fn validate_fastresume(
