@@ -41,6 +41,7 @@ pub struct Api {
     rust_log_reload_tx: Option<UnboundedSender<String>>,
     #[cfg(feature = "tracing-subscriber-utils")]
     line_broadcast: Option<LineBroadcast>,
+    restart_tx: Option<UnboundedSender<()>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -175,6 +176,20 @@ pub struct ApiTorrentListOpts {
     pub with_stats: bool,
 }
 
+
+#[derive(serde::Serialize)]
+pub struct AdminStatusResponse {
+    pub version: String,
+    pub preferences_path: String,
+    pub admin_path: String,
+    pub effective_http_listen_addr: Option<String>,
+    pub env_http_listen_addr: Option<String>,
+    pub env_basic_auth_set: bool,
+    pub persisted: crate::AdminConfigPublic,
+    pub restart_supported: bool,
+    pub notes: Vec<String>,
+}
+
 impl Api {
     pub fn new(
         session: Arc<Session>,
@@ -184,9 +199,15 @@ impl Api {
         Self {
             session,
             rust_log_reload_tx,
+            restart_tx: None,
             #[cfg(feature = "tracing-subscriber-utils")]
             line_broadcast,
         }
+    }
+
+    pub fn with_restart_tx(mut self, tx: UnboundedSender<()>) -> Self {
+        self.restart_tx = Some(tx);
+        self
     }
 
     pub fn session(&self) -> &Arc<Session> {
@@ -222,6 +243,7 @@ impl Api {
                             .to_string_lossy()
                             .into_owned(),
                         total_pieces,
+                        torznab_category: mgr.torznab_category(),
 
                         // These will be filled in /details and /stats endpoints
                         files: None,
@@ -256,6 +278,7 @@ impl Api {
                 only_files.as_deref(),
                 output_folder,
                 &renames,
+                handle.torznab_category(),
             )
         }
     }
@@ -332,11 +355,33 @@ impl Api {
         idx: TorrentIdOrHash,
     ) -> Result<EmptyJsonResponse> {
         let handle = self.mgr_handle(idx)?;
+        // Manual fix always runs now: reset automatic-recovery backoff and requeue pieces
+        // that were held back (or given up on) after I/O errors.
+        let requeued = handle
+            .manual_recovery_reset()
+            .with_status(StatusCode::INTERNAL_SERVER_ERROR)?;
+        if handle.live().is_some() {
+            tracing::info!(id = handle.id(), requeued, "fix errors: recovery counters reset");
+            return Ok(Default::default());
+        }
         self.session
             .unpause(&handle)
             .await
             .with_status(StatusCode::BAD_REQUEST)?;
         Ok(Default::default())
+    }
+
+    /// Start repairing damaged files (unreadable ranges) of a torrent in the background.
+    /// Progress/result appear in the torrent stats under `damage.repair`.
+    pub fn api_torrent_action_repair_files(
+        &self,
+        idx: TorrentIdOrHash,
+        req: crate::repair::RepairRequest,
+    ) -> Result<crate::repair::RepairStartResponse> {
+        let handle = self.mgr_handle(idx)?;
+        self.session
+            .start_repair_files(&handle, req)
+            .with_status(StatusCode::BAD_REQUEST)
     }
 
     pub async fn api_torrent_action_rename_file(
@@ -382,6 +427,61 @@ impl Api {
             .with_status(StatusCode::BAD_REQUEST)?;
         Ok(Default::default())
     }
+
+    pub async fn api_reload_preferences(&self) -> Result<crate::SessionPreferences> {
+        self.session()
+            .reload_preferences()
+            .await
+            .context("error reloading preferences")
+            .with_status(StatusCode::BAD_REQUEST)
+    }
+
+    pub fn api_admin_status(&self, listen_addr: Option<std::net::SocketAddr>) -> AdminStatusResponse {
+        let admin = self.session().admin_config();
+        let env_listen = std::env::var("RQBIT_HTTP_API_LISTEN_ADDR").ok();
+        let env_auth = std::env::var("RQBIT_HTTP_BASIC_AUTH_USERPASS").ok();
+        AdminStatusResponse {
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            preferences_path: self.session().preferences_path().display().to_string(),
+            admin_path: self.session().admin_path().display().to_string(),
+            effective_http_listen_addr: listen_addr.map(|a| a.to_string()),
+            env_http_listen_addr: env_listen,
+            env_basic_auth_set: env_auth.is_some(),
+            persisted: admin.public_view(),
+            restart_supported: self.restart_tx.is_some(),
+            notes: vec![
+                "Live: rate limits (limits.json), soft-recover, incomplete extension, organize/completion actions, and default peer limit (preferences.json).".into(),
+                "Restart required (admin.json, env overrides file): listen/announce ports, DHT/LSD/trackers, TCP/uTP, SOCKS proxy, UPnP forward, timeouts, block/allow lists, fastresume, HTTP listen/auth.".into(),
+                "Not in engine yet (no fake toggles): protocol encryption, seeding ratio/time limits, download queue / max active, sequential-download default, disk preallocation toggle, PeX disable.".into(),
+                "Process restart exits with code 75 so systemd Restart=on-failure can bring the service back.".into(),
+            ],
+        }
+    }
+
+    pub async fn api_update_admin(
+        &self,
+        patch: crate::AdminConfigUpdate,
+    ) -> Result<crate::AdminConfigPublic> {
+        let cfg = self
+            .session()
+            .update_admin_config(patch)
+            .await
+            .context("error saving admin config")
+            .with_status(StatusCode::BAD_REQUEST)?;
+        Ok(cfg.public_view())
+    }
+
+    pub fn api_request_restart(&self) -> Result<EmptyJsonResponse> {
+        let tx = self
+            .restart_tx
+            .as_ref()
+            .ok_or_else(|| ApiError::from((StatusCode::NOT_IMPLEMENTED, anyhow::anyhow!("process restart is not enabled in this build/runtime"))))?;
+        tx.send(())
+            .context("failed to signal restart")
+            .with_status(StatusCode::INTERNAL_SERVER_ERROR)?;
+        Ok(Default::default())
+    }
+
 
     pub async fn api_torrent_action_forget(
         &self,
@@ -468,6 +568,7 @@ impl Api {
                         .to_string_lossy()
                         .into_owned(),
                     &handle.file_renames(),
+                    handle.torznab_category(),
                 )
                 .context("error making torrent details")?;
                 ApiAddTorrentResponse {
@@ -499,6 +600,7 @@ impl Api {
                     only_files.as_deref(),
                     output_folder.to_string_lossy().into_owned().to_string(),
                     &Default::default(),
+                    None,
                 )
                 .context("error making torrent details")?,
             },
@@ -514,6 +616,7 @@ impl Api {
                         .to_string_lossy()
                         .into_owned(),
                     &handle.file_renames(),
+                    handle.torznab_category(),
                 )
                 .context("error making torrent details")?;
                 ApiAddTorrentResponse {
@@ -611,6 +714,10 @@ pub struct TorrentDetailsResponse {
     #[serde(default)]
     pub total_pieces: u32,
 
+    /// Newznab/Torznab category id if supplied at add time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub torznab_category: Option<u32>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub files: Option<Vec<TorrentDetailsResponseFile>>,
     #[serde(skip_serializing_if = "Option::is_none", skip_deserializing)]
@@ -633,6 +740,7 @@ fn make_torrent_details(
     only_files: Option<&[usize]>,
     output_folder: String,
     renames: &std::collections::HashMap<usize, PathBuf>,
+    torznab_category: Option<u32>,
 ) -> Result<TorrentDetailsResponse> {
     let files = match info {
         Some(info) => info
@@ -671,6 +779,7 @@ fn make_torrent_details(
         files: Some(files),
         output_folder,
         total_pieces,
+        torznab_category,
         stats: None,
     })
 }

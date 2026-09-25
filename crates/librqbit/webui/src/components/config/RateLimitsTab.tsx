@@ -28,7 +28,12 @@ export const RateLimitsTab: React.FC<RateLimitsTabProps> = ({
   onUploadBpsChange,
 }) => {
   return (
-    <Fieldset>
+    <Fieldset label="Global speed limits">
+      <p className="text-sm text-tertiary mb-3">
+        Changes apply immediately and persist to{" "}
+        <code className="bg-surface-sunken px-1 rounded">limits.json</code>{" "}
+        (overrides CLI/env defaults after save).
+      </p>
       <FormInput
         label="Download rate limit"
         name="download_bps"

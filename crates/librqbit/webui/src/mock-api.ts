@@ -2,6 +2,8 @@
 // This file is only used in dev mode with mock.html entry point
 
 import {
+  AddJobStage,
+  AddJobStatus,
   AddTorrentResponse,
   LimitsConfig,
   SessionPreferences,
@@ -391,6 +393,64 @@ function updatePeerCounters(torrentId: number): void {
   }
 }
 
+type MockJob = {
+  stage: AddJobStage;
+  since: number;
+  started: number;
+  cancelled: boolean;
+  torrentId: number | null;
+  onCancel?: () => void;
+  set: (st: AddJobStage) => void;
+  commit: (id: number) => void;
+  cancel: () => void;
+  status: () => AddJobStatus;
+};
+
+const mockJobs = (() => {
+  const jobs = new Map<string, MockJob>();
+  return {
+    get: (id: string) => jobs.get(id),
+    start: (id?: string): MockJob => {
+      const now = Date.now();
+      const j: MockJob = {
+        stage: "starting",
+        since: now,
+        started: now,
+        cancelled: false,
+        torrentId: null,
+        set(st) {
+          if (this.cancelled || this.torrentId !== null) return;
+          this.stage = st;
+          this.since = Date.now();
+        },
+        commit(tid) {
+          this.torrentId = tid;
+          this.stage = "added";
+          this.since = Date.now();
+        },
+        cancel() {
+          if (this.torrentId !== null) return;
+          this.cancelled = true;
+          this.stage = "cancelled";
+          this.since = Date.now();
+          this.onCancel?.();
+        },
+        status() {
+          return {
+            job_id: id ?? null,
+            stage: this.stage,
+            torrent_id: this.torrentId ?? undefined,
+            stage_secs: (Date.now() - this.since) / 1000,
+            elapsed_secs: (Date.now() - this.started) / 1000,
+          };
+        },
+      };
+      if (id) jobs.set(id, j);
+      return j;
+    },
+  };
+})();
+
 const TOTAL_TORRENTS = 1000;
 
 // Mock API implementation
@@ -539,8 +599,54 @@ export const MockAPI: RqbitAPI & { getVersion: () => Promise<string> } = {
     };
   },
 
-  uploadTorrent: async (): Promise<AddTorrentResponse> => {
+  uploadTorrent: async (data, opts, init): Promise<AddTorrentResponse> => {
+    // Simulate an add job: magnets whose text contains "busy" first wait ~4s
+    // for a server slot; "dead" magnets never resolve (until cancelled);
+    // other magnets resolve after ~3s. Cancel before commit = nothing added.
+    if (typeof data === "string" && data.startsWith("magnet:")) {
+      const job = mockJobs.start(opts?.add_job_id);
+      const wait = (ms: number | null) =>
+        new Promise<void>((resolve, reject) => {
+          const onAbort = () => reject({ text: "request aborted" });
+          if (init?.signal?.aborted || job.cancelled) return onAbort();
+          init?.signal?.addEventListener("abort", onAbort);
+          job.onCancel = () => reject({ text: "add cancelled" });
+          if (ms !== null) setTimeout(resolve, ms);
+        });
+      try {
+        if (data.includes("busy")) {
+          job.set("waiting_for_server");
+          await wait(4000);
+        }
+        job.set("resolving_metadata");
+        await wait(data.includes("dead") ? null : 3000);
+      } catch (e) {
+        if (!job.cancelled) job.cancel();
+        throw e;
+      }
+      const id = 100000 + Math.floor(Math.random() * 1000);
+      job.commit(id);
+      return {
+        id,
+        details: { info_hash: "0".repeat(40), files: [] },
+      } as unknown as AddTorrentResponse;
+    }
     throw { text: "Upload not supported in mock mode", status: 501 };
+  },
+
+  getAddJob: async (jobId: string) => {
+    const j = mockJobs.get(jobId);
+    if (!j) throw { text: "no such add job", status: 404 };
+    return j.status();
+  },
+
+  cancelAddJob: async (jobId: string) => {
+    const j = mockJobs.get(jobId);
+    if (!j) return { result: "cancelled" as const };
+    if (j.torrentId !== null)
+      return { result: "already_added" as const, torrent_id: j.torrentId };
+    j.cancel();
+    return { result: "cancelled" as const };
   },
 
   updateOnlyFiles: async (): Promise<void> => {
@@ -565,6 +671,12 @@ export const MockAPI: RqbitAPI & { getVersion: () => Promise<string> } = {
   fixErrors: async (index: number): Promise<void> => {
     await new Promise((r) => setTimeout(r, 50));
     torrentStates.set(index, "live");
+  },
+
+  repairFiles: async (index: number) => {
+    await new Promise((r) => setTimeout(r, 50));
+    torrentStates.set(index, "live");
+    return { started: true, files: 1, total_bytes: 0 };
   },
 
   forget: async (index: number): Promise<void> => {
@@ -608,9 +720,23 @@ export const MockAPI: RqbitAPI & { getVersion: () => Promise<string> } = {
   },
 
   getPreferences: async (): Promise<SessionPreferences> => {
-    return { soft_recover_on_io_error: false, on_complete_hook: null, move_completed_path: null, move_completed_copy: false };
+    return {
+      soft_recover_on_io_error: false,
+      auto_repair_damaged_files: false,
+      auto_organize_enabled: false,
+      auto_organize_root: null,
+      incomplete_extension: null,
+      completion_actions: [],
+      on_complete_hook: null,
+      move_completed_path: null,
+      move_completed_copy: false,
+    };
   },
-  renameFile: async (_index: number, _fileId: number, _newPath: string): Promise<void> => {},
+  renameFile: async (
+    _index: number,
+    _fileId: number,
+    _newPath: string,
+  ): Promise<void> => {},
   relocateTorrent: async (
     _index: number,
     _destination: string,
@@ -625,4 +751,65 @@ export const MockAPI: RqbitAPI & { getVersion: () => Promise<string> } = {
   setLimits: async (): Promise<void> => {
     await new Promise((r) => setTimeout(r, 50));
   },
+  getAdminStatus: async () => ({
+    version: "mock",
+    preferences_path: "/tmp/preferences.json",
+    admin_path: "/tmp/admin.json",
+    effective_http_listen_addr: "127.0.0.1:3030",
+    env_http_listen_addr: null,
+    env_basic_auth_set: false,
+    persisted: {
+      http_api_listen_addr: "0.0.0.0:9030",
+      basic_auth_enabled: false,
+      basic_auth_user: null,
+      basic_auth_password_set: false,
+    },
+    restart_supported: true,
+    notes: ["mock admin status"],
+  }),
+  updateAdminConfig: async (patch) => ({
+    http_api_listen_addr: patch.http_api_listen_addr ?? null,
+    basic_auth_enabled: !!patch.basic_auth_enabled,
+    basic_auth_user: patch.basic_auth_user ?? null,
+    basic_auth_password_set: !!patch.basic_auth_password,
+  }),
+  reloadPreferences: async () => ({
+    soft_recover_on_io_error: false,
+      auto_repair_damaged_files: false,
+    auto_organize_enabled: false,
+    auto_organize_root: null,
+    incomplete_extension: null,
+    completion_actions: [],
+    on_complete_hook: null,
+    move_completed_path: null,
+    move_completed_copy: false,
+  }),
+
+  uploadTorrentFromServerPath: async (): Promise<AddTorrentResponse> => {
+    throw new Error("not implemented in mock");
+  },
+  fsRoots: async () => ({
+    roots: [{ label: "Downloads", path: "/downloads" }],
+  }),
+  fsList: async (path: string) => ({
+    path,
+    parent: path === "/downloads" ? null : "/downloads",
+    entries: [
+      {
+        name: "sample.torrent",
+        path: `${path}/sample.torrent`,
+        is_dir: false,
+        is_torrent: true,
+        size: 100,
+      },
+      {
+        name: "subdir",
+        path: `${path}/subdir`,
+        is_dir: true,
+        is_torrent: false,
+      },
+    ],
+  }),
+  extractUpload: async () => ({ items: [] }),
+  restartProcess: async () => {},
 };

@@ -20,13 +20,14 @@ use crate::{
     create_torrent_file::CreateTorrentResult,
     dht_utils::{ReadMetainfoResult, read_metainfo_from_peer_receiver},
     ip_ranges::IpRanges,
-    limits::{Limits, LimitsConfig},
+    limits::{Limits, LimitsConfig, load_persisted_limits, save_persisted_limits},
     listen::{Accept, ListenerOptions},
     merge_streams::merge_streams,
     peer_connection::PeerConnectionOptions,
     read_buf::ReadBuf,
     session_persistence::{SessionPersistenceStore, json::JsonSessionPersistenceStore},
-    session_preferences::{SessionPreferences, SessionPreferencesStore},
+    session_admin::AdminConfigStore,
+    session_preferences::{SessionPreferences, SessionPreferencesStore, CompletionAction, apply_incomplete_suffix_to_renames, run_shell_hook_async},
     session_stats::SessionStats,
     spawn_utils::BlockingSpawner,
     storage::{
@@ -71,6 +72,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tracing::{Instrument, debug, debug_span, error, info, trace, warn};
+
+use crate::add_job::{AddJob, AddJobStage, AddJobs, CancelOnDrop};
 use tracker_comms::{TrackerComms, UdpTrackerClient};
 
 pub const SUPPORTED_SCHEMES: [&str; 3] = ["http:", "https:", "magnet:"];
@@ -139,8 +142,17 @@ pub struct Session {
     pub(crate) concurrent_initialize_semaphore: Arc<tokio::sync::Semaphore>,
     pub ratelimits: Limits,
 
+    /// In-flight add requests that clients can poll / cancel.
+    pub add_jobs: AddJobs,
+
     /// Session-level preferences (persisted as preferences.json).
     pub preferences: SessionPreferencesStore,
+
+    /// Admin/server settings (persisted as admin.json). Restart often required.
+    pub admin: AdminConfigStore,
+
+    /// Path for persisted rate limits (limits.json).
+    limits_path: PathBuf,
 
     pub blocklist: IpRanges,
     pub allowlist: Option<IpRanges>,
@@ -153,7 +165,8 @@ pub struct Session {
     #[cfg(feature = "disable-upload")]
     _disable_upload: bool,
     pub ipv4_only: bool,
-    pub peer_limit: Option<usize>,
+    /// 0 = no session default (unlimited / engine default). Live-updatable via preferences.
+    peer_limit: AtomicUsize,
     client_name_and_version: String,
 }
 
@@ -299,6 +312,29 @@ pub struct AddTorrentOptions {
     /// Restored per-file relative path renames (file_id -> relative path).
     #[serde(default)]
     pub file_renames: Option<std::collections::HashMap<usize, PathBuf>>,
+
+    /// Optional Newznab/Torznab category id from indexer (survives session restore).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub torznab_category: Option<u32>,
+
+    /// Adopt data left by another client in `output_folder` ("transfer from
+    /// other client"): `"auto"` (`"qbit"` is accepted as an alias). Before the
+    /// initial check, a file missing under its final name but present as a
+    /// unique `<name><suffix>` sibling (`.!qB`, `.part`, ...) that passes a
+    /// piece-hash sample is renamed to the name rqbit expects (never deleted
+    /// or truncated). Existing files larger than the torrent expects make the
+    /// add fail instead of being truncated. See [`crate::adopt`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adopt_foreign_incomplete: Option<String>,
+
+    /// Client-chosen id to poll (`GET /add_jobs/{id}`) or cancel
+    /// (`POST /add_jobs/{id}/cancel`) this add while it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub add_job_id: Option<String>,
+
+    /// Give up resolving magnet metadata after this long (default: wait forever).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub magnet_resolve_timeout: Option<Duration>,
 }
 
 pub struct ListOnlyResponse {
@@ -567,6 +603,11 @@ impl Session {
         &self.cancellation_token
     }
 
+    /// Session default download / output folder.
+    pub fn get_default_output_folder(&self) -> &Path {
+        &self.output_folder
+    }
+
     pub fn client_name_and_version(&self) -> &str {
         &self.client_name_and_version
     }
@@ -802,7 +843,26 @@ impl Session {
                 };
                 folder.join("preferences.json")
             };
-            let preferences = SessionPreferencesStore::load_or_default(preferences_path).await;
+            let preferences = SessionPreferencesStore::load_or_default(preferences_path.clone()).await;
+            let initial_peer_limit = preferences
+                .get()
+                .peer_limit
+                .or(opts.peer_limit)
+                .unwrap_or(0);
+            let admin_path = preferences_path
+                .parent()
+                .map(|p| p.join("admin.json"))
+                .unwrap_or_else(|| PathBuf::from("admin.json"));
+            let admin = AdminConfigStore::load_or_default(admin_path).await;
+            let limits_path = preferences_path
+                .parent()
+                .map(|p| p.join("limits.json"))
+                .unwrap_or_else(|| PathBuf::from("limits.json"));
+            let mut ratelimits_config = opts.ratelimits;
+            if let Some(persisted) = load_persisted_limits(&limits_path).await {
+                // UI-persisted limits override CLI/env defaults across restarts.
+                ratelimits_config = persisted;
+            }
 
             let session = Arc::new(Self {
                 persistence,
@@ -827,12 +887,15 @@ impl Session {
                     opts.concurrent_init_limit.unwrap_or(3),
                 )),
                 udp_tracker_client,
-                ratelimits: Limits::new(opts.ratelimits),
+                ratelimits: Limits::new(ratelimits_config),
+                add_jobs: AddJobs::default(),
                 preferences,
+                admin,
+                limits_path,
                 ipv4_only: opts.ipv4_only,
                 trackers: opts.trackers,
                 disable_trackers: opts.disable_trackers,
-                peer_limit: opts.peer_limit,
+                peer_limit: AtomicUsize::new(initial_peer_limit),
                 client_name_and_version,
 
                 #[cfg(feature = "disable-upload")]
@@ -1120,8 +1183,45 @@ impl Session {
     ) -> BoxFuture<'a, anyhow::Result<AddTorrentResponse>> {
         async move {
             let mut opts = opts.unwrap_or_default();
+            let job = match opts.add_job_id.take() {
+                Some(id) => self.add_jobs.register(id)?,
+                None => AddJob::new(None),
+            };
+            // If this future is dropped (HTTP client went away, timeout)
+            // before the torrent is committed, the add is cancelled.
+            let _cancel_on_drop = CancelOnDrop(job.clone());
+            let res = self.add_torrent_with_job(add, opts, &job).await;
+            job.finish(match &res {
+                Ok(AddTorrentResponse::Added(id, _)) => AddJobStage::Added { torrent_id: *id },
+                Ok(AddTorrentResponse::AlreadyManaged(id, _)) => {
+                    AddJobStage::AlreadyManaged { torrent_id: *id }
+                }
+                Ok(AddTorrentResponse::ListOnly(_)) => AddJobStage::ListOnly,
+                Err(e) => AddJobStage::Failed {
+                    error: format!("{e:#}"),
+                },
+            });
+            res
+        }
+        .instrument(debug_span!(parent: self.rs(), "add_torrent"))
+        .boxed()
+    }
+
+    async fn add_torrent_with_job(
+        self: &Arc<Self>,
+        add: AddTorrent<'_>,
+        mut opts: AddTorrentOptions,
+        job: &Arc<AddJob>,
+    ) -> anyhow::Result<AddTorrentResponse> {
+        {
             let add_res = match add {
-                AddTorrent::Url(magnet) if magnet.starts_with("magnet:") || magnet.len() == 40 => {
+                // A bare 40-char hex infohash is treated like a magnet (but
+                // not any 40-char string, e.g. a short http URL).
+                AddTorrent::Url(magnet)
+                    if magnet.starts_with("magnet:")
+                        || (magnet.len() == 40
+                            && magnet.bytes().all(|b| b.is_ascii_hexdigit())) =>
+                {
                     let magnet = Magnet::parse(&magnet)
                         .context("provided path is not a valid magnet URL")?;
                     let info_hash = magnet
@@ -1150,7 +1250,9 @@ impl Session {
                         AddTorrent::Url(url)
                             if url.starts_with("http://") || url.starts_with("https://") =>
                         {
-                            torrent_from_url(&self.reqwest_client, &url).await?
+                            job.set_stage(AddJobStage::FetchingTorrent);
+                            job.cancellable(torrent_from_url(&self.reqwest_client, &url))
+                                .await?
                         }
                         AddTorrent::Url(url) => {
                             bail!(
@@ -1195,10 +1297,8 @@ impl Session {
                 }
             };
 
-            self.add_torrent_internal(add_res, opts).await
+            self.add_torrent_internal(add_res, opts, job).await
         }
-        .instrument(debug_span!(parent: self.rs(), "add_torrent"))
-        .boxed()
     }
 
     fn get_default_subfolder_for_torrent(
@@ -1248,6 +1348,7 @@ impl Session {
         self: &Arc<Self>,
         add_res: InternalAddResult,
         mut opts: AddTorrentOptions,
+        job: &Arc<AddJob>,
     ) -> anyhow::Result<AddTorrentResponse> {
         let InternalAddResult {
             info_hash,
@@ -1284,9 +1385,22 @@ impl Session {
                     let peer_rx = make_peer_rx().context(
                         "no known way to resolve peers (no DHT, no trackers, no initial_peers)",
                     )?;
-                    let resolved_magnet = self
-                        .resolve_magnet(info_hash, peer_rx, &trackers, opts.peer_opts)
-                        .await?;
+                    job.set_stage(AddJobStage::ResolvingMetadata);
+                    let resolve = job.cancellable(self.resolve_magnet(
+                        info_hash,
+                        peer_rx,
+                        &trackers,
+                        opts.peer_opts,
+                    ));
+                    let resolved_magnet = match opts.magnet_resolve_timeout {
+                        Some(t) => tokio::time::timeout(t, resolve).await.map_err(|_| {
+                            anyhow::anyhow!(
+                                "timed out after {}s waiting for torrent metadata from peers (magnet may be dead or poorly seeded)",
+                                t.as_secs()
+                            )
+                        })??,
+                        None => resolve.await?,
+                    };
 
                     // Add back seen_peers into the peer stream, as we consumed some peers
                     // while resolving the magnet.
@@ -1335,6 +1449,78 @@ impl Session {
             }));
         }
 
+        // Transfer from another client: adopt its files before storage opens
+        // them. Skipped if the torrent is already managed (the normal
+        // AlreadyManaged response is returned below).
+        let mut adopted_keep_final: std::collections::HashSet<usize> = Default::default();
+        if let Some(mode) = opts.adopt_foreign_incomplete.as_deref() {
+            match mode {
+                "auto" | "qbit" | "qbittorrent" => {}
+                other => bail!(
+                    "adopt_foreign_incomplete: unsupported mode {other:?} (supported: auto)"
+                ),
+            }
+            job.bail_if_cancelled()?;
+            let already_managed = self
+                .db
+                .read()
+                .torrents
+                .values()
+                .any(|t| t.info_hash() == info_hash);
+            if !already_managed {
+                job.set_stage(AddJobStage::Adopting);
+                let files: Vec<crate::adopt::AdoptFile> = metadata
+                    .file_infos
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, fi)| {
+                        !fi.attrs.padding
+                            && only_files.as_ref().map(|o| o.contains(i)).unwrap_or(true)
+                    })
+                    .map(|(i, fi)| crate::adopt::AdoptFile {
+                        file_id: i,
+                        rel: fi.relative_filename.clone(),
+                        len: fi.len,
+                        offset_in_torrent: fi.offset_in_torrent,
+                    })
+                    .collect();
+                let all_rel: Vec<PathBuf> = metadata
+                    .file_infos
+                    .iter()
+                    .map(|fi| fi.relative_filename.clone())
+                    .collect();
+                let ext = self.preferences.incomplete_extension();
+                let lengths = metadata.info.lengths();
+                let log_path = self.preferences_path().parent().map(|d| d.join("adopt-log.jsonl"));
+                let info_hash_str = info_hash.as_string();
+                let torrent_name = metadata.info.name().map(|n| n.to_string());
+                let (keep, summary) = self.spawner.block_in_place(|| {
+                    let plan = crate::adopt::plan_adoption(
+                        &output_folder,
+                        &files,
+                        &all_rel,
+                        &crate::adopt::AdoptPieces {
+                            piece_len: lengths.default_piece_length() as u64,
+                            total_len: lengths.total_length(),
+                            hashes: metadata.info.info().pieces.as_ref(),
+                        },
+                        ext.as_deref(),
+                    )?;
+                    job.bail_if_cancelled()?;
+                    crate::adopt::apply_adoption(
+                        plan,
+                        &output_folder,
+                        ext.as_deref(),
+                        log_path.as_deref(),
+                        &info_hash_str,
+                        torrent_name.as_deref(),
+                    )
+                })?;
+                job.set_adopt_summary(summary);
+                adopted_keep_final = keep;
+            }
+        }
+
         let storage_factory = opts
             .storage_factory
             .take()
@@ -1350,12 +1536,35 @@ impl Session {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         };
 
-        let _permit = self.spawner.semaphore().acquire_owned().await?;
+        // Wait for a blocking-I/O slot. These are held by hash checks of other
+        // torrents, so on a busy server this can take a long time: report it.
+        let semaphore = self.spawner.semaphore();
+        let _permit = match semaphore.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                job.set_stage(AddJobStage::WaitingForServer);
+                job.cancellable(async { Ok(semaphore.acquire_owned().await?) })
+                    .await?
+            }
+        };
+        job.bail_if_cancelled()?;
 
-        let (managed_torrent, metadata) = {
-            let mut g = self.db.write();
+        // Commit in a separate task so that it can't be interrupted halfway
+        // (e.g. in memory but not persisted) if the request is dropped. The
+        // job's commit point decides atomically whether a cancel won.
+        let this = self.clone();
+        let job = job.clone();
+        let commit = async move {
+        let _permit = _permit;
+        // NOTE: `id` may be re-allocated inside this block (see below), so the
+        // block returns the final id; everything after it must use that one
+        // (persisting under the stale id overwrote other torrents' entries).
+        let (managed_torrent, metadata, id) = {
+            let mut g = this.db.write();
             if let Some((id, handle)) = g.torrents.iter().find_map(|(eid, t)| {
-                if t.info_hash() == info_hash || *eid == id {
+                if t.info_hash() == info_hash
+                    || (opts.preferred_id.is_some() && *eid == id)
+                {
                     Some((*eid, t.clone()))
                 } else {
                     None
@@ -1363,17 +1572,50 @@ impl Session {
             }) {
                 return Ok(AddTorrentResponse::AlreadyManaged(id, handle));
             }
+            // The JSON persistence store derives next_id from what it has
+            // persisted so far, so concurrent adds (or adds racing a torrent
+            // that isn't persisted yet) get the same id. That used to return
+            // AlreadyManaged for a *different* torrent and silently drop the
+            // add. Allocate a free id under the db lock instead.
+            let id = if opts.preferred_id.is_none() && g.torrents.contains_key(&id) {
+                let free = g.torrents.keys().copied().max().map(|m| m + 1).unwrap_or(0);
+                debug!(requested = id, allocated = free, "torrent id already in use, allocating a new one");
+                free
+            } else {
+                id
+            };
+            if !job.try_commit(id) {
+                bail!("add cancelled before the torrent was committed");
+            }
+            job.set_commit_step(
+                "opening_files",
+                this.spawner.semaphore().available_permits() == 0,
+            );
 
-            let span = debug_span!(parent: self.rs(), "torrent", id);
-            let peer_opts = self.merge_peer_opts(opts.peer_opts);
+            let span = debug_span!(parent: this.rs(), "torrent", id);
+            let peer_opts = this.merge_peer_opts(opts.peer_opts);
             let metadata = Arc::new(metadata);
+            let mut file_renames = opts.file_renames.clone().unwrap_or_default();
+            if let Some(ext) = this.preferences.incomplete_extension() {
+                let infos: Vec<(usize, PathBuf, bool)> = metadata
+                    .file_infos
+                    .iter()
+                    .enumerate()
+                    // Adopted files that already exist under their final name
+                    // (e.g. another client's completed data) keep it.
+                    .filter(|(i, _)| !adopted_keep_final.contains(i))
+                    .map(|(i, fi)| (i, fi.relative_filename.clone(), fi.attrs.padding))
+                    .collect();
+                file_renames = apply_incomplete_suffix_to_renames(&infos, &file_renames, &ext);
+            }
+
             let minfo = Arc::new(ManagedTorrentShared {
                 id,
                 span,
                 info_hash,
                 trackers: trackers.into_iter().collect(),
-                spawner: self.spawner.clone(),
-                peer_id: self.peer_id,
+                spawner: this.spawner.clone(),
+                peer_id: this.peer_id,
                 storage_factory,
                 options: ManagedTorrentOptions {
                     force_tracker_interval: opts.force_tracker_interval,
@@ -1383,23 +1625,25 @@ impl Session {
                     output_folder: output_folder.clone(),
                     ratelimits: opts.ratelimits,
                     initial_peers: opts.initial_peers.clone().unwrap_or_default(),
-                    peer_limit: opts.peer_limit.or(self.peer_limit),
+                    peer_limit: opts.peer_limit.or_else(|| this.session_peer_limit()),
                     #[cfg(feature = "disable-upload")]
-                    _disable_upload: self._disable_upload,
+                    _disable_upload: this._disable_upload,
                 },
-                connector: self.connector.clone(),
-                session: Arc::downgrade(self),
+                connector: this.connector.clone(),
+                session: Arc::downgrade(&this),
                 magnet_name: name,
-                client_name_and_version: self.client_name_and_version.clone(),
+                client_name_and_version: this.client_name_and_version.clone(),
                 current_output_folder: RwLock::new(output_folder.clone()),
-                file_renames: RwLock::new(opts.file_renames.clone().unwrap_or_default()),
+                file_renames: RwLock::new(file_renames),
+                torznab_category: opts.torznab_category,
+                damage: Default::default(),
             });
 
             let initializing = Arc::new(TorrentStateInitializing::new(
                 minfo.clone(),
                 metadata.clone(),
                 only_files.clone(),
-                self.spawner
+                this.spawner
                     .block_in_place(|| minfo.storage_factory.create_and_init(&minfo, &metadata))?,
                 false,
             ));
@@ -1415,16 +1659,18 @@ impl Session {
             });
 
             g.add_torrent(handle.clone(), id);
-            (handle, metadata)
+            (handle, metadata, id)
         };
 
-        if let Some(p) = self.persistence.as_ref()
+        job.set_commit_step("saving", this.spawner.semaphore().available_permits() == 0);
+        if let Some(p) = this.persistence.as_ref()
             && let Err(e) = p.store(id, &managed_torrent).await
         {
-            self.db.write().torrents.remove(&id);
+            this.db.write().torrents.remove(&id);
             return Err(e);
         }
 
+        job.set_commit_step("starting", this.spawner.semaphore().available_permits() == 0);
         let _e = managed_torrent.shared.span.clone().entered();
 
         managed_torrent
@@ -1436,6 +1682,10 @@ impl Session {
         }
 
         Ok(AddTorrentResponse::Added(id, managed_torrent))
+        };
+        tokio::spawn(commit.instrument(tracing::Span::current()))
+            .await
+            .context("add task panicked")?
     }
 
     pub fn get(&self, id: TorrentIdOrHash) -> Option<ManagedTorrentHandle> {
@@ -1636,55 +1886,151 @@ impl Session {
         self.preferences.get()
     }
 
+    pub fn session_peer_limit(&self) -> Option<usize> {
+        match self.peer_limit.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => None,
+            n => Some(n),
+        }
+    }
+
+    pub fn set_session_peer_limit(&self, limit: Option<usize>) {
+        self.peer_limit
+            .store(limit.unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub async fn update_preferences(&self, prefs: SessionPreferences) -> anyhow::Result<()> {
+        self.set_session_peer_limit(prefs.peer_limit);
         self.preferences.update(prefs).await
     }
 
+
+    pub async fn reload_preferences(&self) -> anyhow::Result<SessionPreferences> {
+        let prefs = self.preferences.reload_from_disk().await?;
+        self.set_session_peer_limit(prefs.peer_limit);
+        Ok(prefs)
+    }
+
+    pub fn preferences_path(&self) -> &std::path::Path {
+        self.preferences.path()
+    }
+
+    pub fn admin_path(&self) -> &std::path::Path {
+        self.admin.path()
+    }
+
+    pub fn admin_config(&self) -> crate::session_admin::AdminConfig {
+        self.admin.get()
+    }
+
+    pub async fn update_admin_config(
+        &self,
+        patch: crate::session_admin::AdminConfigUpdate,
+    ) -> anyhow::Result<crate::session_admin::AdminConfig> {
+        self.admin.apply_update(patch).await
+    }
+
+    pub async fn set_ratelimits_persistent(&self, config: LimitsConfig) -> anyhow::Result<()> {
+        self.ratelimits.set_upload_bps(config.upload_bps);
+        self.ratelimits.set_download_bps(config.download_bps);
+        save_persisted_limits(&self.limits_path, &config).await
+    }
+
+
     /// Called when a torrent finishes downloading selected files.
-    /// Runs move-completed (if configured) then the on_complete shell hook.
+    /// Runs the ordered completion-action pipeline (see SessionPreferences::effective_actions).
     pub fn on_torrent_finished(self: &Arc<Self>, handle: &ManagedTorrentHandle) {
         let prefs = self.preferences.get();
+        let actions = prefs.effective_actions();
+        if actions.is_empty() {
+            return;
+        }
+        let session = self.clone();
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            session.run_completion_actions(&handle, &prefs, actions).await;
+        });
+    }
+
+    async fn run_completion_actions(
+        self: &Arc<Self>,
+        handle: &ManagedTorrentHandle,
+        prefs: &SessionPreferences,
+        actions: Vec<CompletionAction>,
+    ) {
         let id = handle.id();
         let info_hash = handle.info_hash().as_string();
         let name = handle.name().unwrap_or_else(|| info_hash.clone());
-        let output_folder = handle.output_folder();
 
-        if let Some(dest) = prefs.move_completed_path.clone() {
-            let dest = PathBuf::from(dest);
-            // Place content under dest/<torrent-name-or-hash>/ when moving a multi-file layout,
-            // or directly under dest when the torrent already has its own subfolder.
-            // Simplest: move the torrent's output_folder contents into dest, preserving relative paths
-            // by setting the new output folder to dest (files keep their relative names).
-            let copy = prefs.move_completed_copy;
-            let handle2 = handle.clone();
-            let session2 = self.clone();
-            tokio::spawn(async move {
-                let result = tokio::task::spawn_blocking({
-                    let handle2 = handle2.clone();
-                    move || handle2.relocate_output(dest, copy)
-                })
-                .await;
-                match result {
-                    Ok(Ok(())) => {
-                        info!(id, "move_completed finished");
-                        session2.try_update_persistence_metadata(&handle2).await;
+        for action in actions {
+            // Refresh folder each step — prior actions may have relocated.
+            let output_folder = handle.output_folder();
+            let env = [
+                ("RQBIT_TORRENT_ID", id.to_string()),
+                ("RQBIT_INFO_HASH", info_hash.clone()),
+                ("RQBIT_NAME", name.clone()),
+                (
+                    "RQBIT_OUTPUT_FOLDER",
+                    output_folder.to_string_lossy().into_owned(),
+                ),
+            ];
+            match action {
+                CompletionAction::DropIncompleteExt => {
+                    let Some(ext) = prefs.incomplete_extension_str().map(|s| s.to_owned()) else {
+                        warn!(id, "DropIncompleteExt skipped: incomplete_extension not set");
+                        continue;
+                    };
+                    let handle2 = handle.clone();
+                    let ext2 = ext.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        drop_incomplete_extension(&handle2, &ext2)
+                    })
+                    .await;
+                    match result {
+                        Ok(Ok(())) => {
+                            info!(id, ext = %ext, "DropIncompleteExt finished");
+                            self.try_update_persistence_metadata(handle).await;
+                        }
+                        Ok(Err(e)) => warn!(error=?e, id, "DropIncompleteExt failed"),
+                        Err(e) => warn!(error=?e, id, "DropIncompleteExt join failed"),
                     }
-                    Ok(Err(e)) => warn!(error=?e, id, "move_completed failed"),
-                    Err(e) => warn!(error=?e, id, "move_completed join failed"),
                 }
-            });
-        }
-
-        if let Some(hook) = prefs.on_complete_hook.clone() {
-            crate::session_preferences::spawn_shell_hook(
-                &hook,
-                &[
-                    ("RQBIT_TORRENT_ID", id.to_string()),
-                    ("RQBIT_INFO_HASH", info_hash),
-                    ("RQBIT_NAME", name),
-                    ("RQBIT_OUTPUT_FOLDER", output_folder.to_string_lossy().into_owned()),
-                ],
-            );
+                CompletionAction::Organize => {
+                    let handle2 = handle.clone();
+                    let prefs2 = prefs.clone();
+                    let default_root = self.output_folder.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        auto_organize_torrent(&handle2, &prefs2, default_root)
+                    })
+                    .await;
+                    match result {
+                        Ok(Ok(dest)) => {
+                            info!(id, ?dest, "Organize finished");
+                            self.try_update_persistence_metadata(handle).await;
+                        }
+                        Ok(Err(e)) => warn!(error=?e, id, "Organize failed"),
+                        Err(e) => warn!(error=?e, id, "Organize join failed"),
+                    }
+                }
+                CompletionAction::Move { path, copy } => {
+                    let dest = PathBuf::from(path);
+                    let handle2 = handle.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        handle2.relocate_output(dest, copy)
+                    })
+                    .await;
+                    match result {
+                        Ok(Ok(())) => {
+                            info!(id, "Move completed finished");
+                            self.try_update_persistence_metadata(handle).await;
+                        }
+                        Ok(Err(e)) => warn!(error=?e, id, "Move completed failed"),
+                        Err(e) => warn!(error=?e, id, "Move completed join failed"),
+                    }
+                }
+                CompletionAction::Shell { command } => {
+                    run_shell_hook_async(&command, &env).await;
+                }
+            }
         }
     }
 
@@ -1955,3 +2301,110 @@ mod tests {
         assert_eq!(parsed_trackers, get_trackers(&generated_parsed));
     }
 }
+
+
+fn drop_incomplete_extension(
+    handle: &ManagedTorrentHandle,
+    incomplete_ext: &str,
+) -> anyhow::Result<()> {
+    let metadata = handle
+        .with_metadata(|m| {
+            m.file_infos
+                .iter()
+                .enumerate()
+                .map(|(i, fi)| {
+                    (
+                        i,
+                        fi.relative_filename.clone(),
+                        fi.attrs.padding,
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .context("torrent metadata not resolved")?;
+
+    for (file_id, original, padding) in metadata {
+        if padding {
+            continue;
+        }
+        let current = handle
+            .shared()
+            .file_rename(file_id)
+            .unwrap_or_else(|| original.clone());
+        let s = current.to_string_lossy();
+        if !s.ends_with(incomplete_ext) {
+            continue;
+        }
+        let trimmed = &s[..s.len() - incomplete_ext.len()];
+        if trimmed.is_empty() {
+            warn!(file_id, "refusing to drop incomplete ext: empty result");
+            continue;
+        }
+        let new_path = PathBuf::from(trimmed);
+        if new_path == current {
+            continue;
+        }
+        handle
+            .rename_file(file_id, new_path)
+            .with_context(|| format!("rename file_id={file_id}"))?;
+    }
+    Ok(())
+}
+
+fn auto_organize_torrent(
+    handle: &ManagedTorrentHandle,
+    prefs: &SessionPreferences,
+    default_root: PathBuf,
+) -> anyhow::Result<PathBuf> {
+    let info_hash = handle.info_hash().as_string();
+    let name = handle.name().unwrap_or_else(|| info_hash.clone());
+    let file_paths: Vec<String> = handle
+        .with_metadata(|m| {
+            m.file_infos
+                .iter()
+                .filter(|fi| !fi.attrs.padding)
+                .map(|fi| fi.relative_filename.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let (media, from_torznab) = match handle.torznab_category().and_then(
+        crate::media_classify::media_type_from_torznab_category,
+    ) {
+        Some(m) => (m, true),
+        None => (
+            crate::media_classify::classify_media(&name, &file_paths),
+            false,
+        ),
+    };
+    let type_folder = prefs.folder_for_media(media).to_owned();
+    let root = prefs
+        .auto_organize_root
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or(default_root);
+
+    let leaf = handle
+        .output_folder()
+        .file_name()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(&name));
+    let dest = root.join(&type_folder).join(leaf);
+
+    info!(
+        id = handle.id(),
+        media = media.as_str(),
+        from_torznab,
+        torznab_category = ?handle.torznab_category(),
+        type_folder = %type_folder,
+        ?dest,
+        "auto-organize classification"
+    );
+
+    if handle.output_folder() == dest {
+        return Ok(dest);
+    }
+    handle.relocate_output(dest.clone(), false)?;
+    Ok(dest)
+}
+

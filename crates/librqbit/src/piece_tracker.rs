@@ -239,6 +239,12 @@ impl PieceTracker {
         self.chunks.mark_piece_broken_if_not_have(piece);
     }
 
+    /// Hold back a piece after an I/O error (not requeued until the backoff elapses).
+    pub fn defer_piece(&mut self, piece: ValidPieceIndex) {
+        self.inflight.remove(&piece);
+        self.chunks.mark_piece_deferred(piece);
+    }
+
     /// Release all pieces owned by a peer (on peer death).
     ///
     /// Moves all pieces owned by the peer from IN_FLIGHT back to QUEUED.
@@ -523,6 +529,42 @@ mod tests {
         match result2 {
             AcquireResult::Reserved(p) => assert_eq!(p, piece),
             _ => panic!("Expected piece to be re-reservable after fail"),
+        }
+    }
+
+    #[test]
+    fn test_deferred_piece_not_requeued_until_marked() {
+        let chunks = make_test_chunk_tracker(5);
+        let mut tracker = PieceTracker::new(chunks);
+        let file_infos = make_test_file_infos(5);
+        let file_priorities = make_default_file_priorities(&file_infos);
+        let acquire = |tracker: &mut PieceTracker, only: Option<ValidPieceIndex>| {
+            tracker.acquire_piece(AcquireRequest {
+                peer: peer(2),
+                peer_avg_time: None,
+                priority_pieces: std::iter::empty(),
+                file_priorities: &file_priorities,
+                file_infos: &file_infos,
+                peer_has_piece: |p| only.map(|o| o == p).unwrap_or(true),
+                can_steal: |_| true,
+            })
+        };
+        let piece = match acquire(&mut tracker, None) {
+            AcquireResult::Reserved(p) => p,
+            _ => panic!("Expected Reserved"),
+        };
+        // I/O error: hold the piece back.
+        tracker.defer_piece(piece);
+        assert!(!tracker.is_inflight(piece));
+        assert!(
+            !matches!(acquire(&mut tracker, Some(piece)), AcquireResult::Reserved(_)),
+            "deferred piece must not be handed out again"
+        );
+        // Backoff elapsed: requeue.
+        tracker.mark_piece_hash_failed(piece);
+        match acquire(&mut tracker, Some(piece)) {
+            AcquireResult::Reserved(p) => assert_eq!(p, piece),
+            _ => panic!("Expected piece to be re-reservable after requeue"),
         }
     }
 

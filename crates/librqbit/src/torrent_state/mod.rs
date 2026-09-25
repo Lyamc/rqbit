@@ -196,10 +196,16 @@ pub struct ManagedTorrentShared {
     /// Per-file relative path overrides (file_id -> new relative path).
     pub(crate) file_renames: RwLock<HashMap<usize, PathBuf>>,
 
+    /// Optional Newznab/Torznab category id supplied at add time.
+    pub(crate) torznab_category: Option<u32>,
+
     // "dn" from magnet link
     pub(crate) magnet_name: Option<String>,
 
     pub(crate) client_name_and_version: String,
+
+    /// Files that hit unrecoverable I/O errors, and the state of any repair.
+    pub(crate) damage: crate::repair::DamageTracker,
 }
 
 impl ManagedTorrentShared {
@@ -264,6 +270,10 @@ impl ManagedTorrent {
 
     pub fn file_renames(&self) -> HashMap<usize, PathBuf> {
         self.shared.file_renames.read().clone()
+    }
+
+    pub fn torznab_category(&self) -> Option<u32> {
+        self.shared.torznab_category
     }
 
     /// Rename a single file (or its relative path including folders) while the torrent
@@ -609,6 +619,7 @@ impl ManagedTorrent {
             uploaded_bytes: 0,
             finished: false,
             live: None,
+            damage: None,
         };
 
         {
@@ -652,6 +663,20 @@ impl ManagedTorrent {
                 }
             }
         }
+
+        let metadata = self.metadata.load();
+        resp.damage = self.shared.damage.snapshot(|file_id| {
+            self.shared
+                .file_rename(file_id)
+                .or_else(|| {
+                    metadata
+                        .as_ref()
+                        .and_then(|m| m.file_infos.get(file_id))
+                        .map(|fi| fi.relative_filename.clone())
+                })
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| format!("file {file_id}"))
+        });
 
         resp
     }

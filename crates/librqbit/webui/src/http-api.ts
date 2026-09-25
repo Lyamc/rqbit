@@ -1,14 +1,24 @@
 import {
+  RepairStartResponse,
+  AddJobCancelOutcome,
+  AddJobStatus,
   AddTorrentResponse,
   ErrorDetails,
   LimitsConfig,
   SessionPreferences,
+  AdminStatus,
+  AdminConfigUpdate,
+  AdminConfigPublic,
   ListTorrentsResponse,
   PeerStatsSnapshot,
   RqbitAPI,
+  RequestOptions,
   SessionStats,
   TorrentDetails,
   TorrentStats,
+  FsRootsResponse,
+  FsListResponse,
+  ExtractResponse,
 } from "./api-types";
 
 // Define API URL and base path
@@ -50,6 +60,7 @@ const makeRequest = async (
   path: string,
   data?: any,
   isJson?: boolean,
+  init?: RequestOptions,
 ): Promise<any> => {
   console.log(method, path);
   const url = apiUrl + path;
@@ -58,6 +69,7 @@ const makeRequest = async (
     headers: {
       Accept: "application/json",
     },
+    signal: init?.signal,
   };
   if (isJson) {
     options.headers = {
@@ -80,7 +92,10 @@ const makeRequest = async (
   try {
     response = await fetch(url, options);
   } catch (e) {
-    error.text = "network error";
+    error.text =
+      init?.signal?.aborted || (e as Error)?.name === "AbortError"
+        ? "request aborted"
+        : "network error";
     return Promise.reject(error);
   }
 
@@ -125,8 +140,10 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
     return makeRequest("GET", "/stats");
   },
 
-  uploadTorrent: (data, opts): Promise<AddTorrentResponse> => {
-    let url = "/torrents?&overwrite=true";
+  uploadTorrent: (data, opts, init): Promise<AddTorrentResponse> => {
+    // Prefer caller overwrite; default true to match prior webui behavior.
+    const overwrite = opts?.overwrite ?? true;
+    let url = `/torrents?overwrite=${overwrite}`;
     if (opts?.list_only) {
       url += "&list_only=true";
     }
@@ -143,12 +160,101 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
       url += `&initial_peers=${opts.initial_peers.join(",")}`;
     }
     if (opts?.output_folder) {
-      url += `&output_folder=${opts.output_folder}`;
+      url += `&output_folder=${encodeURIComponent(opts.output_folder)}`;
+    }
+    if (opts?.adopt_foreign_incomplete) {
+      url += `&adopt_foreign_incomplete=${opts.adopt_foreign_incomplete}`;
+    }
+    if (opts?.magnet_timeout_secs) {
+      url += `&magnet_timeout_secs=${opts.magnet_timeout_secs}`;
+    }
+    if (opts?.add_job_id) {
+      url += `&add_job_id=${encodeURIComponent(opts.add_job_id)}`;
     }
     if (typeof data === "string") {
       url += "&is_url=true";
     }
-    return makeRequest("POST", url, data);
+    return makeRequest("POST", url, data, false, init);
+  },
+
+  uploadTorrentFromServerPath: (
+    path,
+    opts,
+    init,
+  ): Promise<AddTorrentResponse> => {
+    const overwrite = opts?.overwrite ?? true;
+    let url = `/torrents?overwrite=${overwrite}&from_server_path=${encodeURIComponent(path)}`;
+    if (opts?.list_only) {
+      url += "&list_only=true";
+    }
+    if (opts?.output_folder) {
+      url += `&output_folder=${encodeURIComponent(opts.output_folder)}`;
+    }
+    if (opts?.adopt_foreign_incomplete) {
+      url += `&adopt_foreign_incomplete=${opts.adopt_foreign_incomplete}`;
+    }
+    if (opts?.add_job_id) {
+      url += `&add_job_id=${encodeURIComponent(opts.add_job_id)}`;
+    }
+    return makeRequest("POST", url, "", false, init);
+  },
+
+  getAddJob: (jobId: string): Promise<AddJobStatus> => {
+    return makeRequest("GET", `/add_jobs/${encodeURIComponent(jobId)}`);
+  },
+
+  cancelAddJob: (jobId: string): Promise<AddJobCancelOutcome> => {
+    return makeRequest(
+      "POST",
+      `/add_jobs/${encodeURIComponent(jobId)}/cancel`,
+    );
+  },
+
+  fsRoots: (): Promise<FsRootsResponse> => {
+    return makeRequest("GET", "/fs/roots");
+  },
+
+  fsList: (path, opts): Promise<FsListResponse> => {
+    let url = `/fs/list?path=${encodeURIComponent(path)}`;
+    if (opts?.recursive) url += "&recursive=true";
+    if (opts?.torrentsOnly) url += "&torrents_only=true";
+    return makeRequest("GET", url);
+  },
+
+  extractUpload: async (data): Promise<ExtractResponse> => {
+    const url = apiUrl + "/fs/extract";
+    let error: ErrorDetails = {
+      method: "POST",
+      path: "/fs/extract",
+      text: "",
+    };
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: { Accept: "application/json" },
+        body: data,
+      });
+    } catch (e) {
+      error.text = "network error";
+      return Promise.reject(error);
+    }
+    error.status = response.status;
+    error.statusText = `${response.status} ${response.statusText}`;
+    if (!response.ok) {
+      const errorBody = await response.text();
+      try {
+        const json = JSON.parse(errorBody);
+        error.text =
+          json.human_readable !== undefined
+            ? json.human_readable
+            : JSON.stringify(json, null, 2);
+      } catch {
+        error.text = errorBody;
+      }
+      return Promise.reject(error);
+    }
+    return response.json();
   },
 
   updateOnlyFiles: (index: number, files: number[]): Promise<void> => {
@@ -177,6 +283,13 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
 
   fixErrors: (index: number): Promise<void> => {
     return makeRequest("POST", `/torrents/${index}/fix_errors`);
+  },
+
+  repairFiles: (
+    index: number,
+    opts?: { files?: number[]; scope?: "damaged" | "all" },
+  ): Promise<RepairStartResponse> => {
+    return makeRequest("POST", `/torrents/${index}/repair_files`, opts ?? {});
   },
 
   forget: (index: number): Promise<void> => {
@@ -216,7 +329,11 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
   getPreferences: (): Promise<SessionPreferences> => {
     return makeRequest("GET", "/torrents/preferences");
   },
-  renameFile: (index: number, fileId: number, newPath: string): Promise<void> => {
+  renameFile: (
+    index: number,
+    fileId: number,
+    newPath: string,
+  ): Promise<void> => {
     return makeRequest("POST", `/torrents/${index}/rename_file`, {
       file_id: fileId,
       new_path: newPath,
@@ -234,5 +351,17 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
   },
   setPreferences: (prefs: SessionPreferences): Promise<void> => {
     return makeRequest("POST", "/torrents/preferences", prefs, true);
+  },
+  getAdminStatus: (): Promise<AdminStatus> => {
+    return makeRequest("GET", "/admin");
+  },
+  updateAdminConfig: (patch: AdminConfigUpdate): Promise<AdminConfigPublic> => {
+    return makeRequest("POST", "/admin/config", patch, true);
+  },
+  reloadPreferences: (): Promise<SessionPreferences> => {
+    return makeRequest("POST", "/admin/reload");
+  },
+  restartProcess: (): Promise<void> => {
+    return makeRequest("POST", "/admin/restart");
   },
 };

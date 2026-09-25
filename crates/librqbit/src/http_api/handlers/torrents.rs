@@ -18,7 +18,7 @@ use super::ApiState;
 use crate::{
     AddTorrent, ApiError, CreateTorrentOptions, SUPPORTED_SCHEMES,
     api::{ApiTorrentListOpts, Result, TorrentIdOrHash},
-    api_error::WithStatusError,
+    api_error::{WithStatus, WithStatusError},
     http_api::timeout::Timeout,
     http_api_types::TorrentAddQueryParams,
     torrent_state::peer::stats::snapshot::{PeerStatsFilter, PeerStatsFilterState},
@@ -39,7 +39,19 @@ pub async fn h_torrents_post(
     body: Body,
 ) -> Result<impl IntoResponse> {
     let is_url = params.is_url;
+    let from_server_path = params.from_server_path.clone();
     let opts = params.into_add_torrent_options();
+
+    // Add from a validated server filesystem path (browse UI).
+    if let Some(path) = from_server_path {
+        let data = super::fs::read_torrent_under_roots(&state, &path)?;
+        let add = AddTorrent::TorrentFileBytes(data.into());
+        return tokio::time::timeout(timeout, state.api.api_add_torrent(add, Some(opts)))
+            .await
+            .context("timeout")?
+            .map(axum::Json);
+    }
+
     let max_size = state.opts.max_upload_body_size.unwrap_or(10 * 1024 * 1024);
     let data = to_bytes(body, max_size)
         .await
@@ -77,6 +89,32 @@ pub async fn h_torrents_post(
         .await
         .context("timeout")?
         .map(axum::Json)
+}
+
+pub async fn h_add_job_status(
+    State(state): State<ApiState>,
+    Path(job_id): Path<String>,
+) -> Result<impl IntoResponse> {
+    state
+        .api
+        .session()
+        .add_jobs
+        .get(&job_id)
+        .map(axum::Json)
+        .ok_or_else(|| ApiError::from((StatusCode::NOT_FOUND, "no such add job")))
+}
+
+pub async fn h_add_job_cancel(
+    State(state): State<ApiState>,
+    Path(job_id): Path<String>,
+) -> Result<impl IntoResponse> {
+    let outcome = state
+        .api
+        .session()
+        .add_jobs
+        .cancel(&job_id)
+        .with_status(StatusCode::BAD_REQUEST)?;
+    Ok(axum::Json(outcome))
 }
 
 pub async fn h_torrent_details(
@@ -233,6 +271,26 @@ pub async fn h_torrent_action_fix_errors(
         .api
         .api_torrent_action_fix_errors(idx)
         .await
+        .map(axum::Json)
+}
+
+/// Body (optional): `{"files": [idx, ...]}` or `{"scope": "damaged" | "all"}`.
+/// Default: scan all files and repair whatever is unreadable.
+pub async fn h_torrent_action_repair_files(
+    State(state): State<ApiState>,
+    Path(idx): Path<TorrentIdOrHash>,
+    body: axum::body::Bytes,
+) -> Result<impl IntoResponse> {
+    let req: crate::repair::RepairRequest = if body.iter().all(|b| b.is_ascii_whitespace()) {
+        Default::default()
+    } else {
+        serde_json::from_slice(&body)
+            .context("invalid repair request body")
+            .with_status(StatusCode::BAD_REQUEST)?
+    };
+    state
+        .api
+        .api_torrent_action_repair_files(idx, req)
         .map(axum::Json)
 }
 

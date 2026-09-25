@@ -6,6 +6,7 @@ import { Speed } from "./Speed";
 import { formatBytes } from "../helper/formatBytes";
 import { getCompletionETA } from "../helper/getCompletionETA";
 import { StatusIcon } from "./StatusIcon";
+import { DamagedFilesNotice } from "./DamagedFilesNotice";
 
 export const TorrentCardContent: React.FC<{
   torrent: TorrentListItem;
@@ -57,6 +58,7 @@ export const TorrentCardContent: React.FC<{
               {torrent.name}
             </div>
           </div>
+          <DamagedFilesNotice torrent={torrent} />
           {error ? (
             <p className="text-error">
               <strong>Error:</strong> {error}

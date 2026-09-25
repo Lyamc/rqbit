@@ -6,14 +6,24 @@ import { Button } from "./Button";
 import { ModalBody } from "../modal/ModalBody";
 import { ModalFooter } from "../modal/ModalFooter";
 import { FormInput } from "../forms/FormInput";
+import { extractMagnetLinks } from "../../helper/parseMagnets";
+import { BulkImportModal } from "../modal/BulkImportModal";
 
 export const MagnetInput = ({ className }: { className?: string }) => {
   const [magnet, setMagnet] = useState<string | null>(null);
   const [inputValue, setInputValue] = useState("");
   const [modalIsOpen, setModalIsOpen] = useState(false);
+  const [bulkPaste, setBulkPaste] = useState<string | null>(null);
 
   const submit = () => {
-    setMagnet(inputValue);
+    const found = extractMagnetLinks(inputValue);
+    if (found.length > 1) {
+      setBulkPaste(inputValue);
+      setInputValue("");
+      setModalIsOpen(false);
+      return;
+    }
+    setMagnet(found[0] ?? inputValue);
     setInputValue("");
     setModalIsOpen(false);
   };
@@ -50,7 +60,7 @@ export const MagnetInput = ({ className }: { className?: string }) => {
               }
             }}
             placeholder="magnet:?xt=urn:btih:..."
-            help="Enter magnet or HTTP(S) URL to the .torrent"
+            help="Enter magnet or HTTP(S) URL to the .torrent. Paste many magnets to open bulk import."
           />
         </ModalBody>
 
@@ -63,6 +73,14 @@ export const MagnetInput = ({ className }: { className?: string }) => {
           </Button>
         </ModalFooter>
       </Modal>
+
+      {bulkPaste !== null && (
+        <BulkImportModal
+          isOpen={true}
+          initialPaste={bulkPaste}
+          onClose={() => setBulkPaste(null)}
+        />
+      )}
     </>
   );
 };

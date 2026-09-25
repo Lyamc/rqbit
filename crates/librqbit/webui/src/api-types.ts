@@ -123,16 +123,135 @@ export interface SessionStats {
   uptime_seconds: number;
 }
 
+export interface AdminConfigPublic {
+  http_api_listen_addr?: string | null;
+  basic_auth_enabled: boolean;
+  basic_auth_user?: string | null;
+  basic_auth_password_set: boolean;
+  listen_port?: number | null;
+  announce_port?: number | null;
+  disable_dht?: boolean | null;
+  disable_dht_persistence?: boolean | null;
+  disable_lsd?: boolean | null;
+  disable_trackers?: boolean | null;
+  enable_utp_listen?: boolean | null;
+  disable_tcp_listen?: boolean | null;
+  disable_tcp_connect?: boolean | null;
+  disable_upnp_port_forward?: boolean | null;
+  socks_proxy_url?: string | null;
+  ipv4_only?: boolean | null;
+  bind_device?: string | null;
+  peer_limit?: number | null;
+  concurrent_init_limit?: number | null;
+  peer_connect_timeout_secs?: number | null;
+  peer_read_write_timeout_secs?: number | null;
+  blocklist_url?: string | null;
+  allowlist_url?: string | null;
+  fastresume?: boolean | null;
+}
+
+export interface AdminStatus {
+  version: string;
+  preferences_path: string;
+  admin_path: string;
+  effective_http_listen_addr?: string | null;
+  env_http_listen_addr?: string | null;
+  env_basic_auth_set: boolean;
+  persisted: AdminConfigPublic;
+  restart_supported: boolean;
+  notes: string[];
+}
+
+export interface AdminConfigUpdate {
+  http_api_listen_addr?: string | null;
+  basic_auth_enabled?: boolean | null;
+  basic_auth_user?: string | null;
+  basic_auth_password?: string | null;
+  listen_port?: number | null;
+  clear_listen_port?: boolean | null;
+  announce_port?: number | null;
+  clear_announce_port?: boolean | null;
+  disable_dht?: boolean | null;
+  clear_disable_dht?: boolean | null;
+  disable_dht_persistence?: boolean | null;
+  clear_disable_dht_persistence?: boolean | null;
+  disable_lsd?: boolean | null;
+  clear_disable_lsd?: boolean | null;
+  disable_trackers?: boolean | null;
+  clear_disable_trackers?: boolean | null;
+  enable_utp_listen?: boolean | null;
+  clear_enable_utp_listen?: boolean | null;
+  disable_tcp_listen?: boolean | null;
+  clear_disable_tcp_listen?: boolean | null;
+  disable_tcp_connect?: boolean | null;
+  clear_disable_tcp_connect?: boolean | null;
+  disable_upnp_port_forward?: boolean | null;
+  clear_disable_upnp_port_forward?: boolean | null;
+  socks_proxy_url?: string | null;
+  ipv4_only?: boolean | null;
+  clear_ipv4_only?: boolean | null;
+  bind_device?: string | null;
+  peer_limit?: number | null;
+  clear_peer_limit?: boolean | null;
+  concurrent_init_limit?: number | null;
+  clear_concurrent_init_limit?: boolean | null;
+  peer_connect_timeout_secs?: number | null;
+  clear_peer_connect_timeout_secs?: boolean | null;
+  peer_read_write_timeout_secs?: number | null;
+  clear_peer_read_write_timeout_secs?: boolean | null;
+  blocklist_url?: string | null;
+  allowlist_url?: string | null;
+  fastresume?: boolean | null;
+  clear_fastresume?: boolean | null;
+}
+
 export interface LimitsConfig {
   upload_bps?: number | null;
   download_bps?: number | null;
 }
 
+export type CompletionActionType =
+  "shell" | "move" | "organize" | "drop_incomplete_ext";
+
+export interface CompletionAction {
+  type: CompletionActionType;
+  command?: string;
+  path?: string;
+  copy?: boolean;
+}
+
+export interface AutoOrganizeFolders {
+  anime: string;
+  tv: string;
+  movie: string;
+  game: string;
+  porn: string;
+  music: string;
+  book: string;
+  software: string;
+  other: string;
+}
+
 export interface SessionPreferences {
   soft_recover_on_io_error: boolean;
+  /** Auto-run "Repair damaged files" when soft recovery marks a file damaged. */
+  auto_repair_damaged_files?: boolean;
+  /** Automatic recovery backoff: first retry delay (s), doubling per failure. */
+  recovery_backoff_base_secs?: number;
+  /** Automatic recovery backoff cap (s). */
+  recovery_backoff_cap_secs?: number;
+  /** Stop automatic recovery after this many consecutive failures. */
+  recovery_max_attempts?: number;
   on_complete_hook?: string | null;
   move_completed_path?: string | null;
   move_completed_copy?: boolean;
+  auto_organize_enabled?: boolean;
+  auto_organize_root?: string | null;
+  auto_organize_folders?: AutoOrganizeFolders;
+  incomplete_extension?: string | null;
+  completion_actions?: CompletionAction[];
+  /** Live default max peers per newly added torrent. */
+  peer_limit?: number | null;
 }
 
 // Interface for the Torrent Stats API response
@@ -172,6 +291,95 @@ export const STATE_PAUSED = "paused";
 export const STATE_LIVE = "live";
 export const STATE_ERROR = "error";
 
+export interface DamagedFileStats {
+  file_id: number;
+  path: string;
+  errors: number;
+  /** At least one failure was an OS-level I/O error (EIO). */
+  eio: boolean;
+  last_error: string;
+  first_seen: string;
+  last_seen: string;
+  pieces_failed: number;
+  /** Consecutive automatic repair attempts. */
+  auto_repair_attempts?: number;
+  next_auto_repair_in_secs?: number;
+  /** Automatic repair gave up for this file. */
+  needs_attention?: boolean;
+}
+
+export interface PieceBackoffStats {
+  piece: number;
+  attempts: number;
+  next_retry_in_secs?: number;
+  needs_attention: boolean;
+  last_error: string;
+}
+
+export interface RecoveryStats {
+  max_attempts: number;
+  pieces_waiting: number;
+  pieces_needing_attention: number;
+  max_piece_attempts: number;
+  next_retry_in_secs?: number;
+  pieces: PieceBackoffStats[];
+}
+
+export type RepairMethod = "none" | "punch_hole" | "copy_replace" | "failed";
+
+export interface FileRepairOutcome {
+  file_id: number;
+  path: string;
+  bytes_total: number;
+  bytes_unreadable: number;
+  bytes_zeroed: number;
+  ranges_zeroed: [number, number][];
+  pieces: number[];
+  method: RepairMethod;
+  note?: string;
+  error?: string;
+}
+
+export interface RepairSummary {
+  files_scanned: number;
+  files_repaired: number;
+  files_failed: number;
+  bytes_unreadable: number;
+  bytes_zeroed: number;
+  pieces_to_redownload: number;
+  pieces_invalidated: number;
+  files: FileRepairOutcome[];
+}
+
+export interface RepairStatus {
+  state: "running" | "done" | "failed";
+  auto: boolean;
+  started_at: string;
+  finished_at?: string;
+  scanned_bytes: number;
+  total_bytes: number;
+  files_total: number;
+  files_done: number;
+  current_file?: string;
+  summary?: RepairSummary;
+  error?: string;
+}
+
+export interface DamageStats {
+  damaged_files: DamagedFileStats[];
+  repair?: RepairStatus;
+  /** Automatic re-download of pieces after I/O errors (with backoff). */
+  recovery?: RecoveryStats;
+  /** Automatic recovery gave up somewhere; manual Fix errors needed. */
+  needs_attention?: boolean;
+}
+
+export interface RepairStartResponse {
+  started: boolean;
+  files: number;
+  total_bytes: number;
+}
+
 export interface TorrentStats {
   state: "initializing" | "paused" | "live" | "error";
   error: string | null;
@@ -181,6 +389,14 @@ export interface TorrentStats {
   initializing_paused?: boolean;
   total_bytes: number;
   live: LiveTorrentStats | null;
+  /** Present when files are damaged (unreadable) or a repair ran. */
+  damage?: DamageStats;
+}
+
+/** Client-side request options (not sent to the server). */
+export interface RequestOptions {
+  /** Abort the in-flight HTTP request (client side only; the server may still finish the add). */
+  signal?: AbortSignal;
 }
 
 export interface ErrorDetails {
@@ -212,6 +428,14 @@ export interface AddTorrentOptions {
   force_tracker_interval?: Duration | null;
   initial_peers?: string[] | null; // Assuming SocketAddr is equivalent to a string in TypeScript
   preferred_id?: number | null;
+  /** Transfer from another client: adopt its files in output_folder before
+   *  the initial check ("auto": a unique `<name><suffix>` partial that passes
+   *  a piece-hash sample is renamed; "qbit" is an alias). */
+  adopt_foreign_incomplete?: "auto" | "qbit" | null;
+  /** Poll `GET /add_jobs/{id}` / cancel via `POST /add_jobs/{id}/cancel`. */
+  add_job_id?: string;
+  /** Server gives up resolving magnet metadata after this many seconds. */
+  magnet_timeout_secs?: number | null;
 }
 
 export type Value = string | number | boolean;
@@ -256,6 +480,84 @@ export interface JSONLogLine {
   spans: Span[];
 }
 
+export interface FsRoot {
+  label: string;
+  path: string;
+}
+
+export interface FsRootsResponse {
+  roots: FsRoot[];
+}
+
+export interface FsEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  is_torrent: boolean;
+  size?: number;
+}
+
+export interface FsListResponse {
+  path: string;
+  parent?: string | null;
+  entries: FsEntry[];
+  truncated?: boolean;
+}
+
+export interface ExtractItem {
+  name: string;
+  kind: string;
+  data_base64?: string;
+  magnet?: string;
+  error?: string;
+}
+
+export interface ExtractResponse {
+  items: ExtractItem[];
+}
+
+/** What the server is doing for an in-flight add (`GET /add_jobs/{id}`). */
+export type AddJobStage =
+  | "starting"
+  | "fetching_torrent"
+  | "resolving_metadata"
+  | "adopting"
+  | "waiting_for_server"
+  | "adding"
+  | "added"
+  | "already_managed"
+  | "list_only"
+  | "failed"
+  | "cancelled";
+
+export interface AddJobAdoptSummary {
+  reused: number;
+  renamed: number;
+  ambiguous: string[];
+  rejected: string[];
+  skipped_target_exists: string[];
+}
+
+export interface AddJobStatus {
+  job_id?: string | null;
+  stage: AddJobStage;
+  torrent_id?: number;
+  /** "adding" only: opening_files | saving | starting. */
+  step?: string;
+  /** "adding" only: all disk I/O slots were busy (other torrents checking). */
+  busy?: boolean;
+  error?: string;
+  reason?: string;
+  stage_secs: number;
+  elapsed_secs: number;
+  adopt?: AddJobAdoptSummary;
+}
+
+export type AddJobCancelOutcome =
+  | { result: "cancelled" }
+  | { result: "already_added"; torrent_id: number }
+  | ({ result: "finished" } & Partial<AddJobStatus>);
+
 export interface RqbitAPI {
   getPlaylistUrl: (index: number) => string | null;
   getStreamLogsUrl: () => string | null;
@@ -274,15 +576,40 @@ export interface RqbitAPI {
   uploadTorrent: (
     data: string | File,
     opts?: AddTorrentOptions,
+    init?: RequestOptions,
   ) => Promise<AddTorrentResponse>;
+  uploadTorrentFromServerPath: (
+    path: string,
+    opts?: AddTorrentOptions,
+    init?: RequestOptions,
+  ) => Promise<AddTorrentResponse>;
+  /** Status of an add started with `add_job_id` (404 until it arrives). */
+  getAddJob?: (jobId: string) => Promise<AddJobStatus>;
+  /** Cancel an add started with `add_job_id`. */
+  cancelAddJob?: (jobId: string) => Promise<AddJobCancelOutcome>;
+  fsRoots: () => Promise<FsRootsResponse>;
+  fsList: (
+    path: string,
+    opts?: { recursive?: boolean; torrentsOnly?: boolean },
+  ) => Promise<FsListResponse>;
+  extractUpload: (data: Blob | ArrayBuffer | File) => Promise<ExtractResponse>;
 
   pause: (index: number) => Promise<void>;
   updateOnlyFiles: (index: number, files: number[]) => Promise<void>;
   renameFile: (index: number, fileId: number, newPath: string) => Promise<void>;
-  relocateTorrent: (index: number, destination: string, copy?: boolean) => Promise<void>;
+  relocateTorrent: (
+    index: number,
+    destination: string,
+    copy?: boolean,
+  ) => Promise<void>;
   start: (index: number) => Promise<void>;
   restart: (index: number) => Promise<void>;
   fixErrors: (index: number) => Promise<void>;
+  /** Scan the torrent's files for unreadable ranges and repair them (background job). */
+  repairFiles?: (
+    index: number,
+    opts?: { files?: number[]; scope?: "damaged" | "all" },
+  ) => Promise<RepairStartResponse>;
   forget: (index: number) => Promise<void>;
   delete: (index: number) => Promise<void>;
   stats: () => Promise<SessionStats>;
@@ -290,4 +617,8 @@ export interface RqbitAPI {
   setLimits: (limits: LimitsConfig) => Promise<void>;
   getPreferences: () => Promise<SessionPreferences>;
   setPreferences: (prefs: SessionPreferences) => Promise<void>;
+  getAdminStatus: () => Promise<AdminStatus>;
+  updateAdminConfig: (patch: AdminConfigUpdate) => Promise<AdminConfigPublic>;
+  reloadPreferences: () => Promise<SessionPreferences>;
+  restartProcess: () => Promise<void>;
 }

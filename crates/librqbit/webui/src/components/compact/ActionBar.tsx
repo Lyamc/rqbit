@@ -17,6 +17,11 @@ import {
 } from "../../api-types";
 import { Button } from "../buttons/Button";
 import {
+  hasDamagedFiles,
+  hasRecoveryIssues,
+  isRepairRunning,
+} from "../../helper/damage";
+import {
   StatusFilter,
   STATUS_FILTER_LABELS,
 } from "../../helper/torrentFilters";
@@ -28,6 +33,7 @@ interface ActionBarProps {
 
 export const ActionBar: React.FC<ActionBarProps> = ({ hideFilters }) => {
   const selectedTorrentIds = useUIStore((state) => state.selectedTorrentIds);
+  const clearSelection = useUIStore((state) => state.clearSelection);
   const searchQuery = useUIStore((state) => state.searchQuery);
   const setSearchQuery = useUIStore((state) => state.setSearchQuery);
   const statusFilter = useUIStore((state) => state.statusFilter);
@@ -108,6 +114,7 @@ export const ActionBar: React.FC<ActionBarProps> = ({ hideFilters }) => {
           });
         }
       }
+      clearSelection();
     } finally {
       setDisabled(false);
     }
@@ -119,14 +126,24 @@ export const ActionBar: React.FC<ActionBarProps> = ({ hideFilters }) => {
     runBulkAction((id) => API.start(id), STATE_LIVE, "starting");
   const restartSelected = () =>
     runBulkAction((id) => API.restart(id), "", "restarting");
+  // Fix errors: torrents with damaged files get "Repair damaged files" (which also
+  // resumes them); other torrents in error state get the normal soft re-check.
   const fixErrorsSelected = async () => {
     setDisabled(true);
     try {
       for (const id of selectedTorrentIds) {
         const torrent = getTorrentById(id);
-        if (torrent?.stats?.state !== STATE_ERROR) continue;
+        const damaged = hasDamagedFiles(torrent?.stats?.damage);
+        if (damaged && isRepairRunning(torrent?.stats?.damage)) continue;
+        const held = hasRecoveryIssues(torrent?.stats?.damage);
+        if (!damaged && !held && torrent?.stats?.state !== STATE_ERROR)
+          continue;
         try {
-          await API.fixErrors(id);
+          if (damaged && API.repairFiles) {
+            await API.repairFiles(id);
+          } else {
+            await API.fixErrors(id);
+          }
           refreshTorrents();
         } catch (e) {
           setCloseableError({
@@ -135,6 +152,7 @@ export const ActionBar: React.FC<ActionBarProps> = ({ hideFilters }) => {
           });
         }
       }
+      clearSelection();
     } finally {
       setDisabled(false);
     }

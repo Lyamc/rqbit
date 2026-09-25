@@ -14,13 +14,9 @@ pub async fn h_update_session_ratelimits(
     state
         .api
         .session()
-        .ratelimits
-        .set_upload_bps(limits.upload_bps);
-    state
-        .api
-        .session()
-        .ratelimits
-        .set_download_bps(limits.download_bps);
+        .set_ratelimits_persistent(limits)
+        .await
+        .map_err(|e| crate::ApiError::from((http::StatusCode::BAD_REQUEST, e)))?;
     Ok(Json(EmptyJsonResponse {}))
 }
 
