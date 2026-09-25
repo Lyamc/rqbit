@@ -8,6 +8,7 @@ import { formatBytes } from "../../helper/formatBytes";
 import { getCompletionETA } from "../../helper/getCompletionETA";
 import { PlaylistLink } from "../buttons/PlaylistButton";
 import { PiecesCanvas } from "./PiecesCanvas";
+import { DamagedFilesNotice } from "../DamagedFilesNotice";
 
 interface OverviewTabProps {
   torrent: TorrentListItem | null;
@@ -173,6 +174,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ torrent }) => {
 
       {/* Error */}
       {error && <div className="text-error">{error}</div>}
+      <DamagedFilesNotice torrent={torrent} />
     </div>
   );
 };

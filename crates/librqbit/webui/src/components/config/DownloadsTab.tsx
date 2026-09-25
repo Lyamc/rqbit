@@ -25,6 +25,15 @@ export const DownloadsTab: React.FC<DownloadsTabProps> = ({
             onChange({ soft_recover_on_io_error: e.target.checked })
           }
         />
+        <FormCheckbox
+          checked={!!preferences.auto_repair_damaged_files}
+          name="auto_repair_damaged_files"
+          label="Auto-repair damaged files"
+          help="Needs soft-recover. When a file keeps failing with I/O errors (e.g. unreadable extents on the filesystem), automatically punch out the unreadable ranges (or copy-and-replace the file) and redownload only the affected pieces. At most once per 30 min per torrent. Off by default."
+          onChange={(e) =>
+            onChange({ auto_repair_damaged_files: e.target.checked })
+          }
+        />
       </Fieldset>
 
       <Fieldset label="Incomplete files">

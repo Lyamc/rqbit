@@ -37,6 +37,12 @@ pub struct SessionPreferences {
     #[serde(default)]
     pub soft_recover_on_io_error: bool,
 
+    /// When soft recovery is on and a file is marked damaged (reads/writes return EIO, or
+    /// the same piece keeps failing), automatically run "Repair damaged files" on it.
+    /// **Off by default.**
+    #[serde(default)]
+    pub auto_repair_damaged_files: bool,
+
     /// Legacy: shell command when a torrent finishes. Migrated into `completion_actions`
     /// when the actions list is empty (see [`SessionPreferences::effective_actions`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -86,6 +92,7 @@ impl Default for SessionPreferences {
     fn default() -> Self {
         Self {
             soft_recover_on_io_error: false,
+            auto_repair_damaged_files: false,
             on_complete_hook: None,
             move_completed_path: None,
             move_completed_copy: false,
@@ -211,6 +218,10 @@ impl SessionPreferencesStore {
 
     pub fn soft_recover_on_io_error(&self) -> bool {
         self.soft_recover_on_io_error.load(Ordering::Relaxed)
+    }
+
+    pub fn auto_repair_damaged_files(&self) -> bool {
+        self.prefs.read().auto_repair_damaged_files
     }
 
     pub fn on_complete_hook(&self) -> Option<String> {

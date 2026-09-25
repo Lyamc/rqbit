@@ -382,7 +382,7 @@ impl<I: Iterator<Item = S>, S: AsRef<str>> JoinStr for I {
 }
 
 /// UTC RFC 3339 timestamp without extra dependencies.
-fn rfc3339_now() -> String {
+pub(crate) fn rfc3339_now() -> String {
     let d = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();

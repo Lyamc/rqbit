@@ -27,6 +27,7 @@ export interface ConfigModalProps {
 
 const defaultPreferences = (): SessionPreferences => ({
   soft_recover_on_io_error: false,
+  auto_repair_damaged_files: false,
   on_complete_hook: "",
   move_completed_path: "",
   move_completed_copy: false,

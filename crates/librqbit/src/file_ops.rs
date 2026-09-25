@@ -19,6 +19,30 @@ use crate::{
     type_aliases::{BF, FileInfos, PeerHandle},
 };
 
+/// Error context naming the torrent file an I/O error happened on. Downcast an
+/// `anyhow::Error` to this to find which file failed.
+#[derive(Debug)]
+pub(crate) struct FileIoError {
+    pub file_id: usize,
+    pub write: bool,
+    pub len: usize,
+    pub path: std::path::PathBuf,
+}
+
+impl std::fmt::Display for FileIoError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.write {
+            write!(f, "error writing to file {} ({:?})", self.file_id, self.path)
+        } else {
+            write!(
+                f,
+                "error reading {} bytes, file_id: {} ({:?})",
+                self.len, self.file_id, self.path
+            )
+        }
+    }
+}
+
 pub fn update_hash_from_file<Sha1: ISha1>(
     file_id: usize,
     file_info: &FileInfo,
@@ -218,11 +242,11 @@ impl<'a> FileOps<'a> {
                 &mut buf,
                 to_read_in_file,
             )
-            .with_context(|| {
-                format!(
-                    "error reading {to_read_in_file} bytes, file_id: {file_idx} (\"{:?}\")",
-                    fi.relative_filename
-                )
+            .with_context(|| FileIoError {
+                file_id: file_idx,
+                write: false,
+                len: to_read_in_file,
+                path: fi.relative_filename.clone(),
             })?;
 
             piece_remaining_bytes -= to_read_in_file;
@@ -342,11 +366,11 @@ impl<'a> FileOps<'a> {
                 let written = self
                     .files
                     .pwrite_all_vectored(file_idx, absolute_offset, slices)
-                    .with_context(|| {
-                        format!(
-                            "error writing to file {file_idx} (\"{:?}\")",
-                            file_info.relative_filename
-                        )
+                    .with_context(|| FileIoError {
+                        file_id: file_idx,
+                        write: true,
+                        len: to_write,
+                        path: file_info.relative_filename.clone(),
                     })?;
                 debug_assert_eq!(written, to_write);
             }

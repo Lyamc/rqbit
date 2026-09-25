@@ -269,6 +269,28 @@ impl ChunkTracker {
         }
     }
 
+    /// Forget pieces (e.g. their data was zeroed by a repair): clear have/chunk status and
+    /// queue them again if selected. Returns how many of them were previously "have".
+    pub fn mark_pieces_missing(&mut self, pieces: &[ValidPieceIndex], file_infos: &FileInfos) -> usize {
+        let mut invalidated = 0;
+        for idx in pieces {
+            let id = idx.get() as usize;
+            if self.have.as_slice()[id] {
+                self.have.as_slice_mut().set(id, false);
+                invalidated += 1;
+            }
+            if let Some(s) = self.chunk_status.get_mut(self.lengths.chunk_range(*idx)) {
+                s.fill(false);
+            }
+            if self.selected[id] {
+                self.queue_pieces.set(id, true);
+            }
+        }
+        self.recalculate_per_file_bytes(file_infos);
+        self.hns = self.calc_hns();
+        invalidated
+    }
+
     pub fn mark_piece_downloaded(&mut self, idx: ValidPieceIndex) {
         let id = idx.get() as usize;
         if !self.have.as_slice()[id] {

@@ -203,6 +203,9 @@ pub struct ManagedTorrentShared {
     pub(crate) magnet_name: Option<String>,
 
     pub(crate) client_name_and_version: String,
+
+    /// Files that hit unrecoverable I/O errors, and the state of any repair.
+    pub(crate) damage: crate::repair::DamageTracker,
 }
 
 impl ManagedTorrentShared {
@@ -616,6 +619,7 @@ impl ManagedTorrent {
             uploaded_bytes: 0,
             finished: false,
             live: None,
+            damage: None,
         };
 
         {
@@ -659,6 +663,20 @@ impl ManagedTorrent {
                 }
             }
         }
+
+        let metadata = self.metadata.load();
+        resp.damage = self.shared.damage.snapshot(|file_id| {
+            self.shared
+                .file_rename(file_id)
+                .or_else(|| {
+                    metadata
+                        .as_ref()
+                        .and_then(|m| m.file_infos.get(file_id))
+                        .map(|fi| fi.relative_filename.clone())
+                })
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| format!("file {file_id}"))
+        });
 
         resp
     }

@@ -1,4 +1,5 @@
 import {
+  RepairStartResponse,
   AddJobCancelOutcome,
   AddJobStatus,
   AddTorrentResponse,
@@ -282,6 +283,13 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
 
   fixErrors: (index: number): Promise<void> => {
     return makeRequest("POST", `/torrents/${index}/fix_errors`);
+  },
+
+  repairFiles: (
+    index: number,
+    opts?: { files?: number[]; scope?: "damaged" | "all" },
+  ): Promise<RepairStartResponse> => {
+    return makeRequest("POST", `/torrents/${index}/repair_files`, opts ?? {});
   },
 
   forget: (index: number): Promise<void> => {

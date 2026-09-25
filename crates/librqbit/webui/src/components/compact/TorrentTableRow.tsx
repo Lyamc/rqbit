@@ -2,6 +2,7 @@ import { TorrentListItem, STATE_INITIALIZING } from "../../api-types";
 import { StatusIcon } from "../StatusIcon";
 import { formatBytes } from "../../helper/formatBytes";
 import { getCompletionETA } from "../../helper/getCompletionETA";
+import { damageShortText } from "../../helper/damage";
 import { memo } from "react";
 import {
   TORRENT_TABLE_CELL_PAD,
@@ -28,6 +29,7 @@ const TorrentTableRowUnmemoized: React.FC<TorrentTableRowProps> = ({
   const progressBytes = stats?.progress_bytes ?? 0;
   const finished = stats?.finished || false;
   const live = !!stats?.live;
+  const damageText = damageShortText(stats?.damage);
 
   const progressPercentage = error
     ? 100
@@ -101,6 +103,15 @@ const TorrentTableRowUnmemoized: React.FC<TorrentTableRowProps> = ({
         {error && (
           <div className="truncate text-sm text-error" title={error}>
             {error}
+          </div>
+        )}
+        {damageText && (
+          <div
+            className="truncate text-sm text-warning"
+            title={damageText}
+            data-testid="damage-text"
+          >
+            {damageText}
           </div>
         )}
       </div>

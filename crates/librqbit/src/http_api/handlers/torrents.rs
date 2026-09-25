@@ -274,6 +274,26 @@ pub async fn h_torrent_action_fix_errors(
         .map(axum::Json)
 }
 
+/// Body (optional): `{"files": [idx, ...]}` or `{"scope": "damaged" | "all"}`.
+/// Default: scan all files and repair whatever is unreadable.
+pub async fn h_torrent_action_repair_files(
+    State(state): State<ApiState>,
+    Path(idx): Path<TorrentIdOrHash>,
+    body: axum::body::Bytes,
+) -> Result<impl IntoResponse> {
+    let req: crate::repair::RepairRequest = if body.iter().all(|b| b.is_ascii_whitespace()) {
+        Default::default()
+    } else {
+        serde_json::from_slice(&body)
+            .context("invalid repair request body")
+            .with_status(StatusCode::BAD_REQUEST)?
+    };
+    state
+        .api
+        .api_torrent_action_repair_files(idx, req)
+        .map(axum::Json)
+}
+
 pub async fn h_torrent_action_forget(
     State(state): State<ApiState>,
     Path(idx): Path<TorrentIdOrHash>,

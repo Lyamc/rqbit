@@ -362,6 +362,19 @@ impl Api {
         Ok(Default::default())
     }
 
+    /// Start repairing damaged files (unreadable ranges) of a torrent in the background.
+    /// Progress/result appear in the torrent stats under `damage.repair`.
+    pub fn api_torrent_action_repair_files(
+        &self,
+        idx: TorrentIdOrHash,
+        req: crate::repair::RepairRequest,
+    ) -> Result<crate::repair::RepairStartResponse> {
+        let handle = self.mgr_handle(idx)?;
+        self.session
+            .start_repair_files(&handle, req)
+            .with_status(StatusCode::BAD_REQUEST)
+    }
+
     pub async fn api_torrent_action_rename_file(
         &self,
         idx: TorrentIdOrHash,

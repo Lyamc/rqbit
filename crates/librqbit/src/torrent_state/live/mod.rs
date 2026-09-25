@@ -672,6 +672,50 @@ impl TorrentStateLive {
     pub fn peer_id(&self) -> Id20 {
         self.shared.peer_id
     }
+    /// Record a disk I/O failure: marks the file "damaged" on EIO (or when the same piece
+    /// keeps failing) and, if enabled, starts an automatic repair.
+    pub(crate) fn note_io_failure(&self, e: &anyhow::Error, piece: ValidPieceIndex) {
+        let file_id = e
+            .downcast_ref::<crate::file_ops::FileIoError>()
+            .map(|c| c.file_id);
+        let eio = crate::repair::anyhow_is_eio(e);
+        let newly = self
+            .shared
+            .damage
+            .record_failure(file_id, piece.get(), eio, &format!("{e:#}"));
+        if !newly {
+            return;
+        }
+        warn!(
+            id = self.shared.id,
+            info_hash = ?self.shared.info_hash,
+            file_id,
+            eio,
+            piece = piece.get(),
+            "file marked as damaged (unreadable/unwritable data); use \"Repair damaged files\""
+        );
+        let Some(session) = self.shared.session.upgrade() else {
+            return;
+        };
+        if !(session.preferences.soft_recover_on_io_error()
+            && session.preferences.auto_repair_damaged_files())
+        {
+            return;
+        }
+        let id = self.shared.id;
+        // Pausing the torrent from inside its own I/O path would deadlock; do it from a task.
+        librqbit_core::spawn_utils::spawn(
+            debug_span!("auto_repair"),
+            "auto_repair",
+            async move {
+                if let Some(h) = session.get(crate::api::TorrentIdOrHash::Id(id)) {
+                    session.maybe_auto_repair(&h);
+                }
+                Ok::<_, anyhow::Error>(())
+            },
+        );
+    }
+
     pub(crate) fn file_ops(&self) -> FileOps<'_> {
         FileOps::new(&self.metadata.info, &*self.files, &self.metadata.file_infos)
     }
@@ -1879,6 +1923,7 @@ impl PeerHandler {
                 match state.file_ops().write_chunk(addr, piece, chunk_info) {
                     Ok(()) => {}
                     Err(e) => {
+                        state.note_io_failure(&e, chunk_info.piece_index);
                         let soft = state
                             .shared
                             .session
@@ -1951,11 +1996,12 @@ impl PeerHandler {
                 None => return Ok(()),
             };
 
-            match state
+            let check_result = state
                 .file_ops()
                 .check_piece(chunk_info.piece_index)
-                .with_context(|| format!("error checking piece={index}"))?
-            {
+                .inspect_err(|e| state.note_io_failure(e, chunk_info.piece_index))
+                .with_context(|| format!("error checking piece={index}"))?;
+            match check_result {
                 true => {
                     {
                         let mut g = state.lock_write("mark_piece_downloaded");

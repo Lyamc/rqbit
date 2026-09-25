@@ -234,6 +234,8 @@ export interface AutoOrganizeFolders {
 
 export interface SessionPreferences {
   soft_recover_on_io_error: boolean;
+  /** Auto-run "Repair damaged files" when soft recovery marks a file damaged. */
+  auto_repair_damaged_files?: boolean;
   on_complete_hook?: string | null;
   move_completed_path?: string | null;
   move_completed_copy?: boolean;
@@ -283,6 +285,69 @@ export const STATE_PAUSED = "paused";
 export const STATE_LIVE = "live";
 export const STATE_ERROR = "error";
 
+export interface DamagedFileStats {
+  file_id: number;
+  path: string;
+  errors: number;
+  /** At least one failure was an OS-level I/O error (EIO). */
+  eio: boolean;
+  last_error: string;
+  first_seen: string;
+  last_seen: string;
+  pieces_failed: number;
+}
+
+export type RepairMethod = "none" | "punch_hole" | "copy_replace" | "failed";
+
+export interface FileRepairOutcome {
+  file_id: number;
+  path: string;
+  bytes_total: number;
+  bytes_unreadable: number;
+  bytes_zeroed: number;
+  ranges_zeroed: [number, number][];
+  pieces: number[];
+  method: RepairMethod;
+  note?: string;
+  error?: string;
+}
+
+export interface RepairSummary {
+  files_scanned: number;
+  files_repaired: number;
+  files_failed: number;
+  bytes_unreadable: number;
+  bytes_zeroed: number;
+  pieces_to_redownload: number;
+  pieces_invalidated: number;
+  files: FileRepairOutcome[];
+}
+
+export interface RepairStatus {
+  state: "running" | "done" | "failed";
+  auto: boolean;
+  started_at: string;
+  finished_at?: string;
+  scanned_bytes: number;
+  total_bytes: number;
+  files_total: number;
+  files_done: number;
+  current_file?: string;
+  summary?: RepairSummary;
+  error?: string;
+}
+
+export interface DamageStats {
+  damaged_files: DamagedFileStats[];
+  repair?: RepairStatus;
+}
+
+export interface RepairStartResponse {
+  started: boolean;
+  files: number;
+  total_bytes: number;
+}
+
 export interface TorrentStats {
   state: "initializing" | "paused" | "live" | "error";
   error: string | null;
@@ -292,6 +357,8 @@ export interface TorrentStats {
   initializing_paused?: boolean;
   total_bytes: number;
   live: LiveTorrentStats | null;
+  /** Present when files are damaged (unreadable) or a repair ran. */
+  damage?: DamageStats;
 }
 
 /** Client-side request options (not sent to the server). */
@@ -506,6 +573,11 @@ export interface RqbitAPI {
   start: (index: number) => Promise<void>;
   restart: (index: number) => Promise<void>;
   fixErrors: (index: number) => Promise<void>;
+  /** Scan the torrent's files for unreadable ranges and repair them (background job). */
+  repairFiles?: (
+    index: number,
+    opts?: { files?: number[]; scope?: "damaged" | "all" },
+  ) => Promise<RepairStartResponse>;
   forget: (index: number) => Promise<void>;
   delete: (index: number) => Promise<void>;
   stats: () => Promise<SessionStats>;

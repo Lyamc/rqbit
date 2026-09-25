@@ -673,6 +673,12 @@ export const MockAPI: RqbitAPI & { getVersion: () => Promise<string> } = {
     torrentStates.set(index, "live");
   },
 
+  repairFiles: async (index: number) => {
+    await new Promise((r) => setTimeout(r, 50));
+    torrentStates.set(index, "live");
+    return { started: true, files: 1, total_bytes: 0 };
+  },
+
   forget: async (index: number): Promise<void> => {
     await new Promise((r) => setTimeout(r, 50));
     deletedTorrents.add(index);
@@ -716,6 +722,7 @@ export const MockAPI: RqbitAPI & { getVersion: () => Promise<string> } = {
   getPreferences: async (): Promise<SessionPreferences> => {
     return {
       soft_recover_on_io_error: false,
+      auto_repair_damaged_files: false,
       auto_organize_enabled: false,
       auto_organize_root: null,
       incomplete_extension: null,
@@ -768,6 +775,7 @@ export const MockAPI: RqbitAPI & { getVersion: () => Promise<string> } = {
   }),
   reloadPreferences: async () => ({
     soft_recover_on_io_error: false,
+      auto_repair_damaged_files: false,
     auto_organize_enabled: false,
     auto_organize_root: null,
     incomplete_extension: null,

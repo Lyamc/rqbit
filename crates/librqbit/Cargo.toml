@@ -110,6 +110,7 @@ zip = { version = "2.2", default-features = false, features = ["deflate"], optio
 librqbit-dualstack-sockets = { workspace = true, features = ["axum"] }
 socket2.workspace = true
 nix = { workspace = true, features = ["uio"] }
+libc.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(windows)'.dependencies]

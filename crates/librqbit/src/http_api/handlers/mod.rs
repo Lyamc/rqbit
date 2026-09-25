@@ -158,6 +158,10 @@ pub fn make_api_router(state: ApiState) -> Router {
                 post(torrents::h_torrent_action_fix_errors),
             )
             .route(
+                "/torrents/{id}/repair_files",
+                post(torrents::h_torrent_action_repair_files),
+            )
+            .route(
                 "/torrents/{id}/forget",
                 post(torrents::h_torrent_action_forget),
             )

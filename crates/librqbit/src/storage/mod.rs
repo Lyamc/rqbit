@@ -197,6 +197,19 @@ pub trait TorrentStorage: Send + Sync {
         anyhow::bail!("relocate_output not supported by this storage")
     }
 
+    /// Close the handle to `file_id`, run `f` (which may replace the file on disk at the
+    /// same path), then reopen it. The file is reopened even if `f` fails.
+    /// Default: not supported.
+    fn replace_file(
+        &self,
+        _shared: &ManagedTorrentShared,
+        _metadata: &TorrentMetadata,
+        _file_id: usize,
+        _f: &mut dyn FnMut() -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("replace_file not supported by this storage")
+    }
+
     /// Callback called every time a piece has completed and has been validated.
     /// Default implementation does nothing, but can be override in trait implementations.
     fn on_piece_completed(&self, _piece_index: ValidPieceIndex) -> anyhow::Result<()> {
@@ -256,6 +269,16 @@ impl<U: TorrentStorage + ?Sized> TorrentStorage for Box<U> {
         copy: bool,
     ) -> anyhow::Result<()> {
         (**self).relocate_output(shared, metadata, new_output_folder, copy)
+    }
+
+    fn replace_file(
+        &self,
+        shared: &ManagedTorrentShared,
+        metadata: &TorrentMetadata,
+        file_id: usize,
+        f: &mut dyn FnMut() -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        (**self).replace_file(shared, metadata, file_id, f)
     }
 
     fn on_piece_completed(&self, piece_id: ValidPieceIndex) -> anyhow::Result<()> {

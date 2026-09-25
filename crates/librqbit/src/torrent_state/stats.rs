@@ -82,6 +82,9 @@ pub struct TorrentStats {
     pub total_bytes: u64,
     pub finished: bool,
     pub live: Option<LiveStats>,
+    /// Damaged files (unrecoverable I/O errors) and repair status. Omitted when none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub damage: Option<crate::repair::DamageStats>,
 }
 
 impl std::fmt::Display for TorrentStats {
@@ -155,6 +158,7 @@ mod tests {
             total_bytes: 100,
             finished: false,
             live: None,
+            damage: None,
         }
     }
 

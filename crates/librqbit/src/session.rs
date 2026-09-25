@@ -1636,6 +1636,7 @@ impl Session {
                 current_output_folder: RwLock::new(output_folder.clone()),
                 file_renames: RwLock::new(file_renames),
                 torznab_category: opts.torznab_category,
+                damage: Default::default(),
             });
 
             let initializing = Arc::new(TorrentStateInitializing::new(
