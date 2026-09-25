@@ -267,14 +267,6 @@ export const FilesystemBrowser: React.FC<FilesystemBrowserProps> = ({
                   >
                     {e.name}
                   </span>
-                  {e.partial_of && (
-                    <span
-                      className="text-xs text-amber-600 dark:text-amber-400 whitespace-nowrap"
-                      title={`qBittorrent incomplete file for ${e.partial_of}`}
-                    >
-                      partial (qBittorrent)
-                    </span>
-                  )}
                   {!e.is_dir && e.size !== undefined && (
                     <span className="text-xs text-secondary whitespace-nowrap tabular-nums">
                       {formatBytes(e.size)}

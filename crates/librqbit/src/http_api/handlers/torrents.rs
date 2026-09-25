@@ -18,7 +18,7 @@ use super::ApiState;
 use crate::{
     AddTorrent, ApiError, CreateTorrentOptions, SUPPORTED_SCHEMES,
     api::{ApiTorrentListOpts, Result, TorrentIdOrHash},
-    api_error::WithStatusError,
+    api_error::{WithStatus, WithStatusError},
     http_api::timeout::Timeout,
     http_api_types::TorrentAddQueryParams,
     torrent_state::peer::stats::snapshot::{PeerStatsFilter, PeerStatsFilterState},
@@ -89,6 +89,32 @@ pub async fn h_torrents_post(
         .await
         .context("timeout")?
         .map(axum::Json)
+}
+
+pub async fn h_add_job_status(
+    State(state): State<ApiState>,
+    Path(job_id): Path<String>,
+) -> Result<impl IntoResponse> {
+    state
+        .api
+        .session()
+        .add_jobs
+        .get(&job_id)
+        .map(axum::Json)
+        .ok_or_else(|| ApiError::from((StatusCode::NOT_FOUND, "no such add job")))
+}
+
+pub async fn h_add_job_cancel(
+    State(state): State<ApiState>,
+    Path(job_id): Path<String>,
+) -> Result<impl IntoResponse> {
+    let outcome = state
+        .api
+        .session()
+        .add_jobs
+        .cancel(&job_id)
+        .with_status(StatusCode::BAD_REQUEST)?;
+    Ok(axum::Json(outcome))
 }
 
 pub async fn h_torrent_details(

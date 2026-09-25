@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Button } from "../buttons/Button";
+import { AddJobStage } from "../../api-types";
 
 export type StagingStatus =
   "pending" | "ready" | "error" | "running" | "resolving" | "ok" | "cancelled";
@@ -38,6 +39,41 @@ export type StagingItem = {
   };
   /** Epoch ms when the add request for this item was sent. */
   startedAt?: number;
+  /** Server-reported stage of the in-flight add (GET /add_jobs/{id}). */
+  serverStage?: AddJobStage;
+  /** Epoch ms when the server entered `serverStage`. */
+  stageSince?: number;
+  /** Set when the torrent ended up in rqbit (e.g. a cancel came too late). */
+  addedTorrentId?: number;
+  /** Informational note (not an error). */
+  note?: string;
+  /** User asked to cancel; waiting for the server's answer. */
+  cancelling?: boolean;
+};
+
+/** In-flight label from what the server reports it is doing. */
+const stageLabel = (st: AddJobStage | undefined): string => {
+  switch (st) {
+    case "fetching_torrent":
+      return "downloading .torrent…";
+    case "resolving_metadata":
+      return "resolving metadata…";
+    case "adopting":
+      return "checking existing files…";
+    case "waiting_for_server":
+      return "waiting for server (busy checking other torrents)…";
+    case "adding":
+      return "adding…";
+    default:
+      return "sending to server…";
+  }
+};
+
+const itemLabel = (item: StagingItem) => {
+  if (item.status === "running" || item.status === "resolving") {
+    return item.cancelling ? "cancelling…" : stageLabel(item.serverStage);
+  }
+  return statusLabel(item.status);
 };
 
 const statusLabel = (s: StagingStatus) => {
@@ -101,7 +137,20 @@ export const StagingQueue: React.FC<{
   onClear: () => void;
   onDismissErrors?: () => void;
   onRetry?: (id: string) => void;
-}> = ({ items, running, onRemove, onClear, onDismissErrors, onRetry }) => {
+  /** Cancel one in-flight add. */
+  onCancel?: (id: string) => void;
+  /** Remove a torrent that got added (e.g. cancel came too late). */
+  onRemoveFromRqbit?: (id: string) => void;
+}> = ({
+  items,
+  running,
+  onRemove,
+  onClear,
+  onDismissErrors,
+  onRetry,
+  onCancel,
+  onRemoveFromRqbit,
+}) => {
   const errorCount = items.filter((i) => i.status === "error").length;
   const readyCount = items.filter(
     (i) => i.status === "ready" || i.status === "pending",
@@ -153,12 +202,12 @@ export const StagingQueue: React.FC<{
               <div className="text-xs text-secondary flex flex-wrap gap-x-2">
                 <span>{item.source}</span>
                 <span className={statusClass(item.status)}>
-                  {statusLabel(item.status)}
+                  {itemLabel(item)}
                   {(item.status === "running" || item.status === "resolving") &&
-                    item.startedAt && (
+                    (item.stageSince ?? item.startedAt) && (
                       <>
                         {" "}
-                        <Elapsed since={item.startedAt} />
+                        <Elapsed since={item.stageSince ?? item.startedAt!} />
                       </>
                     )}
                 </span>
@@ -194,10 +243,26 @@ export const StagingQueue: React.FC<{
                     {item.matchReason ? ` · ${item.matchReason}` : ""}
                   </span>
                 )}
-                {item.status === "resolving" && (
-                  <span className="text-secondary">
-                    waiting for peers to send torrent info
+                {(item.status === "running" || item.status === "resolving") &&
+                  !item.cancelling &&
+                  item.serverStage === "resolving_metadata" && (
+                    <span className="text-secondary">
+                      waiting for peers to send torrent info
+                    </span>
+                  )}
+                {item.note && (
+                  <span className="text-amber-600 dark:text-amber-400 break-words">
+                    {item.note}
                   </span>
+                )}
+                {item.addedTorrentId !== undefined && onRemoveFromRqbit && (
+                  <button
+                    type="button"
+                    className="text-primary hover:underline cursor-pointer"
+                    onClick={() => onRemoveFromRqbit(item.id)}
+                  >
+                    remove from rqbit (keep files)
+                  </button>
                 )}
                 {item.error && (
                   <span className="text-red-600 dark:text-red-400 break-words">
@@ -217,18 +282,27 @@ export const StagingQueue: React.FC<{
                   )}
               </div>
             </div>
-            <button
-              type="button"
-              className="flex-shrink-0 text-secondary hover:text-text px-1 disabled:opacity-40"
-              disabled={
-                running &&
-                (item.status === "running" || item.status === "resolving")
-              }
-              aria-label="Remove"
-              onClick={() => onRemove(item.id)}
-            >
-              ×
-            </button>
+            {item.status === "running" || item.status === "resolving" ? (
+              <button
+                type="button"
+                className="flex-shrink-0 text-secondary hover:text-text px-1 disabled:opacity-40"
+                disabled={!onCancel || item.cancelling}
+                aria-label="Cancel"
+                title="Cancel this add"
+                onClick={() => onCancel?.(item.id)}
+              >
+                ×
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="flex-shrink-0 text-secondary hover:text-text px-1 disabled:opacity-40"
+                aria-label="Remove"
+                onClick={() => onRemove(item.id)}
+              >
+                ×
+              </button>
+            )}
           </li>
         ))}
       </ul>

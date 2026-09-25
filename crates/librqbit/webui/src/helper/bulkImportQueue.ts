@@ -33,6 +33,8 @@ export async function runBulkQueue<T>(opts: {
   worker: (data: T, item: BulkWorkItem<T>) => Promise<void>;
   onProgress?: (progress: BulkImportProgress) => void;
   signal?: { cancelled: boolean };
+  /** Treat this worker error as a cancel rather than a failure. */
+  isCancel?: (e: unknown) => boolean;
 }): Promise<BulkImportProgress> {
   const { items, worker, onProgress, signal } = opts;
   const concurrency = Math.max(1, Math.min(8, (opts.concurrency | 0) || 4));
@@ -88,6 +90,11 @@ export async function runBulkQueue<T>(opts: {
       st.status = "ok";
       ok++;
     } catch (e: unknown) {
+      if (opts.isCancel?.(e)) {
+        st.status = "cancelled";
+        cancelled++;
+        return;
+      }
       st.status = "error";
       const err = e as { text?: string; message?: string };
       st.error =

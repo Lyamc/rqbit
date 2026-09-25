@@ -48,22 +48,6 @@ pub struct FsEntry {
     pub is_torrent: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
-    /// For another client's in-progress file (qBittorrent `name.!qB`): the
-    /// final file name it will have once complete.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub partial_of: Option<String>,
-}
-
-/// qBittorrent's "append .!qB to incomplete files" suffix.
-const QBIT_PARTIAL_SUFFIX: &str = ".!qB";
-
-fn partial_of(name: &str, is_dir: bool) -> Option<String> {
-    if is_dir {
-        return None;
-    }
-    name.strip_suffix(QBIT_PARTIAL_SUFFIX)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
 }
 
 #[derive(Debug, Serialize)]
@@ -216,7 +200,6 @@ fn list_dir(path: &Path) -> Result<Vec<FsEntry>> {
         let is_dir = meta.is_dir();
         let is_torrent = !is_dir && name.to_lowercase().ends_with(".torrent");
         entries.push(FsEntry {
-            partial_of: partial_of(&name, is_dir),
             name,
             path: full.to_string_lossy().into_owned(),
             is_dir,
@@ -270,7 +253,6 @@ fn collect_torrents_recursive(
                 is_dir: false,
                 is_torrent: true,
                 size: Some(meta.len()),
-                partial_of: None,
             });
         }
     }

@@ -18,9 +18,12 @@ import {
   TransferCandidateChild,
   displayNameForSource,
   matchTransferFolders,
-  stripPartialSuffix,
 } from "../../helper/matchTransferFolders";
-import { AddTorrentResponse, FsEntry } from "../../api-types";
+import {
+  AddJobCancelOutcome,
+  AddTorrentResponse,
+  FsEntry,
+} from "../../api-types";
 import {
   BulkImportProgress,
   BulkWorkItem,
@@ -32,11 +35,12 @@ const DEFAULT_CONCURRENCY = 4;
 // POST /torrents for a magnet doesn't return until the torrent's metadata has
 // been fetched from peers (DHT/trackers). Ask the server to give up a bit
 // before our own client-side timeout so a dead magnet fails with a clear
-// server error (an aborted HTTP request does not stop the server-side add).
+// server error. Each add carries an add_job_id: the server reports what it is
+// doing (GET /add_jobs/{id}) and cancels it for real (POST .../cancel).
 const MAGNET_TIMEOUT_MS = 3 * 60_000;
 const MAGNET_SERVER_TIMEOUT_SECS = 170;
-// Other adds can legitimately wait a long time for a server init slot while
-// other torrents are being hash-checked.
+// Other adds can legitimately wait a long time for a disk slot while other
+// torrents are being hash-checked (reported as "waiting_for_server").
 const OTHER_TIMEOUT_MS = 15 * 60_000;
 
 const STOPPED = "Stopped";
@@ -86,9 +90,22 @@ const errText = (e: unknown) => {
 type ItemOpts = {
   overwrite: boolean;
   output_folder?: string;
-  adopt_foreign_incomplete?: "qbit";
+  adopt_foreign_incomplete?: "auto";
   magnet_timeout_secs?: number;
+  add_job_id?: string;
 };
+
+/** Book-keeping for one in-flight add request. */
+type InFlightAdd = {
+  jobId: string;
+  ctrl: AbortController;
+  /** null = not cancelled; "pending" = waiting for the server's answer. */
+  outcome: null | "pending" | "cancelled" | "already_added";
+  torrentId?: number;
+};
+
+const newJobId = () =>
+  `add-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
 const formatDuration = (ms: number) => {
   const m = Math.round(ms / 60_000);
@@ -170,8 +187,9 @@ export const AddModal: React.FC<Props> = ({
   const [uploadBusy, setUploadBusy] = useState(false);
   const [uploadMsg, setUploadMsg] = useState<string | null>(null);
   const cancelRef = useRef({ cancelled: false });
-  // In-flight add requests, so Stop / close can abort them.
-  const abortersRef = useRef(new Map<string, AbortController>());
+  // In-flight add requests (by staging item id), so Stop / close / × can
+  // cancel them on the server.
+  const inFlightRef = useRef(new Map<string, InFlightAdd>());
   const [advancedOpen, setAdvancedOpen] = useState(readAdvancedOpen);
   useEffect(() => {
     try {
@@ -218,7 +236,10 @@ export const AddModal: React.FC<Props> = ({
     concurrency !== DEFAULT_CONCURRENCY ? `${concurrency} at once` : null,
   ].filter((x): x is string => !!x);
   const resolvingCount = inFlight.filter(
-    (i) => i.status === "resolving",
+    (i) => i.serverStage === "resolving_metadata",
+  ).length;
+  const waitingCount = inFlight.filter(
+    (i) => i.serverStage === "waiting_for_server",
   ).length;
 
   const mergeIntoQueue = (incoming: StagingItem[]) => {
@@ -268,15 +289,67 @@ export const AddModal: React.FC<Props> = ({
     setUploadMsg(null);
   };
 
-  const abortAll = () => {
-    for (const c of abortersRef.current.values()) c.abort();
-    abortersRef.current.clear();
+  /** Cancel one in-flight add on the server. If the server says it was
+   *  already committed, the request is left to finish and the item says so. */
+  const cancelInFlight = async (itemId: string) => {
+    const job = inFlightRef.current.get(itemId);
+    if (!job || job.outcome) return;
+    job.outcome = "pending";
+    setItem(itemId, { cancelling: true });
+    let outcome: AddJobCancelOutcome | null = null;
+    if (API.cancelAddJob) {
+      try {
+        outcome = await API.cancelAddJob(job.jobId);
+      } catch {
+        // Server unreachable: aborting the request still cancels it there
+        // (a dropped request is cancelled if it wasn't committed yet).
+        outcome = null;
+      }
+    }
+    if (outcome?.result === "already_added") {
+      job.outcome = "already_added";
+      job.torrentId = outcome.torrent_id;
+      setItem(itemId, {
+        cancelling: false,
+        note: `Too late to cancel: the server had already added it (id ${outcome.torrent_id}).`,
+        addedTorrentId: outcome.torrent_id,
+      });
+      return;
+    }
+    if (outcome?.result === "finished") {
+      // Finished some other way (failed / listed); let the request settle.
+      job.outcome = null;
+      setItem(itemId, { cancelling: false });
+      return;
+    }
+    job.outcome = "cancelled";
+    job.ctrl.abort();
+  };
+
+  const cancelAll = () => {
+    for (const id of [...inFlightRef.current.keys()]) void cancelInFlight(id);
+  };
+
+  const removeFromRqbit = async (itemId: string) => {
+    const item = queueRef.current.find((i) => i.id === itemId);
+    if (item?.addedTorrentId === undefined) return;
+    try {
+      await API.forget(item.addedTorrentId);
+      setItem(itemId, {
+        status: "cancelled",
+        addedTorrentId: undefined,
+        note: "Removed from rqbit (files kept).",
+      });
+      refreshTorrents();
+    } catch (e) {
+      setItem(itemId, { note: `Remove failed: ${errText(e)}` });
+    }
   };
 
   const handleClose = () => {
     if (running) {
       cancelRef.current.cancelled = true;
-      abortAll();
+      cancelAll();
     }
     resetForm();
     onClose();
@@ -500,16 +573,15 @@ export const AddModal: React.FC<Props> = ({
       const discoveredTorrents: StagingItem[] = [];
       const errors: string[] = [];
       const toChild = (e: FsEntry): TransferCandidateChild => ({
-        name: stripPartialSuffix(e.name),
+        name: e.name,
         isDir: e.is_dir,
         size: e.size,
-        partial: !!e.partial_of,
       });
 
       // Breadth-first scan: the selected folders, their subfolders, and so on
       // (completed data is often sorted into category folders, e.g.
-      // Complete/Movies/<torrent>). Each listed folder is a candidate; files
-      // are candidates for single-file torrents.
+      // Complete/Movies/<torrent>). Each listed folder is a candidate (for
+      // single-file torrents: the folder holding the file).
       type ScanDir = { path: string; name: string; depth: number };
       let level: ScanDir[] = selectedPaths.map((p) => ({
         path: p,
@@ -556,24 +628,11 @@ export const AddModal: React.FC<Props> = ({
               }
               if (seen.has(e.path)) continue;
               seen.add(e.path);
-              if (e.is_dir) {
-                if (d.depth < MAX_TRANSFER_SCAN_DEPTH) {
-                  nextLevel.push({
-                    path: e.path,
-                    name: e.name,
-                    depth: d.depth + 1,
-                  });
-                }
-              } else {
-                // Single-file torrent data: the containing folder is the
-                // output folder.
-                candidates.push({
-                  entryPath: e.path,
-                  path: listing.path,
-                  name: stripPartialSuffix(e.name),
-                  kind: "file",
-                  size: e.size,
-                  partial: !!e.partial_of,
+              if (e.is_dir && d.depth < MAX_TRANSFER_SCAN_DEPTH) {
+                nextLevel.push({
+                  path: e.path,
+                  name: e.name,
+                  depth: d.depth + 1,
                 });
               }
             }
@@ -720,6 +779,7 @@ export const AddModal: React.FC<Props> = ({
         items: work,
         concurrency,
         signal: cancelRef.current,
+        isCancel: (e) => (e as Error)?.message === STOPPED,
         onProgress: (p) => {
           setProgress(p);
           setQueue((prev) => {
@@ -727,13 +787,8 @@ export const AddModal: React.FC<Props> = ({
             return prev.map((item) => {
               const st = byId.get(item.id);
               if (!st) return item;
-              // The worker refines "running" into "resolving" for magnets.
-              const status =
-                st.status === "running" && item.status === "resolving"
-                  ? "resolving"
-                  : (st.status as StagingItem["status"]);
-              // User-initiated Stop is a cancel, not a failure.
-              if (st.status === "error" && st.error === STOPPED) {
+              const status = st.status as StagingItem["status"];
+              if (st.status === "cancelled") {
                 return { ...item, status: "cancelled", error: undefined };
               }
               return { ...item, status, error: st.error };
@@ -744,12 +799,13 @@ export const AddModal: React.FC<Props> = ({
           const adopt = transferMode && item.matchStatus === "matched";
           const itemOpts: ItemOpts = adopt
             ? {
-                // Reuse the other client's files in place: the server renames
-                // qBittorrent `.!qB` partials and refuses files larger than
-                // the torrent expects, then hash-checks before writing.
+                // Reuse the other client's files in place: the server adopts
+                // unique `<name><suffix>` partials that pass a piece-hash
+                // sample, refuses files larger than the torrent expects, then
+                // hash-checks before writing.
                 overwrite: true,
                 output_folder: item.matchedPath,
-                adopt_foreign_incomplete: "qbit",
+                adopt_foreign_incomplete: "auto",
               }
             : {
                 overwrite,
@@ -757,34 +813,83 @@ export const AddModal: React.FC<Props> = ({
               };
           const magnet = isMagnetItem(item) && !item.file && !item.bytes;
           const timeoutMs = magnet ? MAGNET_TIMEOUT_MS : OTHER_TIMEOUT_MS;
-          const ctrl = new AbortController();
+          const job: InFlightAdd = {
+            jobId: newJobId(),
+            ctrl: new AbortController(),
+            outcome: null,
+          };
+          itemOpts.add_job_id = job.jobId;
+          inFlightRef.current.set(item.id, job);
           let timedOut = false;
           const timer = window.setTimeout(() => {
             timedOut = true;
-            ctrl.abort();
+            void cancelInFlight(item.id);
           }, timeoutMs);
-          abortersRef.current.set(item.id, ctrl);
           setItem(item.id, {
-            status: magnet ? "resolving" : "running",
+            status: "running",
             startedAt: Date.now(),
+            serverStage: undefined,
+            stageSince: undefined,
+            note: undefined,
+            addedTorrentId: undefined,
+            cancelling: false,
           });
+          // Poll what the server is actually doing with this add.
+          const poll = API.getAddJob
+            ? window.setInterval(async () => {
+                try {
+                  const st = await API.getAddJob!(job.jobId);
+                  if (inFlightRef.current.get(item.id) !== job) return;
+                  setItem(item.id, {
+                    serverStage: st.stage,
+                    stageSince: Date.now() - st.stage_secs * 1000,
+                  });
+                } catch {
+                  // 404 until the request reaches the server.
+                }
+              }, 1000)
+            : undefined;
           if (magnet) itemOpts.magnet_timeout_secs = MAGNET_SERVER_TIMEOUT_SECS;
-          const init = { signal: ctrl.signal };
+          const timeoutError = () =>
+            new Error(
+              magnet
+                ? `Timed out after ${formatDuration(timeoutMs)} waiting for torrent metadata — no peer sent it. The magnet may be dead or poorly seeded; retry later or use a .torrent file.`
+                : `Gave up after ${formatDuration(timeoutMs)} waiting for the server; the add was cancelled (nothing added).`,
+            );
           try {
-            await addOne(item, itemOpts, init);
-          } catch (e) {
-            if (timedOut) {
-              throw new Error(
-                magnet
-                  ? `Timed out after ${formatDuration(timeoutMs)} waiting for torrent metadata — no peer sent it. The magnet may be dead or poorly seeded; retry later or use a .torrent file.`
-                  : `No response after ${formatDuration(timeoutMs)} (the server may still be busy checking other torrents; it may still get added — refresh before retrying).`,
-              );
+            const res = await addOne(item, itemOpts, { signal: job.ctrl.signal });
+            if (job.outcome === "already_added") {
+              setItem(item.id, {
+                addedTorrentId: res?.id ?? job.torrentId,
+              });
             }
-            if (ctrl.signal.aborted) throw new Error(STOPPED);
+            if (adopt && API.getAddJob) {
+              try {
+                const a = (await API.getAddJob(job.jobId)).adopt;
+                const skipped = a
+                  ? a.ambiguous.length +
+                    a.rejected.length +
+                    a.skipped_target_exists.length
+                  : 0;
+                if (a && skipped > 0) {
+                  setItem(item.id, {
+                    note: `${a.renamed} partial file(s) adopted; ${skipped} left alone (ambiguous or not matching — see server log): ${[...a.ambiguous, ...a.rejected, ...a.skipped_target_exists].slice(0, 3).join("; ")}`,
+                  });
+                }
+              } catch {
+                // job pruned / older server: nothing to show
+              }
+            }
+          } catch (e) {
+            if (job.outcome === "cancelled" || job.ctrl.signal.aborted) {
+              throw timedOut ? timeoutError() : new Error(STOPPED);
+            }
             throw e;
           } finally {
             window.clearTimeout(timer);
-            abortersRef.current.delete(item.id);
+            if (poll !== undefined) window.clearInterval(poll);
+            inFlightRef.current.delete(item.id);
+            setItem(item.id, { cancelling: false });
           }
         },
       });
@@ -793,7 +898,6 @@ export const AddModal: React.FC<Props> = ({
         refreshTorrents();
       }
     } finally {
-      abortAll();
       setRunning(false);
     }
   };
@@ -802,9 +906,9 @@ export const AddModal: React.FC<Props> = ({
     item: StagingItem,
     itemOpts: ItemOpts,
     init: { signal: AbortSignal },
-  ) => {
+  ): Promise<AddTorrentResponse> => {
     if (item.kind === "server_path" && item.serverPath) {
-      await API.uploadTorrentFromServerPath(item.serverPath, itemOpts, init);
+      return await API.uploadTorrentFromServerPath(item.serverPath, itemOpts, init);
     } else if (item.kind === "torrent_bytes" && item.bytes) {
       const name = item.label.endsWith(".torrent")
         ? item.label
@@ -819,19 +923,18 @@ export const AddModal: React.FC<Props> = ({
         name,
         { type: "application/x-bittorrent" },
       );
-      await API.uploadTorrent(file, itemOpts, init);
+      return await API.uploadTorrent(file, itemOpts, init);
     } else if (item.file) {
-      await API.uploadTorrent(item.file, itemOpts, init);
+      return await API.uploadTorrent(item.file, itemOpts, init);
     } else if (item.text) {
-      await API.uploadTorrent(item.text, itemOpts, init);
-    } else {
-      throw new Error("nothing to upload");
+      return await API.uploadTorrent(item.text, itemOpts, init);
     }
+    throw new Error("nothing to upload");
   };
 
   const stopQueue = () => {
     cancelRef.current.cancelled = true;
-    abortAll();
+    cancelAll();
   };
 
   const pct =
@@ -1003,8 +1106,11 @@ export const AddModal: React.FC<Props> = ({
                   status: "ready",
                   error: undefined,
                   startedAt: undefined,
+                  note: undefined,
                 })
               }
+              onCancel={(id) => void cancelInFlight(id)}
+              onRemoveFromRqbit={(id) => void removeFromRqbit(id)}
             />
           </>
         )}
@@ -1120,8 +1226,11 @@ export const AddModal: React.FC<Props> = ({
                 resolvingCount > 0
                   ? `${resolvingCount} resolving metadata`
                   : null,
-                inFlight.length - resolvingCount > 0
-                  ? `${inFlight.length - resolvingCount} adding`
+                waitingCount > 0
+                  ? `${waitingCount} waiting for server (busy checking)`
+                  : null,
+                inFlight.length - resolvingCount - waitingCount > 0
+                  ? `${inFlight.length - resolvingCount - waitingCount} adding`
                   : null,
                 `${progress.ok} added`,
                 progress.failed > 0 ? `${progress.failed} failed` : null,

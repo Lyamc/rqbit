@@ -330,8 +330,11 @@ export interface AddTorrentOptions {
   initial_peers?: string[] | null; // Assuming SocketAddr is equivalent to a string in TypeScript
   preferred_id?: number | null;
   /** Transfer from another client: adopt its files in output_folder before
-   *  the initial check ("qbit" renames `name.!qB` partials). */
-  adopt_foreign_incomplete?: "qbit" | null;
+   *  the initial check ("auto": a unique `<name><suffix>` partial that passes
+   *  a piece-hash sample is renamed; "qbit" is an alias). */
+  adopt_foreign_incomplete?: "auto" | "qbit" | null;
+  /** Poll `GET /add_jobs/{id}` / cancel via `POST /add_jobs/{id}/cancel`. */
+  add_job_id?: string;
   /** Server gives up resolving magnet metadata after this many seconds. */
   magnet_timeout_secs?: number | null;
 }
@@ -393,8 +396,6 @@ export interface FsEntry {
   is_dir: boolean;
   is_torrent: boolean;
   size?: number;
-  /** Another client's in-progress file (qBittorrent `name.!qB`): final name. */
-  partial_of?: string;
 }
 
 export interface FsListResponse {
@@ -415,6 +416,44 @@ export interface ExtractItem {
 export interface ExtractResponse {
   items: ExtractItem[];
 }
+
+/** What the server is doing for an in-flight add (`GET /add_jobs/{id}`). */
+export type AddJobStage =
+  | "starting"
+  | "fetching_torrent"
+  | "resolving_metadata"
+  | "adopting"
+  | "waiting_for_server"
+  | "adding"
+  | "added"
+  | "already_managed"
+  | "list_only"
+  | "failed"
+  | "cancelled";
+
+export interface AddJobAdoptSummary {
+  reused: number;
+  renamed: number;
+  ambiguous: string[];
+  rejected: string[];
+  skipped_target_exists: string[];
+}
+
+export interface AddJobStatus {
+  job_id?: string | null;
+  stage: AddJobStage;
+  torrent_id?: number;
+  error?: string;
+  reason?: string;
+  stage_secs: number;
+  elapsed_secs: number;
+  adopt?: AddJobAdoptSummary;
+}
+
+export type AddJobCancelOutcome =
+  | { result: "cancelled" }
+  | { result: "already_added"; torrent_id: number }
+  | ({ result: "finished" } & Partial<AddJobStatus>);
 
 export interface RqbitAPI {
   getPlaylistUrl: (index: number) => string | null;
@@ -441,6 +480,10 @@ export interface RqbitAPI {
     opts?: AddTorrentOptions,
     init?: RequestOptions,
   ) => Promise<AddTorrentResponse>;
+  /** Status of an add started with `add_job_id` (404 until it arrives). */
+  getAddJob?: (jobId: string) => Promise<AddJobStatus>;
+  /** Cancel an add started with `add_job_id`. */
+  cancelAddJob?: (jobId: string) => Promise<AddJobCancelOutcome>;
   fsRoots: () => Promise<FsRootsResponse>;
   fsList: (
     path: string,

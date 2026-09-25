@@ -60,6 +60,8 @@ async fn h_api_root(parts: Parts) -> impl IntoResponse {
             "GET /torrents/{id_or_infohash}/stream/{file_idx}": "Stream a file. Accepts Range header to seek.",
             "GET /torrents/{id_or_infohash}/playlist": "Playlist for supported players",
             "POST /torrents": "Add a torrent here. magnet: or http:// or a local file.",
+            "GET /add_jobs/{job_id}": "Status of an add started with ?add_job_id= (stage: resolving_metadata, waiting_for_server, ...)",
+            "POST /add_jobs/{job_id}/cancel": "Cancel an add started with ?add_job_id= (no-op + already_added if it was committed)",
             "GET /fs/roots": "List allowed filesystem browse roots",
             "GET /fs/list": "List a directory under browse roots (?path=&recursive=&torrents_only=)",
             "POST /fs/extract": "Extract .torrent / magnets from a zip (or raw .torrent body)",
@@ -115,6 +117,7 @@ pub fn make_api_router(state: ApiState) -> Router {
             "/torrents/preferences",
             get(configure::h_get_session_preferences),
         )
+        .route("/add_jobs/{job_id}", get(torrents::h_add_job_status))
         .route("/admin", get(admin::h_admin_status))
         .route("/fs/roots", get(fs::h_fs_roots))
         .route("/fs/list", get(fs::h_fs_list));
@@ -122,6 +125,7 @@ pub fn make_api_router(state: ApiState) -> Router {
     if !state.opts.read_only {
         api_router = api_router
             .route("/torrents", post(torrents::h_torrents_post))
+            .route("/add_jobs/{job_id}/cancel", post(torrents::h_add_job_cancel))
             .route("/fs/extract", post(fs::h_fs_extract))
             .route(
                 "/torrents/limits",

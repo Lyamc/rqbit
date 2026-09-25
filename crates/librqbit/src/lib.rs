@@ -51,6 +51,8 @@ mod dht_utils;
 mod error;
 pub mod file_info;
 mod file_ops;
+mod adopt;
+pub mod add_job;
 #[cfg(feature = "http-api")]
 pub mod http_api;
 #[cfg(feature = "http-api-client")]

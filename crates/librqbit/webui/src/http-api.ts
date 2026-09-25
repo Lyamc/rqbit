@@ -1,4 +1,6 @@
 import {
+  AddJobCancelOutcome,
+  AddJobStatus,
   AddTorrentResponse,
   ErrorDetails,
   LimitsConfig,
@@ -165,6 +167,9 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
     if (opts?.magnet_timeout_secs) {
       url += `&magnet_timeout_secs=${opts.magnet_timeout_secs}`;
     }
+    if (opts?.add_job_id) {
+      url += `&add_job_id=${encodeURIComponent(opts.add_job_id)}`;
+    }
     if (typeof data === "string") {
       url += "&is_url=true";
     }
@@ -187,7 +192,21 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
     if (opts?.adopt_foreign_incomplete) {
       url += `&adopt_foreign_incomplete=${opts.adopt_foreign_incomplete}`;
     }
+    if (opts?.add_job_id) {
+      url += `&add_job_id=${encodeURIComponent(opts.add_job_id)}`;
+    }
     return makeRequest("POST", url, "", false, init);
+  },
+
+  getAddJob: (jobId: string): Promise<AddJobStatus> => {
+    return makeRequest("GET", `/add_jobs/${encodeURIComponent(jobId)}`);
+  },
+
+  cancelAddJob: (jobId: string): Promise<AddJobCancelOutcome> => {
+    return makeRequest(
+      "POST",
+      `/add_jobs/${encodeURIComponent(jobId)}/cancel`,
+    );
   },
 
   fsRoots: (): Promise<FsRootsResponse> => {

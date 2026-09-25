@@ -2,22 +2,68 @@
 
 export type TransferMatchStatus = "matched" | "unmatched" | "ambiguous";
 
-/** qBittorrent appends this to incomplete files when that option is on. */
-export const QBIT_PARTIAL_SUFFIX = ".!qB";
-
-/** `Movie.mkv.!qB` → `Movie.mkv`; other names unchanged. */
-export const stripPartialSuffix = (name: string): string =>
-  name.endsWith(QBIT_PARTIAL_SUFFIX) && name.length > QBIT_PARTIAL_SUFFIX.length
-    ? name.slice(0, -QBIT_PARTIAL_SUFFIX.length)
-    : name;
-
 export type TransferCandidateChild = {
-  /** Basename with any `.!qB` suffix removed. */
+  /** Basename as on disk. */
   name: string;
   isDir: boolean;
   size?: number;
-  partial?: boolean;
 };
+
+export type ExpectedFileFit =
+  /** Present under its final name with the expected size. */
+  | { kind: "exact"; name: string }
+  /** Missing, but a unique `<name><suffix>` sibling (another client's
+   *  in-progress file: `.!qB`, `.part`, ...) that isn't larger. */
+  | { kind: "partial"; name: string }
+  /** Present under its final name but larger: different data. */
+  | { kind: "too_big"; name: string }
+  /** Present under its final name but smaller: not trusted as evidence. */
+  | { kind: "smaller"; name: string }
+  /** Several suffixed candidates: the server won't pick one. */
+  | { kind: "ambiguous"; names: string[] }
+  | { kind: "none" };
+
+/**
+ * Find a torrent file among a folder's entries, the same way the server's
+ * adoption does (generic, no client-specific suffixes):
+ * the exact name wins; otherwise exactly one sibling named
+ * `<expected><non-empty suffix>` that is not itself an expected name (e.g.
+ * split archives `a.zip.0.part` when the torrent has them), does not belong
+ * to a longer expected name, and is not larger than expected.
+ * `expectedNames`: all names the torrent expects in this folder.
+ */
+export function findExpectedFile(
+  expected: string,
+  length: number,
+  entries: TransferCandidateChild[],
+  expectedNames: Set<string>,
+): ExpectedFileFit {
+  const exact = entries.find((e) => e.name === expected);
+  if (exact) {
+    if (exact.isDir) return { kind: "none" };
+    if (exact.size === undefined || exact.size === length)
+      return { kind: "exact", name: exact.name };
+    return exact.size > length
+      ? { kind: "too_big", name: exact.name }
+      : { kind: "smaller", name: exact.name };
+  }
+  const longer = [...expectedNames].filter(
+    (n) => n.length > expected.length && n.startsWith(expected),
+  );
+  const cands = entries.filter(
+    (e) =>
+      !e.isDir &&
+      e.name.length > expected.length &&
+      e.name.startsWith(expected) &&
+      !expectedNames.has(e.name) &&
+      !longer.some((l) => e.name.startsWith(l)) &&
+      (e.size === undefined || e.size <= length),
+  );
+  if (cands.length === 1) return { kind: "partial", name: cands[0].name };
+  if (cands.length > 1)
+    return { kind: "ambiguous", names: cands.map((c) => c.name) };
+  return { kind: "none" };
+}
 
 export type TransferCandidate = {
   /** Server path of the folder or file this candidate represents. */
@@ -25,13 +71,11 @@ export type TransferCandidate = {
   /** Output folder rqbit should use if matched: the folder itself for a
    *  directory, the containing folder for a single file. */
   path: string;
-  /** Basename (for files, with any `.!qB` suffix removed). */
+  /** Basename. */
   name: string;
   kind: "dir" | "file";
   /** Files only. */
   size?: number;
-  /** Files only: another client's in-progress file (`.!qB`). */
-  partial?: boolean;
   /** Directories only: direct children, when listed. */
   children?: TransferCandidateChild[];
   /** A folder the user selected (e.g. qBittorrent's Complete/Incomplete). */
@@ -69,7 +113,7 @@ export type TransferMatch = {
 };
 
 const normalize = (s: string): string =>
-  stripPartialSuffix(s)
+  s
     .toLowerCase()
     .replace(/\.[a-f0-9]{8}$/i, "")
     .replace(/[\[\](){}_.-]+/g, " ")
@@ -110,71 +154,66 @@ export function fuzzyScore(a: string, b: string): number {
   return (2 * overlap) / total;
 }
 
-type Scored = { score: number; reason: string } | null;
+type Scored = {
+  score: number;
+  reason: string;
+  /** Matched entry, when more specific than the candidate itself. */
+  entryPath?: string;
+} | null;
 
-/** Size check for an existing file vs what the torrent expects. */
-const sizeFits = (
-  size: number | undefined,
-  length: number,
-  partial: boolean | undefined,
-): "exact" | "partial" | "unknown" | "too_big" | "mismatch" => {
-  if (size === undefined) return "unknown";
-  if (size === length) return "exact";
-  if (size > length) return "too_big";
-  // Smaller: fine for an in-progress file (qBit may not preallocate).
-  return partial ? "partial" : "mismatch";
-};
+const joinPath = (dir: string, name: string) =>
+  `${dir.replace(/[/\\]+$/, "")}/${name}`;
 
-/** Score a torrent (with metadata) against one candidate. */
+/** Score a torrent (with metadata) against one candidate folder. */
 function scoreWithMetadata(
   t: TransferTorrentHint & { files: TransferTorrentFile[] },
   c: TransferCandidate,
 ): Scored {
+  if (c.kind !== "dir") return null;
   const files = t.files;
+  const children = c.children ?? [];
   const single = files.length === 1 && files[0].components.length === 1;
 
   if (single) {
+    // The folder holding the file is the output folder (a selected folder
+    // itself, or a per-torrent subfolder).
     const f = files[0];
     const fname = f.components[0];
-    if (c.kind === "file") {
-      const exactName = c.name === fname;
-      const fit = sizeFits(c.size, f.length, c.partial);
-      if (fit === "too_big") return null;
-      if (exactName && (fit === "exact" || fit === "partial"))
+    const fit = findExpectedFile(fname, f.length, children, new Set([fname]));
+    switch (fit.kind) {
+      case "exact":
         return {
           score: 1,
-          reason: fit === "exact" ? "same name and size" : "partial (.!qB)",
+          reason: "same name and size",
+          entryPath: joinPath(c.path, fit.name),
         };
-      if (exactName)
-        // Smaller but not marked partial: could be different data; writing
-        // missing pieces would overwrite it. Show it, don't auto-match.
+      case "partial":
+        return {
+          score: 0.97,
+          reason: `partial (${fit.name})`,
+          entryPath: joinPath(c.path, fit.name),
+        };
+      case "smaller":
+        // Could be different data; writing missing pieces would overwrite
+        // it. Show it, don't auto-match.
         return {
           score: 0.4,
-          reason: "same name, smaller and not a .!qB partial",
+          reason: "same name but smaller, and no partial-file suffix",
+          entryPath: joinPath(c.path, fit.name),
         };
-      if (fit !== "exact") return null;
-      const nameScore = fuzzyScore(fname, c.name);
-      if (nameScore < 0.6) return null;
-      return {
-        score: 0.5 + 0.4 * nameScore,
-        reason: "same size, similar name",
-      };
+      case "ambiguous":
+        return {
+          score: 0.4,
+          reason: `several partial files: ${fit.names.join(", ")}`,
+          entryPath: joinPath(c.path, fname),
+        };
+      default:
+        return null;
     }
-    // A subfolder holding the single file (qBit "always create subfolder").
-    // Not for the selected folders themselves: their files are candidates.
-    if (c.isRoot) return null;
-    const child = c.children?.find((ch) => !ch.isDir && ch.name === fname);
-    if (child) {
-      const fit = sizeFits(child.size, f.length, child.partial);
-      if (fit === "exact" || fit === "partial")
-        return { score: 0.95, reason: "folder contains the file" };
-    }
-    return null;
   }
 
   // Multi-file torrent: data lives in a folder whose direct children are the
   // torrent's top-level entries.
-  if (c.kind !== "dir") return null;
   // Top-level entries with their total size (a directory's size is the sum
   // of the torrent files under it).
   const tops = new Map<string, { isDir: boolean; bytes: number }>();
@@ -187,22 +226,27 @@ function scoreWithMetadata(
     tops.set(top, cur);
     totalBytes += f.length;
   }
-  const children = new Map((c.children ?? []).map((ch) => [ch.name, ch]));
+  const topNames = new Set(tops.keys());
   let hits = 0;
   let hitBytes = 0;
+  let partials = 0;
   let conflicts = 0;
   for (const [name, info] of tops) {
-    const ch = children.get(name);
-    if (!ch || ch.isDir !== info.isDir) continue;
-    if (!info.isDir) {
-      const fit = sizeFits(ch.size, info.bytes, ch.partial);
-      if (fit === "too_big") {
-        conflicts++;
-        continue;
+    if (info.isDir) {
+      if (children.some((ch) => ch.isDir && ch.name === name)) {
+        hits++;
+        hitBytes += info.bytes;
       }
-      // Smaller and not a .!qB partial: don't count it as evidence.
-      if (fit === "mismatch") continue;
+      continue;
     }
+    const fit = findExpectedFile(name, info.bytes, children, topNames);
+    if (fit.kind === "too_big") {
+      conflicts++;
+      continue;
+    }
+    // Smaller without a suffix / ambiguous: don't count it as evidence.
+    if (fit.kind !== "exact" && fit.kind !== "partial") continue;
+    if (fit.kind === "partial") partials++;
     hits++;
     hitBytes += info.bytes;
   }
@@ -231,7 +275,7 @@ function scoreWithMetadata(
   if (!exactName && byteOverlap < 0.5) score = Math.min(score, 0.44);
   return {
     score,
-    reason: `${hits}/${tops.size} entries (${Math.round(byteOverlap * 100)}% of size) present${exactName ? ", same name" : ""}`,
+    reason: `${hits}/${tops.size} entries (${Math.round(byteOverlap * 100)}% of size) present${partials ? `, ${partials} partial` : ""}${exactName ? ", same name" : ""}`,
   };
 }
 
@@ -243,8 +287,9 @@ function scoreByLabel(t: TransferTorrentHint, c: TransferCandidate): Scored {
 
 /**
  * Match each torrent hint to the best candidate folder/file.
- * With metadata: single-file torrents match files by exact name and size
- * (`.!qB` partials may be smaller); multi-file torrents match folders whose
+ * With metadata: single-file torrents match the folder holding the file
+ * (exact name and size, or a unique `<name><suffix>` partial that isn't
+ * larger — see findExpectedFile); multi-file torrents match folders whose
  * children contain the torrent's top-level entries. Anything larger than the
  * torrent expects never matches (it can't be the same data).
  * Ambiguous when the top two candidates are within 0.08 and both >= 0.55.
@@ -268,7 +313,6 @@ export function matchTransferFolders(
     entryPath: string;
     score: number;
     reason: string;
-    partial: boolean;
   };
   const pairs: Pair[] = [];
   for (const t of torrents) {
@@ -281,10 +325,9 @@ export function matchTransferFolders(
       pairs.push({
         tid: t.id,
         path: c.path,
-        entryPath: c.entryPath,
+        entryPath: s.entryPath ?? c.entryPath,
         score: s.score,
         reason: s.reason,
-        partial: !!c.partial,
       });
     }
   }

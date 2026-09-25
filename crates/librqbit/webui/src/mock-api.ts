@@ -2,6 +2,8 @@
 // This file is only used in dev mode with mock.html entry point
 
 import {
+  AddJobStage,
+  AddJobStatus,
   AddTorrentResponse,
   LimitsConfig,
   SessionPreferences,
@@ -391,6 +393,64 @@ function updatePeerCounters(torrentId: number): void {
   }
 }
 
+type MockJob = {
+  stage: AddJobStage;
+  since: number;
+  started: number;
+  cancelled: boolean;
+  torrentId: number | null;
+  onCancel?: () => void;
+  set: (st: AddJobStage) => void;
+  commit: (id: number) => void;
+  cancel: () => void;
+  status: () => AddJobStatus;
+};
+
+const mockJobs = (() => {
+  const jobs = new Map<string, MockJob>();
+  return {
+    get: (id: string) => jobs.get(id),
+    start: (id?: string): MockJob => {
+      const now = Date.now();
+      const j: MockJob = {
+        stage: "starting",
+        since: now,
+        started: now,
+        cancelled: false,
+        torrentId: null,
+        set(st) {
+          if (this.cancelled || this.torrentId !== null) return;
+          this.stage = st;
+          this.since = Date.now();
+        },
+        commit(tid) {
+          this.torrentId = tid;
+          this.stage = "added";
+          this.since = Date.now();
+        },
+        cancel() {
+          if (this.torrentId !== null) return;
+          this.cancelled = true;
+          this.stage = "cancelled";
+          this.since = Date.now();
+          this.onCancel?.();
+        },
+        status() {
+          return {
+            job_id: id ?? null,
+            stage: this.stage,
+            torrent_id: this.torrentId ?? undefined,
+            stage_secs: (Date.now() - this.since) / 1000,
+            elapsed_secs: (Date.now() - this.started) / 1000,
+          };
+        },
+      };
+      if (id) jobs.set(id, j);
+      return j;
+    },
+  };
+})();
+
 const TOTAL_TORRENTS = 1000;
 
 // Mock API implementation
@@ -539,22 +599,54 @@ export const MockAPI: RqbitAPI & { getVersion: () => Promise<string> } = {
     };
   },
 
-  uploadTorrent: async (data, _opts, init): Promise<AddTorrentResponse> => {
-    // Simulate magnet metadata resolution: magnets whose text contains "dead"
-    // never resolve (until aborted); other magnets resolve after ~3s.
+  uploadTorrent: async (data, opts, init): Promise<AddTorrentResponse> => {
+    // Simulate an add job: magnets whose text contains "busy" first wait ~4s
+    // for a server slot; "dead" magnets never resolve (until cancelled);
+    // other magnets resolve after ~3s. Cancel before commit = nothing added.
     if (typeof data === "string" && data.startsWith("magnet:")) {
-      await new Promise<void>((resolve, reject) => {
-        const onAbort = () => reject({ text: "request aborted" });
-        if (init?.signal?.aborted) return onAbort();
-        init?.signal?.addEventListener("abort", onAbort);
-        if (!data.includes("dead")) setTimeout(resolve, 3000);
-      });
+      const job = mockJobs.start(opts?.add_job_id);
+      const wait = (ms: number | null) =>
+        new Promise<void>((resolve, reject) => {
+          const onAbort = () => reject({ text: "request aborted" });
+          if (init?.signal?.aborted || job.cancelled) return onAbort();
+          init?.signal?.addEventListener("abort", onAbort);
+          job.onCancel = () => reject({ text: "add cancelled" });
+          if (ms !== null) setTimeout(resolve, ms);
+        });
+      try {
+        if (data.includes("busy")) {
+          job.set("waiting_for_server");
+          await wait(4000);
+        }
+        job.set("resolving_metadata");
+        await wait(data.includes("dead") ? null : 3000);
+      } catch (e) {
+        if (!job.cancelled) job.cancel();
+        throw e;
+      }
+      const id = 100000 + Math.floor(Math.random() * 1000);
+      job.commit(id);
       return {
-        id: null,
+        id,
         details: { info_hash: "0".repeat(40), files: [] },
       } as unknown as AddTorrentResponse;
     }
     throw { text: "Upload not supported in mock mode", status: 501 };
+  },
+
+  getAddJob: async (jobId: string) => {
+    const j = mockJobs.get(jobId);
+    if (!j) throw { text: "no such add job", status: 404 };
+    return j.status();
+  },
+
+  cancelAddJob: async (jobId: string) => {
+    const j = mockJobs.get(jobId);
+    if (!j) return { result: "cancelled" as const };
+    if (j.torrentId !== null)
+      return { result: "already_added" as const, torrent_id: j.torrentId };
+    j.cancel();
+    return { result: "cancelled" as const };
   },
 
   updateOnlyFiles: async (): Promise<void> => {
