@@ -31,7 +31,7 @@ use std::{
     ops::Range,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Context;
@@ -52,8 +52,6 @@ pub const SCAN_WINDOW: u64 = 4 * 1024 * 1024;
 pub const SUB_CHUNK: u64 = 64 * 1024;
 /// A file becomes "damaged" after this many failures of the same piece, even without EIO.
 pub const REPEAT_FAILURES_THRESHOLD: u32 = 3;
-/// Don't auto-repair the same torrent more often than this.
-pub const AUTO_REPAIR_MIN_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
 const DIRECT_ALIGN: usize = 4096;
 
@@ -667,7 +665,176 @@ pub fn repair_file(
 }
 
 // ---------------------------------------------------------------------------------------
-// Damage tracking (per torrent, in memory)
+// Backoff for automatic recovery (piece re-downloads after I/O errors, auto repairs)
+// ---------------------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BackoffConfig {
+    pub base: Duration,
+    pub cap: Duration,
+    /// Stop automatic attempts after this many consecutive failures.
+    pub max_attempts: u32,
+}
+
+impl Default for BackoffConfig {
+    fn default() -> Self {
+        Self {
+            base: Duration::from_secs(60),
+            cap: Duration::from_secs(6 * 3600),
+            max_attempts: 8,
+        }
+    }
+}
+
+/// ±20% jitter so torrents don't retry in lockstep.
+pub const BACKOFF_JITTER: f64 = 0.2;
+
+/// Delay before attempt number `failures + 1`, given `failures >= 1` consecutive failures:
+/// `base * 2^(failures-1)`, capped, then scaled by `1 + 0.2 * jitter` (`jitter` in [-1, 1]).
+pub fn backoff_delay(cfg: &BackoffConfig, failures: u32, jitter: f64) -> Duration {
+    let exp = failures.saturating_sub(1).min(48) as i32;
+    let raw = cfg.base.as_secs_f64() * 2f64.powi(exp);
+    let capped = raw.min(cfg.cap.as_secs_f64());
+    let j = jitter.clamp(-1.0, 1.0) * BACKOFF_JITTER;
+    Duration::from_secs_f64((capped * (1.0 + j)).max(0.0))
+}
+
+/// Uniform-ish value in [-1, 1] derived from `seed` (splitmix64).
+fn jitter_from(seed: u64) -> f64 {
+    let mut z = seed.wrapping_add(0x9E3779B97F4A7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^= z >> 31;
+    (z as f64 / u64::MAX as f64) * 2.0 - 1.0
+}
+
+fn random_jitter(key: u64) -> f64 {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    jitter_from(nanos ^ key.rotate_left(32))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BackoffDecision {
+    RetryAfter(Duration),
+    GiveUp,
+}
+
+#[derive(Clone, Debug)]
+pub struct BackoffEntry {
+    /// Consecutive failures.
+    pub attempts: u32,
+    pub last_failure: SystemTime,
+    pub next_allowed: SystemTime,
+    pub gave_up: bool,
+    /// Pieces only: waiting to be put back into the download queue.
+    pub pending_requeue: bool,
+    pub last_error: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct Backoff<K: Ord + Copy> {
+    entries: BTreeMap<K, BackoffEntry>,
+}
+
+impl<K: Ord + Copy> Default for Backoff<K> {
+    fn default() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+        }
+    }
+}
+
+impl<K: Ord + Copy> Backoff<K> {
+    pub fn record_failure(
+        &mut self,
+        key: K,
+        now: SystemTime,
+        cfg: &BackoffConfig,
+        jitter: f64,
+        error: &str,
+    ) -> BackoffDecision {
+        let e = self.entries.entry(key).or_insert_with(|| BackoffEntry {
+            attempts: 0,
+            last_failure: now,
+            next_allowed: now,
+            gave_up: false,
+            pending_requeue: false,
+            last_error: String::new(),
+        });
+        e.attempts = e.attempts.saturating_add(1);
+        e.last_failure = now;
+        e.pending_requeue = true;
+        e.last_error = error.chars().take(300).collect();
+        if e.attempts >= cfg.max_attempts.max(1) {
+            e.gave_up = true;
+            e.next_allowed = now;
+            BackoffDecision::GiveUp
+        } else {
+            let d = backoff_delay(cfg, e.attempts, jitter);
+            e.next_allowed = now + d;
+            BackoffDecision::RetryAfter(d)
+        }
+    }
+
+    /// Success resets the counter.
+    pub fn record_success(&mut self, key: K) -> bool {
+        self.entries.remove(&key).is_some()
+    }
+
+    /// Whether an automatic attempt for `key` may run at `now`.
+    pub fn allowed(&self, key: K, now: SystemTime) -> bool {
+        match self.entries.get(&key) {
+            None => true,
+            Some(e) => !e.gave_up && e.next_allowed <= now,
+        }
+    }
+
+    /// Keys whose delay elapsed and that wait for a requeue; clears their pending flag.
+    pub fn take_due(&mut self, now: SystemTime, limit: usize) -> Vec<K> {
+        let mut out = Vec::new();
+        for (k, e) in self.entries.iter_mut() {
+            if out.len() >= limit {
+                break;
+            }
+            if e.pending_requeue && !e.gave_up && e.next_allowed <= now {
+                e.pending_requeue = false;
+                out.push(*k);
+            }
+        }
+        out
+    }
+
+    /// Manual action: forget all counters. Returns keys that were waiting (deferred or
+    /// given up) so the caller can requeue them right away.
+    pub fn reset_all(&mut self) -> Vec<K> {
+        let keys = self
+            .entries
+            .iter()
+            .filter(|(_, e)| e.pending_requeue || e.gave_up)
+            .map(|(k, _)| *k)
+            .collect();
+        self.entries.clear();
+        keys
+    }
+
+    pub fn get(&self, key: K) -> Option<&BackoffEntry> {
+        self.entries.get(&key)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &BackoffEntry)> {
+        self.entries.iter()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Damage tracking (per torrent, in memory; resets when rqbit restarts)
 // ---------------------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -681,6 +848,38 @@ pub struct DamagedFileStats {
     pub first_seen: String,
     pub last_seen: String,
     pub pieces_failed: usize,
+    /// Automatic repair attempts so far (consecutive).
+    #[serde(default)]
+    pub auto_repair_attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_auto_repair_in_secs: Option<u64>,
+    /// Automatic repair gave up; needs a manual Fix errors / Repair.
+    #[serde(default)]
+    pub needs_attention: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PieceBackoffStats {
+    pub piece: u32,
+    pub attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_retry_in_secs: Option<u64>,
+    pub needs_attention: bool,
+    pub last_error: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct RecoveryStats {
+    pub max_attempts: u32,
+    /// Pieces waiting for their next automatic retry.
+    pub pieces_waiting: usize,
+    /// Pieces whose automatic retries were given up.
+    pub pieces_needing_attention: usize,
+    pub max_piece_attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_retry_in_secs: Option<u64>,
+    /// First few affected pieces.
+    pub pieces: Vec<PieceBackoffStats>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -730,6 +929,11 @@ pub struct DamageStats {
     pub damaged_files: Vec<DamagedFileStats>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repair: Option<RepairStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<RecoveryStats>,
+    /// Automatic recovery gave up on something; a manual Fix errors is needed.
+    #[serde(default)]
+    pub needs_attention: bool,
 }
 
 struct DamagedFileState {
@@ -746,12 +950,22 @@ struct DamageInner {
     files: BTreeMap<usize, DamagedFileState>,
     piece_failures: HashMap<u32, u32>,
     repair: Option<RepairStatus>,
-    last_auto_repair: Option<Instant>,
+    /// Automatic re-download of pieces that failed with I/O errors.
+    piece_backoff: Backoff<u32>,
+    /// Automatic repairs, per file.
+    file_backoff: Backoff<usize>,
+    max_attempts: u32,
 }
 
 #[derive(Default)]
 pub struct DamageTracker {
     inner: Mutex<DamageInner>,
+    /// Fast path for the per-piece success hook.
+    any_piece_backoff: std::sync::atomic::AtomicBool,
+}
+
+fn secs_until(t: SystemTime, now: SystemTime) -> u64 {
+    t.duration_since(now).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 impl DamageTracker {
@@ -794,6 +1008,131 @@ impl DamageTracker {
             e.pieces.insert(piece);
         }
         newly
+    }
+
+    /// Automatic soft recovery of `piece` failed: schedule its next attempt (or give up).
+    pub fn piece_failed(&self, piece: u32, cfg: &BackoffConfig, error: &str) -> (BackoffDecision, u32) {
+        let mut g = self.inner.lock();
+        g.max_attempts = cfg.max_attempts;
+        let d = g.piece_backoff.record_failure(
+            piece,
+            SystemTime::now(),
+            cfg,
+            random_jitter(piece as u64),
+            error,
+        );
+        let attempts = g.piece_backoff.get(piece).map(|e| e.attempts).unwrap_or(0);
+        self.any_piece_backoff
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        (d, attempts)
+    }
+
+    /// A piece verified: reset its counter.
+    pub fn piece_verified(&self, piece: u32) {
+        if !self
+            .any_piece_backoff
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        let mut g = self.inner.lock();
+        g.piece_backoff.record_success(piece);
+        g.piece_failures.remove(&piece);
+        if g.piece_backoff.is_empty() {
+            self.any_piece_backoff
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Pieces whose backoff elapsed and should go back into the download queue.
+    pub fn take_due_pieces(&self, limit: usize) -> Vec<u32> {
+        if !self
+            .any_piece_backoff
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Vec::new();
+        }
+        self.inner
+            .lock()
+            .piece_backoff
+            .take_due(SystemTime::now(), limit)
+    }
+
+    /// Pieces currently held back (waiting or given up), which are not in the queue.
+    pub fn held_back_pieces(&self) -> Vec<u32> {
+        self.inner
+            .lock()
+            .piece_backoff
+            .iter()
+            .filter(|(_, e)| e.pending_requeue || e.gave_up)
+            .map(|(k, _)| *k)
+            .collect()
+    }
+
+    /// Manual Fix errors / manual repair: reset all counters. Returns pieces that were held
+    /// back, so the caller can requeue them immediately.
+    pub fn manual_reset(&self) -> Vec<u32> {
+        let mut g = self.inner.lock();
+        g.file_backoff.reset_all();
+        g.piece_failures.clear();
+        let pieces = g.piece_backoff.reset_all();
+        self.any_piece_backoff
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        pieces
+    }
+
+    /// Damaged files for which an automatic repair may run now. Records the attempt
+    /// (counts as a failure until the file is found clean or a manual action resets it).
+    fn claim_auto_repair_files(&self, cfg: &BackoffConfig) -> Vec<usize> {
+        let mut g = self.inner.lock();
+        g.max_attempts = cfg.max_attempts;
+        if matches!(g.repair.as_ref().map(|r| r.state), Some(RepairState::Running)) {
+            return Vec::new();
+        }
+        let now = SystemTime::now();
+        let files: Vec<usize> = g
+            .files
+            .keys()
+            .copied()
+            .filter(|f| g.file_backoff.allowed(*f, now))
+            .collect();
+        for f in &files {
+            g.file_backoff.record_failure(
+                *f,
+                now,
+                cfg,
+                random_jitter(*f as u64 ^ 0xF11E),
+                "automatic repair attempted",
+            );
+        }
+        files
+    }
+
+    /// Whether some damaged file could be auto-repaired now.
+    pub fn auto_repair_due(&self) -> bool {
+        let g = self.inner.lock();
+        if g.files.is_empty()
+            || matches!(g.repair.as_ref().map(|r| r.state), Some(RepairState::Running))
+        {
+            return false;
+        }
+        let now = SystemTime::now();
+        g.files.keys().any(|f| g.file_backoff.allowed(*f, now))
+    }
+
+    /// Pieces requeued by a repair: no longer waiting (their attempt counts are kept so a
+    /// persistent problem still ends in "needs attention").
+    fn mark_requeued(&self, pieces: &BTreeSet<u32>) {
+        let mut g = self.inner.lock();
+        for p in pieces {
+            if let Some(e) = g.piece_backoff.entries.get_mut(p) {
+                e.pending_requeue = false;
+            }
+        }
+    }
+
+    fn file_found_clean(&self, file_id: usize) {
+        self.inner.lock().file_backoff.record_success(file_id);
     }
 
     pub fn damaged_file_ids(&self) -> Vec<usize> {
@@ -878,32 +1217,46 @@ impl DamageTracker {
         }
     }
 
-    /// Rate limit for automatic repairs. Returns true (and records the attempt) if an
-    /// auto repair may start now.
-    fn claim_auto_repair(&self) -> bool {
-        let mut g = self.inner.lock();
-        if matches!(g.repair.as_ref().map(|r| r.state), Some(RepairState::Running)) {
-            return false;
-        }
-        if let Some(t) = g.last_auto_repair {
-            if t.elapsed() < AUTO_REPAIR_MIN_INTERVAL {
-                return false;
-            }
-        }
-        g.last_auto_repair = Some(Instant::now());
-        true
-    }
-
     pub fn snapshot(&self, file_name: impl Fn(usize) -> String) -> Option<DamageStats> {
         let g = self.inner.lock();
-        if g.files.is_empty() && g.repair.is_none() {
+        let now = SystemTime::now();
+        let affected: Vec<(&u32, &BackoffEntry)> = g
+            .piece_backoff
+            .iter()
+            .filter(|(_, e)| e.attempts > 0)
+            .collect();
+        if g.files.is_empty() && g.repair.is_none() && affected.is_empty() {
             return None;
         }
-        Some(DamageStats {
-            damaged_files: g
-                .files
+        let recovery = (!affected.is_empty()).then(|| RecoveryStats {
+            max_attempts: g.max_attempts,
+            pieces_waiting: affected.iter().filter(|(_, e)| !e.gave_up).count(),
+            pieces_needing_attention: affected.iter().filter(|(_, e)| e.gave_up).count(),
+            max_piece_attempts: affected.iter().map(|(_, e)| e.attempts).max().unwrap_or(0),
+            next_retry_in_secs: affected
                 .iter()
-                .map(|(id, s)| DamagedFileStats {
+                .filter(|(_, e)| !e.gave_up && e.pending_requeue)
+                .map(|(_, e)| secs_until(e.next_allowed, now))
+                .min(),
+            pieces: affected
+                .iter()
+                .take(20)
+                .map(|(p, e)| PieceBackoffStats {
+                    piece: **p,
+                    attempts: e.attempts,
+                    next_retry_in_secs: (!e.gave_up && e.pending_requeue)
+                        .then(|| secs_until(e.next_allowed, now)),
+                    needs_attention: e.gave_up,
+                    last_error: e.last_error.clone(),
+                })
+                .collect(),
+        });
+        let damaged_files: Vec<DamagedFileStats> = g
+            .files
+            .iter()
+            .map(|(id, s)| {
+                let fb = g.file_backoff.get(*id);
+                DamagedFileStats {
                     file_id: *id,
                     path: file_name(*id),
                     errors: s.errors,
@@ -912,9 +1265,24 @@ impl DamageTracker {
                     first_seen: s.first_seen.clone(),
                     last_seen: s.last_seen.clone(),
                     pieces_failed: s.pieces.len(),
-                })
-                .collect(),
+                    auto_repair_attempts: fb.map(|e| e.attempts).unwrap_or(0),
+                    next_auto_repair_in_secs: fb
+                        .filter(|e| !e.gave_up)
+                        .map(|e| secs_until(e.next_allowed, now)),
+                    needs_attention: fb.map(|e| e.gave_up).unwrap_or(false),
+                }
+            })
+            .collect();
+        let needs_attention = damaged_files.iter().any(|f| f.needs_attention)
+            || recovery
+                .as_ref()
+                .map(|r| r.pieces_needing_attention > 0)
+                .unwrap_or(false);
+        Some(DamageStats {
+            damaged_files,
             repair: g.repair.clone(),
+            recovery,
+            needs_attention,
         })
     }
 }
@@ -984,6 +1352,19 @@ fn append_log(path: &Path, line: &impl Serialize) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Held-back pieces (waiting for an I/O-error backoff) to requeue after a repair.
+enum HeldPieces {
+    All(Vec<u32>),
+    InRepairedFiles(Vec<u32>),
+}
+
+/// Global limit on concurrent automatic repairs (heavy I/O).
+fn auto_repair_semaphore() -> Arc<tokio::sync::Semaphore> {
+    static SEM: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    SEM.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)))
+        .clone()
+}
+
 impl Session {
     /// Start repairing a torrent's damaged files in the background. Progress and the result
     /// are exposed in the torrent's stats (`damage.repair`).
@@ -1029,6 +1410,14 @@ impl Session {
             .shared
             .damage
             .try_begin(total_bytes, files.len(), req.auto)?;
+        // A manual repair resets all automatic-recovery counters and requeues every
+        // held-back piece; an automatic one requeues held-back pieces of repaired files.
+        let held = if req.auto {
+            HeldPieces::InRepairedFiles(handle.shared.damage.held_back_pieces())
+        } else {
+            HeldPieces::All(handle.shared.damage.manual_reset())
+        };
+        let auto = req.auto;
 
         info!(
             id = handle.id(),
@@ -1046,7 +1435,13 @@ impl Session {
             tracing::debug_span!(parent: handle.shared.span.clone(), "repair_files"),
             "repair_files",
             async move {
-                let r = session.run_repair(&h, metadata, files).await;
+                // Global limit: one automatic repair at a time across all torrents.
+                let _permit = if auto {
+                    Some(auto_repair_semaphore().acquire_owned().await?)
+                } else {
+                    None
+                };
+                let r = session.run_repair(&h, metadata, files, held).await;
                 match r {
                     Ok(s) => {
                         info!(
@@ -1081,13 +1476,17 @@ impl Session {
         {
             return;
         }
-        if !handle.shared.damage.claim_auto_repair() {
+        let files = handle
+            .shared
+            .damage
+            .claim_auto_repair_files(&self.preferences.recovery_backoff());
+        if files.is_empty() {
             return;
         }
         match self.start_repair_files(
             handle,
             RepairRequest {
-                files: None,
+                files: Some(files),
                 scope: RepairScope::Damaged,
                 auto: true,
             },
@@ -1102,6 +1501,7 @@ impl Session {
         handle: &ManagedTorrentHandle,
         metadata: Arc<TorrentMetadata>,
         files: Vec<usize>,
+        held: HeldPieces,
     ) -> anyhow::Result<RepairSummary> {
         let was_live = handle.live().is_some();
         let was_error = handle.with_state(|s| matches!(s, ManagedTorrentState::Error(_)));
@@ -1110,7 +1510,7 @@ impl Session {
                 .await
                 .context("error pausing torrent before repair")?;
         }
-        let result = self.run_repair_stopped(handle, metadata, files).await;
+        let result = self.run_repair_stopped(handle, metadata, files, held).await;
         if was_live || was_error {
             if let Err(e) = self.unpause(handle).await {
                 warn!(id = handle.id(), "error resuming torrent after repair: {e:#}");
@@ -1127,6 +1527,7 @@ impl Session {
         handle: &ManagedTorrentHandle,
         metadata: Arc<TorrentMetadata>,
         files: Vec<usize>,
+        held: HeldPieces,
     ) -> anyhow::Result<RepairSummary> {
         let log_path = self
             .preferences_path()
@@ -1217,6 +1618,18 @@ impl Session {
             .map(|o| o.file_id)
             .collect();
         let mut pieces: BTreeSet<u32> = outcomes.iter().flat_map(|o| o.pieces.clone()).collect();
+        let requeued_held: BTreeSet<u32> = match held {
+            HeldPieces::All(p) => p.into_iter().collect(),
+            HeldPieces::InRepairedFiles(p) => p
+                .into_iter()
+                .filter(|pid| {
+                    repaired_files
+                        .iter()
+                        .any(|f| metadata.file_infos[*f].piece_range.contains(pid))
+                })
+                .collect(),
+        };
+        pieces.extend(requeued_held.iter().copied());
         let h = handle.clone();
         let md = metadata.clone();
         let (to_redownload, invalidated) = tokio::task::spawn_blocking(move || {
@@ -1231,6 +1644,11 @@ impl Session {
             .map(|o| o.file_id)
             .collect();
         handle.shared.damage.clear_after_repair(&ok_files);
+        handle.shared.damage.mark_requeued(&requeued_held);
+        // Repair cleared (or file was clean): reset its automatic-repair backoff.
+        for f in &ok_files {
+            handle.shared.damage.file_found_clean(*f);
+        }
 
         let summary = RepairSummary {
             files_scanned: outcomes.len(),
@@ -1256,6 +1674,29 @@ impl Session {
 }
 
 impl crate::torrent_state::ManagedTorrent {
+    /// Manual "Fix errors": reset automatic-recovery backoff counters (pieces and files) and
+    /// requeue every held-back piece immediately. Returns how many pieces were requeued.
+    pub(crate) fn manual_recovery_reset(&self) -> anyhow::Result<usize> {
+        if let Some(live) = self.live() {
+            return live.manual_recovery_reset();
+        }
+        let pieces = self.shared.damage.manual_reset();
+        let metadata = self.metadata.load();
+        let Some(metadata) = metadata.as_ref() else {
+            return Ok(0);
+        };
+        let lengths = metadata.lengths();
+        let mut g = self.locked.write();
+        if let ManagedTorrentState::Paused(p) = &mut g.state {
+            for pid in &pieces {
+                if let Some(vp) = lengths.validate_piece_index(*pid) {
+                    p.chunk_tracker.mark_piece_broken_if_not_have(vp);
+                }
+            }
+        }
+        Ok(pieces.len())
+    }
+
     /// Run `f` while the torrent's handle to `file_id` is closed; reopen afterwards.
     pub(crate) fn with_file_closed(
         &self,
@@ -1568,8 +2009,146 @@ mod tests {
         assert!(s.damaged_files[0].eio);
         t.clear_after_repair(&[2]);
         assert_eq!(t.damaged_file_ids(), vec![5]);
-        assert!(t.claim_auto_repair());
-        assert!(!t.claim_auto_repair(), "rate limited");
+        let cfg = BackoffConfig {
+            base: Duration::from_secs(60),
+            cap: Duration::from_secs(3600),
+            max_attempts: 3,
+        };
+        assert_eq!(t.claim_auto_repair_files(&cfg), vec![5]);
+        assert!(t.claim_auto_repair_files(&cfg).is_empty(), "backoff");
+        assert!(!t.auto_repair_due());
+        let s = t.snapshot(|_| String::new()).unwrap();
+        assert_eq!(s.damaged_files[0].auto_repair_attempts, 1);
+        assert!(s.damaged_files[0].next_auto_repair_in_secs.unwrap() >= 47);
+        // Manual action resets.
+        t.manual_reset();
+        assert!(t.auto_repair_due());
+    }
+
+    fn cfg(base: u64, cap: u64, max: u32) -> BackoffConfig {
+        BackoffConfig {
+            base: Duration::from_secs(base),
+            cap: Duration::from_secs(cap),
+            max_attempts: max,
+        }
+    }
+
+    #[test]
+    fn backoff_schedule_doubles_and_caps() {
+        let c = cfg(60, 6 * 3600, 8);
+        let secs: Vec<u64> = (1..=10).map(|n| backoff_delay(&c, n, 0.0).as_secs()).collect();
+        assert_eq!(
+            secs,
+            vec![60, 120, 240, 480, 960, 1920, 3840, 7680, 15360, 21600]
+        );
+        // Huge failure counts don't overflow.
+        assert_eq!(backoff_delay(&c, u32::MAX, 0.0).as_secs(), 21600);
+    }
+
+    #[test]
+    fn backoff_jitter_bounds() {
+        let c = cfg(60, 6 * 3600, 8);
+        assert_eq!(backoff_delay(&c, 1, 1.0).as_secs(), 72);
+        assert_eq!(backoff_delay(&c, 1, -1.0).as_secs(), 48);
+        assert_eq!(backoff_delay(&c, 20, 1.0).as_secs(), 25920);
+        assert_eq!(backoff_delay(&c, 1, 7.0).as_secs(), 72, "clamped");
+        let mut lo = f64::MAX;
+        let mut hi = f64::MIN;
+        for seed in 0..10_000u64 {
+            let j = jitter_from(seed);
+            assert!((-1.0..=1.0).contains(&j));
+            lo = lo.min(j);
+            hi = hi.max(j);
+            let d = backoff_delay(&c, 3, j).as_secs_f64();
+            assert!((192.0..=288.0).contains(&d), "{d}");
+        }
+        assert!(lo < -0.9 && hi > 0.9, "jitter spreads: {lo}..{hi}");
+    }
+
+    #[test]
+    fn backoff_gives_up_after_max_and_resets() {
+        let c = cfg(60, 3600, 4);
+        let mut b: Backoff<u32> = Backoff::default();
+        let t0 = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        assert!(b.allowed(7, t0));
+        for n in 1..4u32 {
+            let d = b.record_failure(7, t0, &c, 0.0, "EIO");
+            assert_eq!(
+                d,
+                BackoffDecision::RetryAfter(Duration::from_secs(60 << (n - 1)))
+            );
+        }
+        let e = b.get(7).unwrap();
+        assert_eq!(e.attempts, 3);
+        assert!(!b.allowed(7, t0 + Duration::from_secs(239)));
+        assert!(b.allowed(7, t0 + Duration::from_secs(240)));
+        assert_eq!(b.record_failure(7, t0, &c, 0.0, "EIO"), BackoffDecision::GiveUp);
+        assert!(b.get(7).unwrap().gave_up);
+        assert!(!b.allowed(7, t0 + Duration::from_secs(10 * 86400)), "gave up");
+        assert!(b.take_due(t0 + Duration::from_secs(10 * 86400), 10).is_empty());
+        // Other keys unaffected.
+        assert!(b.allowed(8, t0));
+        // Success resets.
+        assert!(b.record_success(7));
+        assert!(b.allowed(7, t0));
+        assert_eq!(
+            b.record_failure(7, t0, &c, 0.0, "EIO"),
+            BackoffDecision::RetryAfter(Duration::from_secs(60))
+        );
+        // Manual reset returns waiting/given-up keys and clears everything.
+        for _ in 0..4 {
+            b.record_failure(9, t0, &c, 0.0, "EIO");
+        }
+        let mut keys = b.reset_all();
+        keys.sort();
+        assert_eq!(keys, vec![7, 9]);
+        assert!(b.is_empty());
+    }
+
+    #[test]
+    fn backoff_take_due_requeues_once() {
+        let c = cfg(60, 3600, 8);
+        let mut b: Backoff<u32> = Backoff::default();
+        let t0 = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        b.record_failure(1, t0, &c, 0.0, "x");
+        b.record_failure(2, t0, &c, 0.0, "x");
+        b.record_failure(2, t0, &c, 0.0, "x"); // 120s
+        assert!(b.take_due(t0 + Duration::from_secs(59), 10).is_empty());
+        assert_eq!(b.take_due(t0 + Duration::from_secs(60), 10), vec![1]);
+        assert!(b.take_due(t0 + Duration::from_secs(61), 10).is_empty(), "only once");
+        assert_eq!(b.take_due(t0 + Duration::from_secs(500), 10), vec![2]);
+        // Limit respected.
+        for k in 10..20 {
+            b.record_failure(k, t0, &c, 0.0, "x");
+        }
+        assert_eq!(b.take_due(t0 + Duration::from_secs(500), 3).len(), 3);
+    }
+
+    #[test]
+    fn tracker_piece_backoff_success_and_manual_reset() {
+        let t = DamageTracker::default();
+        let c = cfg(60, 3600, 2);
+        assert_eq!(t.piece_failed(4, &c, "EIO").1, 1);
+        assert!(t.take_due_pieces(10).is_empty(), "not due yet");
+        let s = t.snapshot(|_| String::new()).unwrap();
+        let r = s.recovery.unwrap();
+        assert_eq!(r.pieces_waiting, 1);
+        assert!(r.next_retry_in_secs.unwrap() >= 47);
+        assert!(!s.needs_attention);
+        let (d, n) = t.piece_failed(4, &c, "EIO");
+        assert_eq!((d, n), (BackoffDecision::GiveUp, 2));
+        let s = t.snapshot(|_| String::new()).unwrap();
+        assert!(s.needs_attention);
+        assert_eq!(s.recovery.unwrap().pieces_needing_attention, 1);
+        assert_eq!(t.held_back_pieces(), vec![4]);
+        // Manual fix: requeue it and reset.
+        assert_eq!(t.manual_reset(), vec![4]);
+        assert!(t.snapshot(|_| String::new()).is_none());
+        // Success resets the counter.
+        t.piece_failed(5, &c, "EIO");
+        t.piece_verified(5);
+        assert!(t.snapshot(|_| String::new()).is_none());
+        assert_eq!(t.piece_failed(5, &c, "EIO").1, 1);
     }
 
     #[test]

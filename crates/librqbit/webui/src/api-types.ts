@@ -236,6 +236,12 @@ export interface SessionPreferences {
   soft_recover_on_io_error: boolean;
   /** Auto-run "Repair damaged files" when soft recovery marks a file damaged. */
   auto_repair_damaged_files?: boolean;
+  /** Automatic recovery backoff: first retry delay (s), doubling per failure. */
+  recovery_backoff_base_secs?: number;
+  /** Automatic recovery backoff cap (s). */
+  recovery_backoff_cap_secs?: number;
+  /** Stop automatic recovery after this many consecutive failures. */
+  recovery_max_attempts?: number;
   on_complete_hook?: string | null;
   move_completed_path?: string | null;
   move_completed_copy?: boolean;
@@ -295,6 +301,28 @@ export interface DamagedFileStats {
   first_seen: string;
   last_seen: string;
   pieces_failed: number;
+  /** Consecutive automatic repair attempts. */
+  auto_repair_attempts?: number;
+  next_auto_repair_in_secs?: number;
+  /** Automatic repair gave up for this file. */
+  needs_attention?: boolean;
+}
+
+export interface PieceBackoffStats {
+  piece: number;
+  attempts: number;
+  next_retry_in_secs?: number;
+  needs_attention: boolean;
+  last_error: string;
+}
+
+export interface RecoveryStats {
+  max_attempts: number;
+  pieces_waiting: number;
+  pieces_needing_attention: number;
+  max_piece_attempts: number;
+  next_retry_in_secs?: number;
+  pieces: PieceBackoffStats[];
 }
 
 export type RepairMethod = "none" | "punch_hole" | "copy_replace" | "failed";
@@ -340,6 +368,10 @@ export interface RepairStatus {
 export interface DamageStats {
   damaged_files: DamagedFileStats[];
   repair?: RepairStatus;
+  /** Automatic re-download of pieces after I/O errors (with backoff). */
+  recovery?: RecoveryStats;
+  /** Automatic recovery gave up somewhere; manual Fix errors needed. */
+  needs_attention?: boolean;
 }
 
 export interface RepairStartResponse {

@@ -328,6 +328,30 @@ impl TorrentStateLive {
         );
 
         state.spawn(
+            debug_span!(parent: state.shared.span.clone(), "recovery_scheduler"),
+            format!("[{}]recovery_scheduler", state.shared.id),
+            {
+                let state = Arc::downgrade(&state);
+                async move {
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        let Some(state) = state.upgrade() else {
+                            return Ok(());
+                        };
+                        // At most 32 pieces per torrent every 5s, so a burst of expiring
+                        // backoffs can't flood the disk.
+                        if let Err(e) = state.requeue_due_pieces(32) {
+                            debug!("error requeueing pieces: {e:#}");
+                        }
+                        if state.shared.damage.auto_repair_due() {
+                            state.spawn_auto_repair_if_enabled();
+                        }
+                    }
+                }
+            },
+        );
+
+        state.spawn(
             debug_span!(parent: state.shared.span.clone(), "peer_adder"),
             format!("[{}]peer_adder", state.shared.id),
             state.clone().task_peer_adder(peer_queue_rx),
@@ -694,6 +718,20 @@ impl TorrentStateLive {
             piece = piece.get(),
             "file marked as damaged (unreadable/unwritable data); use \"Repair damaged files\""
         );
+        self.spawn_auto_repair_if_enabled();
+    }
+
+    fn soft_recover_enabled(&self) -> bool {
+        self.shared
+            .session
+            .upgrade()
+            .map(|s| s.preferences.soft_recover_on_io_error())
+            .unwrap_or(false)
+    }
+
+    /// Start an automatic repair (from a separate task) if prefs allow it. Per-file backoff
+    /// and the global concurrency limit are applied by `Session::maybe_auto_repair`.
+    fn spawn_auto_repair_if_enabled(&self) {
         let Some(session) = self.shared.session.upgrade() else {
             return;
         };
@@ -714,6 +752,86 @@ impl TorrentStateLive {
                 Ok::<_, anyhow::Error>(())
             },
         );
+    }
+
+    /// Soft recovery after an I/O error on `piece`: hold it back (not requeued) and schedule
+    /// an automatic retry with exponential backoff, or give up after too many consecutive
+    /// failures and flag it "needs attention".
+    pub(crate) fn soft_recover_piece(
+        &self,
+        piece: ValidPieceIndex,
+        e: &anyhow::Error,
+        op: &str,
+    ) -> anyhow::Result<()> {
+        let cfg = self
+            .shared
+            .session
+            .upgrade()
+            .map(|s| s.preferences.recovery_backoff())
+            .unwrap_or_default();
+        let (decision, attempts) =
+            self.shared
+                .damage
+                .piece_failed(piece.get(), &cfg, &format!("{op}: {e:#}"));
+        {
+            let mut g = self.lock_write("soft_recover_io");
+            g.get_pieces_mut()?.defer_piece(piece);
+        }
+        match decision {
+            crate::repair::BackoffDecision::RetryAfter(d) => warn!(
+                id = self.shared.id,
+                info_hash = ?self.shared.info_hash,
+                piece = piece.get(),
+                attempt = attempts,
+                max_attempts = cfg.max_attempts,
+                retry_in_secs = d.as_secs(),
+                error = format!("{e:#}"),
+                "I/O {op} error; piece held back, will retry after backoff"
+            ),
+            crate::repair::BackoffDecision::GiveUp => warn!(
+                id = self.shared.id,
+                info_hash = ?self.shared.info_hash,
+                piece = piece.get(),
+                attempt = attempts,
+                error = format!("{e:#}"),
+                "I/O {op} error; giving up automatic retries for this piece (needs attention: use Fix errors)"
+            ),
+        }
+        Ok(())
+    }
+
+    /// Put pieces whose backoff elapsed back into the download queue.
+    pub(crate) fn requeue_due_pieces(&self, limit: usize) -> anyhow::Result<()> {
+        let due = self.shared.damage.take_due_pieces(limit);
+        self.requeue_pieces(&due, "retrying pieces after I/O error backoff")
+    }
+
+    /// Manual Fix errors on a live torrent: reset recovery counters and requeue every
+    /// held-back piece right away.
+    pub(crate) fn manual_recovery_reset(&self) -> anyhow::Result<usize> {
+        let pieces = self.shared.damage.manual_reset();
+        self.requeue_pieces(&pieces, "manual fix: requeueing held-back pieces")?;
+        Ok(pieces.len())
+    }
+
+    fn requeue_pieces(&self, pieces: &[u32], msg: &str) -> anyhow::Result<()> {
+        if pieces.is_empty() {
+            return Ok(());
+        }
+        {
+            let mut g = self.lock_write("requeue_backoff_pieces");
+            let pt = g.get_pieces_mut()?;
+            for p in pieces {
+                if let Some(vp) = self.lengths.validate_piece_index(*p) {
+                    if !pt.is_inflight(vp) {
+                        pt.mark_piece_hash_failed(vp);
+                    }
+                }
+            }
+        }
+        info!(id = self.shared.id, pieces = ?pieces, "{msg}");
+        self.new_pieces_notify.notify_waiters();
+        Ok(())
     }
 
     pub(crate) fn file_ops(&self) -> FileOps<'_> {
@@ -1924,30 +2042,11 @@ impl PeerHandler {
                     Ok(()) => {}
                     Err(e) => {
                         state.note_io_failure(&e, chunk_info.piece_index);
-                        let soft = state
-                            .shared
-                            .session
-                            .upgrade()
-                            .map(|s| s.preferences.soft_recover_on_io_error())
-                            .unwrap_or(false);
-                        if soft {
-                            warn!(
-                                id = state.shared.id,
-                                info_hash = ?state.shared.info_hash,
-                                piece = ?chunk_info.piece_index,
-                                error = format!("{e:#}"),
-                                "I/O write error; soft-recovering piece (invalidate + redownload)"
-                            );
-                            {
-                                let mut g = state.lock_write("soft_recover_io_write");
-                                let pieces = g.get_pieces_mut()?;
-                                pieces.take_inflight(chunk_info.piece_index);
-                                pieces.mark_piece_hash_failed(chunk_info.piece_index);
-                            }
-                            state.new_pieces_notify.notify_waiters();
+                        if state.soft_recover_enabled() {
+                            state.soft_recover_piece(chunk_info.piece_index, &e, "write")?;
                             // Drop this peer/chunk path without fatally erroring the torrent.
                             anyhow::bail!(
-                                "I/O write error on piece {}; soft-recovered",
+                                "I/O write error on piece {}; piece held back for retry",
                                 chunk_info.piece_index
                             );
                         }
@@ -1996,13 +2095,19 @@ impl PeerHandler {
                 None => return Ok(()),
             };
 
-            let check_result = state
-                .file_ops()
-                .check_piece(chunk_info.piece_index)
-                .inspect_err(|e| state.note_io_failure(e, chunk_info.piece_index))
-                .with_context(|| format!("error checking piece={index}"))?;
+            let check_result = match state.file_ops().check_piece(chunk_info.piece_index) {
+                Ok(r) => r,
+                Err(e) => {
+                    state.note_io_failure(&e, chunk_info.piece_index);
+                    if state.soft_recover_enabled() {
+                        state.soft_recover_piece(chunk_info.piece_index, &e, "read")?;
+                    }
+                    return Err(e.context(format!("error checking piece={index}")));
+                }
+            };
             match check_result {
                 true => {
+                    state.shared.damage.piece_verified(chunk_info.piece_index.get());
                     {
                         let mut g = state.lock_write("mark_piece_downloaded");
                         g.get_pieces_mut()?

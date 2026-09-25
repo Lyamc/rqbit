@@ -269,6 +269,19 @@ impl ChunkTracker {
         }
     }
 
+    /// Hold a piece back after an I/O error: forget its written chunks but do NOT queue it;
+    /// it is requeued later by the recovery backoff scheduler.
+    pub fn mark_piece_deferred(&mut self, index: ValidPieceIndex) {
+        let id = index.get() as usize;
+        if self.have.as_slice().get(id).map(|r| *r).unwrap_or_default() {
+            return;
+        }
+        self.queue_pieces.set(id, false);
+        if let Some(s) = self.chunk_status.get_mut(self.lengths.chunk_range(index)) {
+            s.fill(false);
+        }
+    }
+
     /// Forget pieces (e.g. their data was zeroed by a repair): clear have/chunk status and
     /// queue them again if selected. Returns how many of them were previously "have".
     pub fn mark_pieces_missing(&mut self, pieces: &[ValidPieceIndex], file_infos: &FileInfos) -> usize {

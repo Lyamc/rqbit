@@ -43,6 +43,21 @@ pub struct SessionPreferences {
     #[serde(default)]
     pub auto_repair_damaged_files: bool,
 
+    /// Exponential backoff for automatic recovery (re-downloading pieces that failed with
+    /// I/O errors, automatic repairs): first retry after this many seconds, doubling per
+    /// consecutive failure (±20% jitter).
+    #[serde(default = "default_recovery_backoff_base_secs")]
+    pub recovery_backoff_base_secs: u64,
+
+    /// Upper bound for the automatic recovery delay, in seconds.
+    #[serde(default = "default_recovery_backoff_cap_secs")]
+    pub recovery_backoff_cap_secs: u64,
+
+    /// After this many consecutive failures, automatic recovery of a piece/file stops and
+    /// it is flagged "needs attention" (manual Fix errors retries immediately).
+    #[serde(default = "default_recovery_max_attempts")]
+    pub recovery_max_attempts: u32,
+
     /// Legacy: shell command when a torrent finishes. Migrated into `completion_actions`
     /// when the actions list is empty (see [`SessionPreferences::effective_actions`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -88,11 +103,24 @@ pub struct SessionPreferences {
     pub peer_limit: Option<usize>,
 }
 
+fn default_recovery_backoff_base_secs() -> u64 {
+    60
+}
+fn default_recovery_backoff_cap_secs() -> u64 {
+    6 * 3600
+}
+fn default_recovery_max_attempts() -> u32 {
+    8
+}
+
 impl Default for SessionPreferences {
     fn default() -> Self {
         Self {
             soft_recover_on_io_error: false,
             auto_repair_damaged_files: false,
+            recovery_backoff_base_secs: default_recovery_backoff_base_secs(),
+            recovery_backoff_cap_secs: default_recovery_backoff_cap_secs(),
+            recovery_max_attempts: default_recovery_max_attempts(),
             on_complete_hook: None,
             move_completed_path: None,
             move_completed_copy: false,
@@ -222,6 +250,19 @@ impl SessionPreferencesStore {
 
     pub fn auto_repair_damaged_files(&self) -> bool {
         self.prefs.read().auto_repair_damaged_files
+    }
+
+    /// Backoff schedule for automatic recovery (sanitized: base >= 1s, cap >= base,
+    /// max attempts >= 1).
+    pub fn recovery_backoff(&self) -> crate::repair::BackoffConfig {
+        let p = self.prefs.read();
+        let base = p.recovery_backoff_base_secs.clamp(1, 7 * 86400);
+        let cap = p.recovery_backoff_cap_secs.clamp(base, 30 * 86400);
+        crate::repair::BackoffConfig {
+            base: std::time::Duration::from_secs(base),
+            cap: std::time::Duration::from_secs(cap),
+            max_attempts: p.recovery_max_attempts.clamp(1, 1000),
+        }
     }
 
     pub fn on_complete_hook(&self) -> Option<String> {

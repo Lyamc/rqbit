@@ -16,7 +16,11 @@ import {
   TorrentListItem,
 } from "../../api-types";
 import { Button } from "../buttons/Button";
-import { hasDamagedFiles, isRepairRunning } from "../../helper/damage";
+import {
+  hasDamagedFiles,
+  hasRecoveryIssues,
+  isRepairRunning,
+} from "../../helper/damage";
 import {
   StatusFilter,
   STATUS_FILTER_LABELS,
@@ -131,7 +135,9 @@ export const ActionBar: React.FC<ActionBarProps> = ({ hideFilters }) => {
         const torrent = getTorrentById(id);
         const damaged = hasDamagedFiles(torrent?.stats?.damage);
         if (damaged && isRepairRunning(torrent?.stats?.damage)) continue;
-        if (!damaged && torrent?.stats?.state !== STATE_ERROR) continue;
+        const held = hasRecoveryIssues(torrent?.stats?.damage);
+        if (!damaged && !held && torrent?.stats?.state !== STATE_ERROR)
+          continue;
         try {
           if (damaged && API.repairFiles) {
             await API.repairFiles(id);

@@ -29,10 +29,46 @@ export const DownloadsTab: React.FC<DownloadsTabProps> = ({
           checked={!!preferences.auto_repair_damaged_files}
           name="auto_repair_damaged_files"
           label="Auto-repair damaged files"
-          help="Needs soft-recover. When a file keeps failing with I/O errors (e.g. unreadable extents on the filesystem), automatically punch out the unreadable ranges (or copy-and-replace the file) and redownload only the affected pieces. At most once per 30 min per torrent. Off by default."
+          help="Needs soft-recover. When a file keeps failing with I/O errors (e.g. unreadable extents on the filesystem), automatically punch out the unreadable ranges (or copy-and-replace the file) and redownload only the affected pieces. Retries use the backoff below. Off by default."
           onChange={(e) =>
             onChange({ auto_repair_damaged_files: e.target.checked })
           }
+        />
+        <FormInput
+          name="recovery_backoff_base_secs"
+          label="Retry delay after an I/O error (seconds)"
+          inputType="number"
+          value={(preferences.recovery_backoff_base_secs ?? 60).toString()}
+          help="Automatic recovery (re-downloading a piece that failed with a disk error, automatic repair) waits this long before the first retry, doubling after each consecutive failure (±20% jitter)."
+          onChange={(e) => {
+            const v = e.target.valueAsNumber;
+            if (!isNaN(v) && v >= 1)
+              onChange({ recovery_backoff_base_secs: Math.floor(v) });
+          }}
+        />
+        <FormInput
+          name="recovery_backoff_cap_secs"
+          label="Maximum retry delay (seconds)"
+          inputType="number"
+          value={(preferences.recovery_backoff_cap_secs ?? 21600).toString()}
+          help="Upper bound for the doubling delay (default 21600 = 6 h)."
+          onChange={(e) => {
+            const v = e.target.valueAsNumber;
+            if (!isNaN(v) && v >= 1)
+              onChange({ recovery_backoff_cap_secs: Math.floor(v) });
+          }}
+        />
+        <FormInput
+          name="recovery_max_attempts"
+          label="Give up after N consecutive failures"
+          inputType="number"
+          value={(preferences.recovery_max_attempts ?? 8).toString()}
+          help="Then automatic retries stop for that piece/file and the torrent shows 'needs attention'. Fix errors always retries immediately and resets the counters. Counters reset when rqbit restarts."
+          onChange={(e) => {
+            const v = e.target.valueAsNumber;
+            if (!isNaN(v) && v >= 1)
+              onChange({ recovery_max_attempts: Math.floor(v) });
+          }}
         />
       </Fieldset>
 

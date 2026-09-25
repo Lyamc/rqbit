@@ -355,6 +355,15 @@ impl Api {
         idx: TorrentIdOrHash,
     ) -> Result<EmptyJsonResponse> {
         let handle = self.mgr_handle(idx)?;
+        // Manual fix always runs now: reset automatic-recovery backoff and requeue pieces
+        // that were held back (or given up on) after I/O errors.
+        let requeued = handle
+            .manual_recovery_reset()
+            .with_status(StatusCode::INTERNAL_SERVER_ERROR)?;
+        if handle.live().is_some() {
+            tracing::info!(id = handle.id(), requeued, "fix errors: recovery counters reset");
+            return Ok(Default::default());
+        }
         self.session
             .unpause(&handle)
             .await
