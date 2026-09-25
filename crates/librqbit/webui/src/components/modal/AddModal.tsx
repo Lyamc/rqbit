@@ -26,7 +26,8 @@ import {
 
 const DEFAULT_CONCURRENCY = 4;
 
-type Tab = "upload" | "urls" | "browse";
+export type AddModalTab = "upload" | "urls" | "browse";
+type Tab = AddModalTab;
 
 type Props = {
   isOpen: boolean;
