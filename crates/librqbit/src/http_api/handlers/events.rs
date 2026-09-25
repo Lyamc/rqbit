@@ -13,9 +13,9 @@ pub async fn h_events(
     Query(q): Query<EventQuery>,
 ) -> Result<impl IntoResponse> {
     let events = state.api.session().events.clone();
-    let page = tokio::task::spawn_blocking(move || events.query(&q))
+    let page = crate::event_log::off_runtime(move || events.query(&q))
         .await
-        .map_err(|e| ApiError::from(anyhow::anyhow!("event query task failed: {e}")))?;
+        .map_err(ApiError::from)?;
     Ok(axum::Json(page))
 }
 
@@ -36,8 +36,8 @@ pub async fn h_events_summary(
 /// POST /events/counters/reset
 pub async fn h_events_counters_reset(State(state): State<ApiState>) -> Result<impl IntoResponse> {
     let events = state.api.session().events.clone();
-    let c = tokio::task::spawn_blocking(move || events.reset_counters())
+    let c = crate::event_log::off_runtime(move || events.reset_counters())
         .await
-        .map_err(|e| ApiError::from(anyhow::anyhow!("reset task failed: {e}")))?;
+        .map_err(ApiError::from)?;
     Ok(axum::Json(c))
 }

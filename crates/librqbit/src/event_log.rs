@@ -25,6 +25,21 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+/// Run blocking event-log work on its own short-lived thread. Deliberately not
+/// `spawn_blocking`: tokio's blocking pool can be saturated by disk I/O (e.g. many
+/// torrents checking at startup), which made event queries take 20+ seconds.
+pub async fn off_runtime<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> anyhow::Result<T> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("rqbit-events".into())
+        .spawn(move || {
+            let _ = tx.send(f());
+        })?;
+    Ok(rx.await?)
+}
+
 pub const DEFAULT_CAP_BYTES: u64 = 10 * 1024 * 1024;
 pub const MIN_CAP_BYTES: u64 = 256 * 1024;
 pub const MAX_CAP_BYTES: u64 = 1024 * 1024 * 1024;

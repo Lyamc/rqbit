@@ -941,7 +941,7 @@ impl Session {
                         loop {
                             tokio::time::sleep(Duration::from_secs(15)).await;
                             let ev = events.clone();
-                            let _ = tokio::task::spawn_blocking(move || ev.tick()).await;
+                            let _ = crate::event_log::off_runtime(move || ev.tick()).await;
                         }
                         #[allow(unreachable_code)]
                         Ok::<_, anyhow::Error>(())
@@ -1975,7 +1975,7 @@ impl Session {
         let cap = crate::session_preferences::event_log_cap_bytes(prefs.event_log_max_mb);
         self.preferences.update(prefs).await?;
         let events = self.events.clone();
-        let _ = tokio::task::spawn_blocking(move || events.set_cap(cap)).await;
+        let _ = crate::event_log::off_runtime(move || events.set_cap(cap)).await;
         Ok(())
     }
 
