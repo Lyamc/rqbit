@@ -48,13 +48,43 @@ Standalone client binary (does not compile the rqbit server, smaller/faster):
 
 `RQBIT_GUI_URL` sets the default URL; `RQBIT_GUI_LOG=info` prints GPUI logs.
 
+## Browser build (WebAssembly)
+
+The same UI code also compiles to `wasm32-unknown-unknown` and runs in a
+browser on GPUI's web platform (`gpui_web`: canvas + WebGPU, falling back to
+WebGL2; the browser `fetch` API for HTTP). It lives in `web/`, a separate
+cargo workspace because it needs gpui from zed's git repository (the crates.io
+release has no web platform). The UI code differs only behind the `gpui-main`
+feature (one API signature changed) and `cfg(target_family = "wasm")`.
+
+    cargo install wasm-bindgen-cli --version 0.2.120   # must match Cargo.lock
+    crates/rqbit-gpui/web/build.sh                     # -> web/dist/
+
+The toolchain comes from `web/rust-toolchain.toml` (1.98.1, same as zed).
+Single threaded: no SharedArrayBuffer, so no COOP/COEP headers or nightly
+`build-std` are needed.
+
+rqbit serves the result at `/gpui/` from `$RQBIT_GPUI_WEB_DIR`, default
+`$XDG_DATA_HOME/rqbit/gpui-web` (`~/.local/share/rqbit/gpui-web`):
+
+    mkdir -p ~/.local/share/rqbit/gpui-web
+    cp crates/rqbit-gpui/web/dist/* ~/.local/share/rqbit/gpui-web/
+
+It talks to the API of the origin it is served from (same origin, no CORS;
+basic auth, if enabled, is the browser's). The `.gz` files are served
+precompressed when the browser accepts gzip. The UI font (IBM Plex Sans,
+SIL OFL 1.1) is bundled because browsers don't expose system fonts to the
+canvas renderer.
+
 ## Layout
 
-- `src/api/` – blocking HTTP client and serde types mirroring
+- `src/api/` – HTTP client (`native.rs`: reqwest, `web.rs`: fetch via GPUI's
+  `HttpClient`) and serde types mirroring
   `crates/librqbit/webui/src/api-types.ts`. Add new endpoints here.
 - `src/format.rs` – formatting shared by views (matches the web UI).
 - `src/ui/` – GPUI views. `mod.rs` is the root window; add new web UI features
   as new modules (details pane, add torrent, events, settings, ...).
 
-HTTP runs on GPUI's background executor via `reqwest::blocking` (GPUI has its
-own executor, no tokio runtime is started for the GUI).
+API calls return futures that run on GPUI's background executor: natively
+`reqwest::blocking` (GPUI has its own executor, no tokio runtime is started for
+the GUI), in the browser `fetch`.

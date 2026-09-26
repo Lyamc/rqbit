@@ -1,0 +1,4 @@
+[toolchain]
+# Same toolchain as zed at the pinned gpui revision.
+channel = "1.98.1"
+targets = ["wasm32-unknown-unknown"]

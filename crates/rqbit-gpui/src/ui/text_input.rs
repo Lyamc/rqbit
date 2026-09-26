@@ -88,7 +88,7 @@ impl Render for TextInput {
             .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, window, _| window.focus(&this.focus_handle)),
+                cx.listener(|this, _, window, cx| focus(window, &this.focus_handle, cx)),
             )
             .flex()
             .flex_row()
@@ -119,4 +119,16 @@ impl Render for TextInput {
                 d.child(div().w(px(1.)).h(px(16.)).bg(theme::text()))
             })
     }
+}
+
+/// `Window::focus` gained an `&mut App` argument after gpui 0.2.2; the web
+/// build uses gpui from zed's repository (feature `gpui-main`).
+#[cfg(not(feature = "gpui-main"))]
+fn focus(window: &mut Window, handle: &FocusHandle, _cx: &mut App) {
+    window.focus(handle)
+}
+
+#[cfg(feature = "gpui-main")]
+fn focus(window: &mut Window, handle: &FocusHandle, cx: &mut App) {
+    window.focus(handle, cx)
 }

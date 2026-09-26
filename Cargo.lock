@@ -7676,12 +7676,14 @@ version = "9.0.1"
 dependencies = [
  "anyhow",
  "clap",
+ "futures",
  "gpui",
  "log",
  "reqwest",
  "serde",
  "serde_json",
  "url",
+ "web-time",
 ]
 
 [[package]]

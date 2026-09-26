@@ -20,6 +20,7 @@ use crate::api::Api;
 use crate::ApiError;
 use crate::api::Result;
 
+mod gpui_web;
 mod handlers;
 mod timeout;
 #[cfg(feature = "webui")]
@@ -107,6 +108,17 @@ impl HttpApi {
             let webui_router = webui::make_webui_router();
             main_router = main_router.nest("/web/", webui_router);
             main_router = main_router.route("/web", get(|| async { Redirect::permanent("./web/") }))
+        }
+
+        // Browser build of the GPUI client (static files from a directory).
+        {
+            use axum::response::Redirect;
+
+            main_router = main_router.nest("/gpui/", gpui_web::make_gpui_web_router());
+            main_router = main_router.route(
+                "/gpui",
+                axum::routing::get(|| async { Redirect::permanent("./gpui/") }),
+            );
         }
 
         #[cfg(feature = "prometheus")]

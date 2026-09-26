@@ -50,6 +50,7 @@ async fn h_api_root(parts: Parts) -> impl IntoResponse {
             "GET /metrics": "Prometheus metrics",
             "GET /stream_logs": "Continuously stream logs",
             "GET /web/": "Web UI",
+            "GET /gpui/": "GPUI client compiled to WebAssembly (if installed)",
             "GET /torrents/playlist": "Playlist for supported players",
             "GET /torrents/{id_or_infohash}": "Torrent details",
             "GET /torrents/{id_or_infohash}/metadata": "Download the corresponding torrent file",

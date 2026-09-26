@@ -11,13 +11,15 @@ mod torrent_table;
 mod widgets;
 
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::time::Instant;
 
 use gpui::{
     Context, Entity, SharedString, Subscription, Task, Window, div, prelude::*, px, uniform_list,
 };
 
-use crate::api::{ApiClient, ListTorrentsResponse, TorrentListItem, parse_base_url};
+use crate::api::{ApiClient, ListTorrentsResponse, TorrentListItem, Transport, parse_base_url};
 use crate::format::format_speed;
 use text_input::{TextInput, TextInputEvent};
 
@@ -55,7 +57,7 @@ enum ConnState {
 }
 
 pub struct RqbitWindow {
-    http: reqwest::blocking::Client,
+    transport: Transport,
     client: Option<ApiClient>,
     url_input: Entity<TextInput>,
     conn: ConnState,
@@ -73,7 +75,7 @@ pub struct RqbitWindow {
 
 impl RqbitWindow {
     pub fn new(
-        http: reqwest::blocking::Client,
+        transport: Transport,
         url: String,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -87,7 +89,7 @@ impl RqbitWindow {
             },
         );
         let mut this = Self {
-            http,
+            transport,
             client: None,
             url_input,
             conn: ConnState::Connecting,
@@ -117,17 +119,13 @@ impl RqbitWindow {
         match parse_base_url(&raw) {
             Err(e) => self.conn = ConnState::Invalid(format!("{e:#}")),
             Ok(url) => {
-                let client = ApiClient::new(self.http.clone(), url);
+                let client = ApiClient::new(self.transport.clone(), url);
                 self.client = Some(client.clone());
                 self.conn = ConnState::Connecting;
                 let generation = self.generation;
                 self.poll_task = Some(cx.spawn(async move |this, cx| {
                     loop {
-                        let c = client.clone();
-                        let res = cx
-                            .background_executor()
-                            .spawn(async move { c.list_torrents() })
-                            .await;
+                        let res = cx.background_executor().spawn(client.list_torrents()).await;
                         let ok = res.is_ok();
                         let alive = this
                             .update(cx, |this, cx| {
@@ -178,22 +176,14 @@ impl RqbitWindow {
         }
         let generation = self.generation;
         cx.spawn(async move |this, cx| {
-            let c = client.clone();
-            let res = cx
-                .background_executor()
-                .spawn(async move {
-                    match action {
-                        TorrentAction::Start => c.start(id),
-                        TorrentAction::Pause => c.pause(id),
-                        TorrentAction::Forget => c.forget(id),
-                    }
-                })
-                .await;
+            let request = match action {
+                TorrentAction::Start => client.start(id),
+                TorrentAction::Pause => client.pause(id),
+                TorrentAction::Forget => client.forget(id),
+            };
+            let res = cx.background_executor().spawn(request).await;
             // Refresh immediately so the row reflects the new state.
-            let list = cx
-                .background_executor()
-                .spawn(async move { client.list_torrents() })
-                .await;
+            let list = cx.background_executor().spawn(client.list_torrents()).await;
             this.update(cx, |this, cx| {
                 if this.generation != generation {
                     return;

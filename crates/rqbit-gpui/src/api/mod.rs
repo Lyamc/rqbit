@@ -1,23 +1,51 @@
-//! Blocking HTTP client for the rqbit API.
+//! HTTP client for the rqbit API.
 //!
-//! GPUI has its own async executor (not tokio), so instead of running a tokio
-//! runtime next to it we use `reqwest::blocking` and call it from GPUI's
-//! background executor threads. Every method here blocks; never call them on
-//! the UI thread.
+//! The request/response logic is shared; only the transport differs:
+//! - native: `reqwest::blocking`, polled on GPUI's background executor threads
+//!   (GPUI has its own executor, so no tokio runtime is started);
+//! - browser (wasm32): GPUI's HTTP client, which on the web platform is the
+//!   browser's `fetch`.
+//!
+//! All methods return `'static` futures; spawn them with
+//! `cx.background_executor().spawn(..)`.
 
 pub mod types;
 
-use std::time::Duration;
+#[cfg(not(target_family = "wasm"))]
+mod native;
+#[cfg(target_family = "wasm")]
+mod web;
+
+#[cfg(not(target_family = "wasm"))]
+pub use native::Transport;
+#[cfg(target_family = "wasm")]
+pub use web::Transport;
 
 use anyhow::{Context, bail};
+use futures::FutureExt;
+use futures::future::BoxFuture;
 use url::Url;
 
 pub use types::*;
 
+pub type ApiFuture<T> = BoxFuture<'static, anyhow::Result<T>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Method {
+    Get,
+    Post,
+}
+
+/// What a transport hands back: status code and body.
+pub struct RawResponse {
+    pub status: u16,
+    pub body: Vec<u8>,
+}
+
 /// A cheap-to-clone handle to one rqbit server.
 #[derive(Clone)]
 pub struct ApiClient {
-    http: reqwest::blocking::Client,
+    transport: Transport,
     base: Url,
     basic_auth: Option<(String, String)>,
 }
@@ -54,18 +82,7 @@ pub fn parse_base_url(input: &str) -> anyhow::Result<Url> {
 }
 
 impl ApiClient {
-    /// Creates the shared HTTP client. Must be called outside of any tokio
-    /// runtime (reqwest::blocking owns its own).
-    pub fn new_http() -> anyhow::Result<reqwest::blocking::Client> {
-        reqwest::blocking::Client::builder()
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(20))
-            .user_agent(concat!("rqbit-gpui/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .context("error building HTTP client")
-    }
-
-    pub fn new(http: reqwest::blocking::Client, mut base: Url) -> Self {
+    pub fn new(transport: Transport, mut base: Url) -> Self {
         let basic_auth = if !base.username().is_empty() {
             let user = base.username().to_owned();
             let pass = base.password().unwrap_or_default().to_owned();
@@ -76,7 +93,7 @@ impl ApiClient {
             None
         };
         Self {
-            http,
+            transport,
             base,
             basic_auth,
         }
@@ -93,90 +110,82 @@ impl ApiClient {
             .with_context(|| format!("bad API path {path}"))
     }
 
-    fn send(&self, req: reqwest::blocking::RequestBuilder) -> anyhow::Result<Vec<u8>> {
-        let req = match &self.basic_auth {
-            Some((u, p)) => req.basic_auth(u, Some(p)),
-            None => req,
+    fn request(&self, method: Method, path: &str) -> ApiFuture<Vec<u8>> {
+        let url = match self.url(path) {
+            Ok(u) => u,
+            Err(e) => return futures::future::ready(Err(e)).boxed(),
         };
-        let resp = req.send().map_err(describe_reqwest_error)?;
-        let status = resp.status();
-        let body = resp.bytes().map_err(describe_reqwest_error)?.to_vec();
-        if !status.is_success() {
-            let text = String::from_utf8_lossy(&body);
-            let msg = serde_json::from_slice::<ApiErrorBody>(&body)
-                .ok()
-                .and_then(|e| e.human_readable)
-                .unwrap_or_else(|| text.trim().to_owned());
-            if status == reqwest::StatusCode::UNAUTHORIZED {
-                bail!(
-                    "HTTP 401 Unauthorized: use http://user:pass@host:port if the server has basic auth enabled"
-                );
-            }
-            if msg.is_empty() {
-                bail!("HTTP {status}");
-            }
-            bail!("HTTP {status}: {msg}");
+        let fut = self.transport.send(method, url, self.basic_auth.clone());
+        async move {
+            let resp = fut.await?;
+            check_status(resp.status, &resp.body)?;
+            Ok(resp.body)
         }
-        Ok(body)
+        .boxed()
     }
 
-    fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> anyhow::Result<T> {
-        let body = self.send(self.http.get(self.url(path)?))?;
-        serde_json::from_slice(&body).with_context(|| {
-            format!(
-                "unexpected response from {path} (is this an rqbit server?): {}",
-                String::from_utf8_lossy(&body[..body.len().min(200)])
-            )
-        })
+    fn get_json<T: serde::de::DeserializeOwned + Send + 'static>(
+        &self,
+        path: &str,
+    ) -> ApiFuture<T> {
+        let fut = self.request(Method::Get, path);
+        let path = path.to_owned();
+        async move {
+            let body = fut.await?;
+            serde_json::from_slice(&body).with_context(|| {
+                format!(
+                    "unexpected response from {path} (is this an rqbit server?): {}",
+                    String::from_utf8_lossy(&body[..body.len().min(200)])
+                )
+            })
+        }
+        .boxed()
     }
 
-    fn post(&self, path: &str) -> anyhow::Result<()> {
-        self.send(self.http.post(self.url(path)?))?;
-        Ok(())
+    fn post(&self, path: &str) -> ApiFuture<()> {
+        self.request(Method::Post, path)
+            .map(|r| r.map(|_| ()))
+            .boxed()
     }
 
     /// `GET /torrents?with_stats=true` — the same bulk call the web UI polls.
-    pub fn list_torrents(&self) -> anyhow::Result<ListTorrentsResponse> {
+    pub fn list_torrents(&self) -> ApiFuture<ListTorrentsResponse> {
         self.get_json("torrents?with_stats=true")
     }
 
-    pub fn start(&self, id: usize) -> anyhow::Result<()> {
+    pub fn start(&self, id: usize) -> ApiFuture<()> {
         self.post(&format!("torrents/{id}/start"))
     }
 
-    pub fn pause(&self, id: usize) -> anyhow::Result<()> {
+    pub fn pause(&self, id: usize) -> ApiFuture<()> {
         self.post(&format!("torrents/{id}/pause"))
     }
 
     /// Removes the torrent from the session but keeps the downloaded files
     /// (`/forget`, as opposed to `/delete`).
-    pub fn forget(&self, id: usize) -> anyhow::Result<()> {
+    pub fn forget(&self, id: usize) -> ApiFuture<()> {
         self.post(&format!("torrents/{id}/forget"))
     }
 }
 
-fn describe_reqwest_error(e: reqwest::Error) -> anyhow::Error {
-    use std::error::Error;
-    let mut msg = if e.is_connect() {
-        "connection failed".to_owned()
-    } else if e.is_timeout() {
-        "request timed out".to_owned()
-    } else {
-        e.to_string()
-    };
-    // Surface the root cause (e.g. "Connection refused (os error 111)").
-    let mut src = e.source();
-    let mut last = None;
-    while let Some(s) = src {
-        last = Some(s.to_string());
-        src = s.source();
+fn check_status(status: u16, body: &[u8]) -> anyhow::Result<()> {
+    if (200..300).contains(&status) {
+        return Ok(());
     }
-    if let Some(root) = last
-        && !msg.contains(&root)
-    {
-        msg = format!("{msg}: {root}");
+    let text = String::from_utf8_lossy(body);
+    let msg = serde_json::from_slice::<ApiErrorBody>(body)
+        .ok()
+        .and_then(|e| e.human_readable)
+        .unwrap_or_else(|| text.trim().to_owned());
+    if status == 401 {
+        bail!(
+            "HTTP 401 Unauthorized: use http://user:pass@host:port if the server has basic auth enabled"
+        );
     }
-    anyhow::anyhow!(msg)
+    if msg.is_empty() {
+        bail!("HTTP {status}");
+    }
+    bail!("HTTP {status}: {msg}");
 }
 
 #[cfg(test)]
@@ -201,13 +210,28 @@ mod tests {
 
     #[test]
     fn credentials_are_split_out() {
-        let http = ApiClient::new_http().unwrap();
-        let c = ApiClient::new(http, parse_base_url("http://u:p@h:1").unwrap());
+        let c = ApiClient::new(
+            Transport::new().unwrap(),
+            parse_base_url("http://u:p@h:1").unwrap(),
+        );
         assert_eq!(c.base_url().as_str(), "http://h:1/");
         assert_eq!(c.basic_auth, Some(("u".into(), "p".into())));
         assert_eq!(
             c.url("torrents/5/start").unwrap().as_str(),
             "http://h:1/torrents/5/start"
+        );
+    }
+
+    #[test]
+    fn status_errors() {
+        assert!(check_status(200, b"").is_ok());
+        let e = check_status(400, br#"{"human_readable":"nope"}"#).unwrap_err();
+        assert_eq!(e.to_string(), "HTTP 400: nope");
+        assert!(
+            check_status(401, b"")
+                .unwrap_err()
+                .to_string()
+                .contains("user:pass")
         );
     }
 }
