@@ -7,6 +7,7 @@
 
 mod add_panel;
 mod details;
+mod events_panel;
 mod files;
 mod list_state;
 mod prefs_panel;
@@ -31,6 +32,7 @@ use crate::api::{
 use crate::format::format_speed;
 use add_panel::{AddPanel, AddPanelEvent};
 use details::{DetailsEvent, DetailsPanel};
+use events_panel::{EventsPanel, EventsPanelEvent};
 use list_state::{FixAction, Selection, SortColumn, SortDir, StatusFilter};
 use prefs_panel::{PrefsPanel, PrefsPanelEvent};
 use text_input::{TextInput, TextInputEvent};
@@ -39,6 +41,8 @@ use text_input::{TextInput, TextInputEvent};
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Slower retry while the server is unreachable.
 const RETRY_INTERVAL: Duration = Duration::from_secs(3);
+/// Events badge refresh (web UI: 15 s).
+const EVENTS_SUMMARY_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Per-torrent actions, run one torrent at a time over a set of ids
 /// (the web UI's action bar does the same).
@@ -114,6 +118,12 @@ pub struct RqbitWindow {
     /// The details pane was closed; reopened by double click / Enter.
     details_hidden: bool,
     prefs_panel: Option<(Entity<PrefsPanel>, Subscription)>,
+    events_panel: Option<(Entity<EventsPanel>, Subscription)>,
+    /// Latest `/events/summary?since_seq=<last seen>` (header badge).
+    events_summary: Option<api::EventSummary>,
+    /// Highest event seq the user has seen (persisted per server).
+    events_seen: Option<u64>,
+    events_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -160,6 +170,10 @@ impl RqbitWindow {
             details: None,
             details_hidden: false,
             prefs_panel: None,
+            events_panel: None,
+            events_summary: None,
+            events_seen: None,
+            events_task: None,
             _subscriptions: vec![sub, search_sub],
         };
         this.connect(url, cx);
@@ -198,6 +212,9 @@ impl RqbitWindow {
         self.details = None;
         self.poll_task = None;
         self.client = None;
+        self.events_panel = None;
+        self.events_summary = None;
+        self.events_task = None;
 
         match parse_base_url(&raw) {
             Err(e) => self.conn = ConnState::Invalid(format!("{e:#}")),
@@ -213,7 +230,7 @@ impl RqbitWindow {
                         let alive = this
                             .update(cx, |this, cx| {
                                 if this.generation == generation {
-                                    this.apply_list(res);
+                                    this.apply_list(res, cx);
                                     cx.notify();
                                 }
                             })
@@ -225,12 +242,24 @@ impl RqbitWindow {
                         cx.background_executor().timer(delay).await;
                     }
                 }));
+                self.events_seen = crate::store::get(&self.seen_key()).and_then(|v| v.parse().ok());
+                self.events_task = Some(cx.spawn(async move |this, cx| {
+                    loop {
+                        let Ok(()) = this.update(cx, |this, cx| this.refresh_events_summary(cx))
+                        else {
+                            return;
+                        };
+                        cx.background_executor()
+                            .timer(EVENTS_SUMMARY_INTERVAL)
+                            .await;
+                    }
+                }));
             }
         }
         cx.notify();
     }
 
-    fn apply_list(&mut self, res: anyhow::Result<ListTorrentsResponse>) {
+    fn apply_list(&mut self, res: anyhow::Result<ListTorrentsResponse>, cx: &mut Context<Self>) {
         match res {
             Ok(list) => {
                 self.torrents = list.torrents;
@@ -239,6 +268,13 @@ impl RqbitWindow {
                     .retain_existing(|id| torrents.iter().any(|t| t.id == id));
                 self.last_update = Some(Instant::now());
                 self.conn = ConnState::Connected;
+                if let Some((p, _)) = &self.events_panel {
+                    let known = self.known_hashes();
+                    p.update(cx, |p, cx| {
+                        p.set_known(known);
+                        cx.notify();
+                    });
+                }
             }
             Err(e) => {
                 let since = match &self.conn {
@@ -323,7 +359,7 @@ impl RqbitWindow {
                             return false;
                         }
                         this.pending.remove(&id);
-                        this.apply_list(list);
+                        this.apply_list(list, cx);
                         cx.notify();
                         true
                     })
@@ -408,7 +444,7 @@ impl RqbitWindow {
                 if let Err(e) = res {
                     this.action_error = Some(format!("Error moving torrents in queue: {e:#}"));
                 }
-                this.apply_list(list);
+                this.apply_list(list, cx);
                 cx.notify();
             })
             .ok();
@@ -536,6 +572,9 @@ impl RqbitWindow {
                     cx.notify();
                 }
                 DetailsEvent::Changed => this.refresh_now(cx),
+                DetailsEvent::OpenEvents(hash, name) => {
+                    this.open_events(Some((hash.clone(), name.clone())), cx)
+                }
             });
             self.details = Some((panel, sub));
         }
@@ -586,6 +625,7 @@ impl RqbitWindow {
         }
         let client = self.client.clone()?;
         self.prefs_panel = None;
+        self.events_panel = None;
         let panel = cx.new(|cx| AddPanel::new(client, cx));
         let sub = cx.subscribe(&panel, |this, _, ev: &AddPanelEvent, cx| match ev {
             AddPanelEvent::Close => {
@@ -597,6 +637,115 @@ impl RqbitWindow {
         self.add_panel = Some((panel.clone(), sub));
         cx.notify();
         Some(panel)
+    }
+
+    fn seen_key(&self) -> String {
+        format!(
+            "events-last-seen-seq:{}",
+            self.client
+                .as_ref()
+                .map(|c| c.base_url().to_string())
+                .unwrap_or_default()
+        )
+    }
+
+    fn known_hashes(&self) -> HashSet<String> {
+        self.torrents.iter().map(|t| t.info_hash.clone()).collect()
+    }
+
+    fn mark_events_seen(&mut self, seq: u64, cx: &mut Context<Self>) {
+        if self.events_seen.is_some_and(|s| s >= seq) {
+            return;
+        }
+        self.events_seen = Some(seq);
+        crate::store::set(&self.seen_key(), &seq.to_string());
+        self.refresh_events_summary(cx);
+    }
+
+    /// Header badge: unseen repairs / errors since the last viewed seq. On
+    /// first run everything up to now counts as seen (web UI behaviour).
+    fn refresh_events_summary(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let generation = self.generation;
+        let seen = self.events_seen;
+        cx.spawn(async move |this, cx| {
+            let mut seen = seen;
+            if seen.is_none() {
+                let Ok(s) = cx
+                    .background_executor()
+                    .spawn(client.get_events_summary(None))
+                    .await
+                else {
+                    return;
+                };
+                let ok = this
+                    .update(cx, |this, _| {
+                        if this.generation == generation {
+                            this.events_seen = Some(s.latest_seq);
+                            crate::store::set(&this.seen_key(), &s.latest_seq.to_string());
+                        }
+                    })
+                    .is_ok();
+                if !ok {
+                    return;
+                }
+                seen = Some(s.latest_seq);
+            }
+            let r = cx
+                .background_executor()
+                .spawn(client.get_events_summary(seen))
+                .await;
+            this.update(cx, |this, cx| {
+                if this.generation == generation
+                    && let Ok(s) = r
+                {
+                    this.events_summary = Some(s);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Opens the Events view, optionally filtered to one torrent.
+    fn open_events(&mut self, torrent: Option<(String, String)>, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        if self
+            .add_panel
+            .as_ref()
+            .is_some_and(|(p, _)| p.read(cx).is_running())
+        {
+            return;
+        }
+        self.add_panel = None;
+        self.prefs_panel = None;
+        let known = self.known_hashes();
+        let panel = cx.new(|cx| EventsPanel::new(client, torrent, known, cx));
+        let sub = cx.subscribe(&panel, |this, _, ev: &EventsPanelEvent, cx| match ev {
+            EventsPanelEvent::Close => {
+                this.events_panel = None;
+                cx.notify();
+            }
+            EventsPanelEvent::Seen(seq) => this.mark_events_seen(*seq, cx),
+            EventsPanelEvent::OpenTorrent(hash) => {
+                if let Some(id) = this
+                    .torrents
+                    .iter()
+                    .find(|t| &t.info_hash == hash)
+                    .map(|t| t.id)
+                {
+                    this.events_panel = None;
+                    this.open_details(id, cx);
+                }
+            }
+        });
+        self.events_panel = Some((panel, sub));
+        cx.notify();
     }
 
     fn open_prefs(&mut self, cx: &mut Context<Self>) {
@@ -611,6 +760,7 @@ impl RqbitWindow {
             return;
         }
         self.add_panel = None;
+        self.events_panel = None;
         let panel = cx.new(|cx| PrefsPanel::new(client, cx));
         let sub = cx.subscribe(&panel, |this, _, ev: &PrefsPanelEvent, cx| match ev {
             PrefsPanelEvent::Close => {
@@ -632,7 +782,7 @@ impl RqbitWindow {
             let list = cx.background_executor().spawn(client.list_torrents()).await;
             this.update(cx, |this, cx| {
                 if this.generation == generation {
-                    this.apply_list(list);
+                    this.apply_list(list, cx);
                     cx.notify();
                 }
             })
@@ -698,6 +848,7 @@ impl RqbitWindow {
                     },
                 ),
             )
+            .child(self.render_events_button(cx))
             .child(
                 widgets::button("open-prefs", "Preferences", self.client.is_some())
                     .when(self.client.is_some(), |b| {
@@ -707,6 +858,59 @@ impl RqbitWindow {
             .child(div().w(px(8.)))
             .child(div().size(px(8.)).rounded_full().bg(dot))
             .child(div().text_sm().text_color(theme::text_muted()).child(text))
+    }
+
+    /// "Events" button with a badge for unseen repairs + errors.
+    fn render_events_button(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let enabled = self.client.is_some();
+        let unseen = self.events_summary.as_ref().map(|s| s.unseen.clone());
+        let count = unseen.as_ref().map_or(0, |u| u.repairs + u.errors);
+        let tip: SharedString = match &unseen {
+            Some(u) => format!(
+                "Events: {} new repair(s), {} new error(s) since last viewed",
+                u.repairs, u.errors
+            )
+            .into(),
+            None => "Events: repairs & errors".into(),
+        };
+        let badge_bg = if unseen.as_ref().is_some_and(|u| u.errors > 0) {
+            theme::error()
+        } else {
+            theme::warning()
+        };
+        div()
+            .relative()
+            .child(
+                widgets::button("open-events", "Events", enabled)
+                    .tooltip(widgets::text_tooltip(tip))
+                    .when(enabled, |b| {
+                        b.on_click(cx.listener(|this, _, _, cx| this.open_events(None, cx)))
+                    }),
+            )
+            .when(count > 0, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top(px(-6.))
+                        .right(px(-8.))
+                        .min_w(px(16.))
+                        .h(px(16.))
+                        .px_1()
+                        .rounded_full()
+                        .bg(badge_bg)
+                        .text_color(gpui::white())
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(if count > 99 {
+                            "99+".to_owned()
+                        } else {
+                            count.to_string()
+                        }),
+                )
+            })
     }
 
     fn render_banners(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1154,6 +1358,10 @@ impl Render for RqbitWindow {
             .when_some(self.prefs_panel.as_ref().map(|(p, _)| p.clone()), |d, p| {
                 d.child(widgets::modal("prefs-overlay", 760., p))
             })
+            .when_some(
+                self.events_panel.as_ref().map(|(p, _)| p.clone()),
+                |d, p| d.child(widgets::modal("events-overlay", 1000., p)),
+            )
             .children(self.render_confirm(cx));
         #[cfg(not(target_family = "wasm"))]
         let root = root.on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _, cx| {

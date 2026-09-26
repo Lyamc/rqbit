@@ -18,6 +18,7 @@ pub mod format;
 #[cfg(not(target_family = "wasm"))]
 mod logging;
 pub mod sources;
+mod store;
 mod time;
 mod ui;
 

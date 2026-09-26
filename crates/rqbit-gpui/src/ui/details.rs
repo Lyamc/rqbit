@@ -32,6 +32,8 @@ pub enum DetailsEvent {
     Action(usize, TorrentAction),
     Close,
     Changed,
+    /// Open the Events view filtered to this torrent (info hash, name).
+    OpenEvents(String, String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -971,8 +973,18 @@ impl DetailsPanel {
             .into_any_element()
     }
 
-    fn render_events(&self) -> gpui::AnyElement {
-        match &self.events {
+    fn render_events(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let open_all = self.torrent.as_ref().map(|t| {
+            let (hash, name) = (t.info_hash.clone(), t.name.clone().unwrap_or_default());
+            div().flex().flex_row().pb_2().child(
+                widgets::button("d-events-all", "Open in Events view", true).on_click(cx.listener(
+                    move |_, _, _, cx| {
+                        cx.emit(DetailsEvent::OpenEvents(hash.clone(), name.clone()))
+                    },
+                )),
+            )
+        });
+        let list = match &self.events {
             None => div()
                 .text_sm()
                 .text_color(theme::text_muted())
@@ -989,7 +1001,13 @@ impl DetailsPanel {
                 .gap_1()
                 .children(e.iter().cloned().map(render_event))
                 .into_any_element(),
-        }
+        };
+        div()
+            .flex()
+            .flex_col()
+            .children(open_all)
+            .child(list)
+            .into_any_element()
     }
 }
 
@@ -1075,7 +1093,7 @@ impl Render for DetailsPanel {
             Tab::Overview => self.render_overview(cx),
             Tab::Files => self.render_files(cx),
             Tab::Peers => self.render_peers(),
-            Tab::Events => self.render_events(),
+            Tab::Events => self.render_events(cx),
         };
         div()
             .flex()
