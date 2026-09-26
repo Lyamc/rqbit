@@ -3482,6 +3482,7 @@ name = "rqbit-gpui"
 version = "9.0.1"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "futures",
  "gpui",

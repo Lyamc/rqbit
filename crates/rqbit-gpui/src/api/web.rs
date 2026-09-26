@@ -38,6 +38,9 @@ impl Transport {
             if let Some(ct) = r.content_type {
                 builder = builder.header("Content-Type", ct);
             }
+            if let Some(a) = r.accept {
+                builder = builder.header("Accept", a);
+            }
             let body = match r.body {
                 Some(b) => AsyncBody::from(b),
                 None => AsyncBody::empty(),

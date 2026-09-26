@@ -6,6 +6,7 @@
 //! `events.rs`) with any new endpoints going into `crate::api`.
 
 mod add_panel;
+mod details;
 mod files;
 mod list_state;
 mod prefs_panel;
@@ -29,6 +30,7 @@ use crate::api::{
 };
 use crate::format::format_speed;
 use add_panel::{AddPanel, AddPanelEvent};
+use details::{DetailsEvent, DetailsPanel};
 use list_state::{FixAction, Selection, SortColumn, SortDir, StatusFilter};
 use prefs_panel::{PrefsPanel, PrefsPanelEvent};
 use text_input::{TextInput, TextInputEvent};
@@ -108,6 +110,9 @@ pub struct RqbitWindow {
     focus_handle: FocusHandle,
     poll_task: Option<Task<()>>,
     add_panel: Option<(Entity<AddPanel>, Subscription)>,
+    details: Option<(Entity<DetailsPanel>, Subscription)>,
+    /// The details pane was closed; reopened by double click / Enter.
+    details_hidden: bool,
     prefs_panel: Option<(Entity<PrefsPanel>, Subscription)>,
     _subscriptions: Vec<Subscription>,
 }
@@ -152,6 +157,8 @@ impl RqbitWindow {
             focus_handle: cx.focus_handle(),
             poll_task: None,
             add_panel: None,
+            details: None,
+            details_hidden: false,
             prefs_panel: None,
             _subscriptions: vec![sub, search_sub],
         };
@@ -188,6 +195,7 @@ impl RqbitWindow {
         self.action_error = None;
         self.confirm_delete = None;
         self.selection.clear();
+        self.details = None;
         self.poll_task = None;
         self.client = None;
 
@@ -497,8 +505,45 @@ impl RqbitWindow {
         cx.notify();
     }
 
-    /// Torrent details (next slice).
-    fn open_details(&mut self, _id: usize, _cx: &mut Context<Self>) {}
+    fn open_details(&mut self, id: usize, cx: &mut Context<Self>) {
+        self.details_hidden = false;
+        self.selection.select_one(id);
+        cx.notify();
+    }
+
+    /// Keeps the details pane in sync with the selection: shown for exactly
+    /// one selected torrent unless the user closed it.
+    fn sync_details(&mut self, cx: &mut Context<Self>) -> Option<Entity<DetailsPanel>> {
+        let single = (self.selection.len() == 1)
+            .then(|| self.selection.ids.iter().next().copied())
+            .flatten();
+        let (Some(id), Some(client)) =
+            (single.filter(|_| !self.details_hidden), self.client.clone())
+        else {
+            self.details = None;
+            return None;
+        };
+        if self
+            .details
+            .as_ref()
+            .is_none_or(|(p, _)| p.read(cx).id() != id)
+        {
+            let panel = cx.new(|cx| DetailsPanel::new(client, id, cx));
+            let sub = cx.subscribe(&panel, |this, _, ev: &DetailsEvent, cx| match ev {
+                DetailsEvent::Action(id, a) => this.run_action(vec![*id], *a, false, cx),
+                DetailsEvent::Close => {
+                    this.details_hidden = true;
+                    cx.notify();
+                }
+                DetailsEvent::Changed => this.refresh_now(cx),
+            });
+            self.details = Some((panel, sub));
+        }
+        let panel = self.details.as_ref().map(|(p, _)| p.clone())?;
+        let t = self.torrents.iter().find(|t| t.id == id).cloned();
+        panel.update(cx, |p, _| p.set_torrent(t));
+        Some(panel)
+    }
 
     fn on_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         // Only when the list itself has focus (not a text field).
@@ -1050,6 +1095,7 @@ impl Render for RqbitWindow {
         } else {
             None
         };
+        let details = self.sync_details(cx);
         let root = div()
             .id("root")
             .track_focus(&self.focus_handle)
@@ -1098,6 +1144,9 @@ impl Render for RqbitWindow {
                         .flex_1(),
                     ),
             )
+            .when_some(details, |d, p| {
+                d.child(div().h(px(330.)).flex_shrink_0().child(p))
+            })
             .child(self.render_footer())
             .when_some(self.add_panel.as_ref().map(|(p, _)| p.clone()), |d, p| {
                 d.child(widgets::modal("add-overlay", 820., p))

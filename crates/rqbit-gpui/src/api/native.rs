@@ -38,6 +38,9 @@ impl Transport {
             if let Some(ct) = r.content_type {
                 req = req.header(reqwest::header::CONTENT_TYPE, ct);
             }
+            if let Some(a) = r.accept {
+                req = req.header(reqwest::header::ACCEPT, a);
+            }
             if let Some(body) = r.body {
                 req = req.body(body);
             }

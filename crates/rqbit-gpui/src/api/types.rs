@@ -52,6 +52,8 @@ pub struct TorrentStats {
     pub repair_count: Option<u64>,
     /// Present when files are damaged (unreadable) or a repair ran.
     pub damage: Option<DamageStats>,
+    /// Bytes downloaded per file, same order as `TorrentDetails::files`.
+    pub file_progress: Vec<u64>,
 }
 
 /// Mirrors `DamageStats` in api-types.ts (fields the UI uses).
@@ -419,4 +421,192 @@ mod tests {
             TorrentState::Unknown
         );
     }
+}
+
+// ---- details / peers / events / session / filesystem (api-types.ts) ----
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct TorrentFileAttributes {
+    pub symlink: bool,
+    pub hidden: bool,
+    pub padding: bool,
+    pub executable: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct TorrentFile {
+    pub name: String,
+    pub components: Vec<String>,
+    pub length: u64,
+    pub included: bool,
+    pub attributes: TorrentFileAttributes,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct TorrentDetails {
+    pub name: Option<String>,
+    pub info_hash: String,
+    pub files: Vec<TorrentFile>,
+    pub total_pieces: Option<u32>,
+    pub output_folder: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct PeerCounters {
+    pub incoming_connections: u64,
+    pub fetched_bytes: u64,
+    pub uploaded_bytes: u64,
+    pub total_time_connecting_ms: u64,
+    pub connection_attempts: u64,
+    pub connections: u64,
+    pub errors: u64,
+    pub fetched_chunks: u64,
+    pub downloaded_and_checked_pieces: u64,
+    pub total_piece_download_ms: u64,
+    pub times_stolen_from_me: u64,
+    pub times_i_stole: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct PeerStats {
+    pub counters: PeerCounters,
+    pub state: String,
+    pub conn_kind: Option<String>,
+    pub client_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct PeerStatsSnapshot {
+    pub peers: std::collections::BTreeMap<String, PeerStats>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct EventRecord {
+    pub seq: u64,
+    pub time: String,
+    pub kind: String,
+    /// "info" | "warning" | "error"
+    pub severity: String,
+    pub torrent_id: Option<usize>,
+    pub info_hash: Option<String>,
+    pub torrent_name: Option<String>,
+    pub file_id: Option<usize>,
+    pub path: Option<String>,
+    pub message: String,
+    pub count: Option<u64>,
+    pub details: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct EventPage {
+    pub events: Vec<EventRecord>,
+    pub next_before_seq: Option<u64>,
+    pub latest_seq: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EventQuery {
+    pub kind: Option<String>,
+    pub torrent_id: Option<usize>,
+    pub info_hash: Option<String>,
+    pub severity: Option<String>,
+    pub before_seq: Option<u64>,
+    pub since_seq: Option<u64>,
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct RepairCounters {
+    pub since: String,
+    pub auto_repairs: u64,
+    pub manual_repairs: u64,
+    pub repair_failures: u64,
+    pub files_repaired: u64,
+    pub bytes_unreadable: u64,
+    pub bytes_zeroed: u64,
+    pub bytes_redownload: u64,
+    pub pieces_requeued: u64,
+    pub give_ups: u64,
+    pub piece_retries: u64,
+    pub io_errors: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct UnseenCounts {
+    pub repairs: u64,
+    pub errors: u64,
+    pub warnings: u64,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct EventSummary {
+    pub counters: RepairCounters,
+    pub latest_seq: u64,
+    pub unseen: UnseenCounts,
+    pub log_bytes: u64,
+    pub log_cap_bytes: u64,
+    pub log_segments: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct SessionCounters {
+    pub fetched_bytes: u64,
+    pub uploaded_bytes: u64,
+    pub blocked_incoming: u64,
+    pub blocked_outgoing: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct SessionStats {
+    pub counters: SessionCounters,
+    pub peers: AggregatePeerStats,
+    pub download_speed: Speed,
+    pub upload_speed: Speed,
+    pub uptime_seconds: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct FsRoot {
+    pub label: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct FsRootsResponse {
+    pub roots: Vec<FsRoot>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct FsEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub is_torrent: bool,
+    pub size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct FsListResponse {
+    pub path: String,
+    pub parent: Option<String>,
+    pub entries: Vec<FsEntry>,
+    pub truncated: Option<bool>,
 }

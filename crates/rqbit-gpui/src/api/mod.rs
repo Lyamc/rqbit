@@ -45,6 +45,8 @@ pub struct Request {
     pub basic_auth: Option<(String, String)>,
     pub body: Option<Vec<u8>>,
     pub content_type: Option<&'static str>,
+    /// `Accept` header (binary endpoints like `/haves` need one).
+    pub accept: Option<&'static str>,
     /// Overall timeout (native only; the browser's fetch has none, callers
     /// that need one run their own timer, as the web UI does).
     pub timeout: Option<Duration>,
@@ -148,6 +150,7 @@ impl ApiClient {
             basic_auth: self.basic_auth.clone(),
             body,
             content_type,
+            accept: None,
             timeout,
         });
         async move {
@@ -243,6 +246,141 @@ impl ApiClient {
             "torrents/queue/move",
             &serde_json::json!({ "ids": ids, "action": action }),
         )
+    }
+
+    /// `GET /torrents/{id}`: name, files (with `included`), output folder.
+    pub fn get_details(&self, id: usize) -> ApiFuture<TorrentDetails> {
+        self.get_json(&format!("torrents/{id}"))
+    }
+
+    /// `GET /torrents/{id}/haves`: piece bitfield, MSB first.
+    pub fn get_haves(&self, id: usize) -> ApiFuture<Vec<u8>> {
+        let url = match self.url(&format!("torrents/{id}/haves")) {
+            Ok(u) => u,
+            Err(e) => return futures::future::ready(Err(e)).boxed(),
+        };
+        let fut = self.transport.send(Request {
+            method: Method::Get,
+            url,
+            basic_auth: self.basic_auth.clone(),
+            body: None,
+            content_type: None,
+            accept: Some("application/octet-stream"),
+            timeout: None,
+        });
+        async move {
+            let resp = fut.await?;
+            check_status(resp.status, &resp.body)?;
+            Ok(resp.body)
+        }
+        .boxed()
+    }
+
+    pub fn get_peer_stats(&self, id: usize) -> ApiFuture<PeerStatsSnapshot> {
+        self.get_json(&format!("torrents/{id}/peer_stats?state=live"))
+    }
+
+    pub fn update_only_files(&self, id: usize, files: &[usize]) -> ApiFuture<()> {
+        self.post_json_unit(
+            &format!("torrents/{id}/update_only_files"),
+            &serde_json::json!({ "only_files": files }),
+        )
+    }
+
+    pub fn rename_file(&self, id: usize, file_id: usize, new_path: &str) -> ApiFuture<()> {
+        self.post_json_unit(
+            &format!("torrents/{id}/rename_file"),
+            &serde_json::json!({ "file_id": file_id, "new_path": new_path }),
+        )
+    }
+
+    /// Move (or copy) the torrent's files to `destination`.
+    pub fn relocate(&self, id: usize, destination: &str, copy: bool) -> ApiFuture<()> {
+        self.post_json_unit(
+            &format!("torrents/{id}/relocate"),
+            &serde_json::json!({ "destination": destination, "copy": copy }),
+        )
+    }
+
+    pub fn get_events(&self, q: &EventQuery) -> ApiFuture<EventPage> {
+        let mut qs = url::form_urlencoded::Serializer::new(String::new());
+        if let Some(v) = &q.kind {
+            qs.append_pair("kind", v);
+        }
+        if let Some(v) = q.torrent_id {
+            qs.append_pair("torrent_id", &v.to_string());
+        }
+        if let Some(v) = &q.info_hash {
+            qs.append_pair("info_hash", v);
+        }
+        if let Some(v) = &q.severity {
+            qs.append_pair("severity", v);
+        }
+        if let Some(v) = q.before_seq {
+            qs.append_pair("before_seq", &v.to_string());
+        }
+        if let Some(v) = q.since_seq {
+            qs.append_pair("since_seq", &v.to_string());
+        }
+        if let Some(v) = q.limit {
+            qs.append_pair("limit", &v.to_string());
+        }
+        let qs = qs.finish();
+        self.get_json(&if qs.is_empty() {
+            "events".to_owned()
+        } else {
+            format!("events?{qs}")
+        })
+    }
+
+    pub fn get_events_summary(&self, since_seq: Option<u64>) -> ApiFuture<EventSummary> {
+        self.get_json(&match since_seq {
+            Some(s) => format!("events/summary?since_seq={s}"),
+            None => "events/summary".to_owned(),
+        })
+    }
+
+    pub fn reset_event_counters(&self) -> ApiFuture<()> {
+        self.post("events/counters/reset")
+    }
+
+    /// `GET /stats`: session totals and speeds (header stats).
+    pub fn session_stats(&self) -> ApiFuture<SessionStats> {
+        self.get_json("stats")
+    }
+
+    pub fn fs_roots(&self) -> ApiFuture<FsRootsResponse> {
+        self.get_json("fs/roots")
+    }
+
+    pub fn fs_list(&self, path: &str) -> ApiFuture<FsListResponse> {
+        let qs: String = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("path", path)
+            .finish();
+        self.get_json(&format!("fs/list?{qs}"))
+    }
+
+    /// Add a .torrent file that already exists on the server.
+    pub fn add_from_server_path(
+        &self,
+        path: &str,
+        overwrite: bool,
+    ) -> ApiFuture<AddTorrentResponse> {
+        let qs: String = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("overwrite", if overwrite { "true" } else { "false" })
+            .append_pair("from_server_path", path)
+            .finish();
+        self.post_json(&format!("torrents?{qs}"), None)
+    }
+
+    /// `POST /admin/reload`: re-read preferences.json etc. from disk.
+    pub fn admin_reload(&self) -> ApiFuture<()> {
+        self.post("admin/reload")
+    }
+
+    /// `POST /admin/restart`: restart the rqbit process (if supported).
+    pub fn admin_restart(&self) -> ApiFuture<()> {
+        self.post("admin/restart")
     }
 
     /// Removes the torrent and deletes its downloaded files.
