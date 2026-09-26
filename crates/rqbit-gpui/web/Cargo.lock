@@ -3485,11 +3485,15 @@ dependencies = [
  "clap",
  "futures",
  "gpui",
+ "js-sys",
  "log",
  "reqwest",
  "serde",
  "serde_json",
  "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
  "web-time",
 ]
 

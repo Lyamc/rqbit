@@ -40,6 +40,27 @@ reqwest = { workspace = true, features = ["blocking"] }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 web-time = "1"
+# Browser file picker and drag-and-drop for .torrent files (GPUI's web
+# platform has neither: browsers expose File objects, not paths).
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Blob",
+    "CssStyleDeclaration",
+    "DataTransfer",
+    "Document",
+    "DragEvent",
+    "Element",
+    "Event",
+    "EventTarget",
+    "File",
+    "FileList",
+    "HtmlElement",
+    "HtmlInputElement",
+    "Node",
+    "Window",
+] }
 
 [[bin]]
 name = "rqbit-gpui"

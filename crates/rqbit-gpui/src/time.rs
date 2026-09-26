@@ -1,6 +1,6 @@
 //! `std::time::Instant` panics on wasm32-unknown-unknown; use `web-time` there.
 
 #[cfg(not(target_family = "wasm"))]
-pub use std::time::Instant;
+pub use std::time::{Instant, SystemTime, UNIX_EPOCH};
 #[cfg(target_family = "wasm")]
-pub use web_time::Instant;
+pub use web_time::{Instant, SystemTime, UNIX_EPOCH};

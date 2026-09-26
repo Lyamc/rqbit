@@ -5,6 +5,9 @@
 //! their own modules/views here (e.g. `details.rs`, `add_torrent.rs`,
 //! `events.rs`) with any new endpoints going into `crate::api`.
 
+mod add_panel;
+mod files;
+mod prefs_panel;
 mod text_input;
 mod theme;
 mod torrent_table;
@@ -21,6 +24,8 @@ use gpui::{
 
 use crate::api::{ApiClient, ListTorrentsResponse, TorrentListItem, Transport, parse_base_url};
 use crate::format::format_speed;
+use add_panel::{AddPanel, AddPanelEvent};
+use prefs_panel::{PrefsPanel, PrefsPanelEvent};
 use text_input::{TextInput, TextInputEvent};
 
 /// How often the torrent list is refreshed (the web UI polls about as often).
@@ -70,6 +75,8 @@ pub struct RqbitWindow {
     action_error: Option<String>,
     confirm_remove: Option<(usize, SharedString)>,
     poll_task: Option<Task<()>>,
+    add_panel: Option<(Entity<AddPanel>, Subscription)>,
+    prefs_panel: Option<(Entity<PrefsPanel>, Subscription)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -100,9 +107,32 @@ impl RqbitWindow {
             action_error: None,
             confirm_remove: None,
             poll_task: None,
+            add_panel: None,
+            prefs_panel: None,
             _subscriptions: vec![sub],
         };
         this.connect(url, cx);
+        // Browser: files chosen in the file input or dropped on the page.
+        #[cfg(target_family = "wasm")]
+        {
+            let mut rx = files::web_files_channel();
+            cx.spawn(async move |this, cx| {
+                use futures::StreamExt;
+                while let Some(files) = rx.next().await {
+                    if this
+                        .update(cx, |this, cx| {
+                            if let Some(p) = this.open_add(cx) {
+                                p.update(cx, |p, cx| p.add_files(files, "file", cx));
+                            }
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            })
+            .detach();
+        }
         this
     }
 
@@ -207,6 +237,68 @@ impl RqbitWindow {
         cx.notify();
     }
 
+    /// Opens (or returns the open) Add panel.
+    fn open_add(&mut self, cx: &mut Context<Self>) -> Option<Entity<AddPanel>> {
+        if let Some((p, _)) = &self.add_panel {
+            return Some(p.clone());
+        }
+        let client = self.client.clone()?;
+        self.prefs_panel = None;
+        let panel = cx.new(|cx| AddPanel::new(client, cx));
+        let sub = cx.subscribe(&panel, |this, _, ev: &AddPanelEvent, cx| match ev {
+            AddPanelEvent::Close => {
+                this.add_panel = None;
+                cx.notify();
+            }
+            AddPanelEvent::Added => this.refresh_now(cx),
+        });
+        self.add_panel = Some((panel.clone(), sub));
+        cx.notify();
+        Some(panel)
+    }
+
+    fn open_prefs(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        if self
+            .add_panel
+            .as_ref()
+            .is_some_and(|(p, _)| p.read(cx).is_running())
+        {
+            return;
+        }
+        self.add_panel = None;
+        let panel = cx.new(|cx| PrefsPanel::new(client, cx));
+        let sub = cx.subscribe(&panel, |this, _, ev: &PrefsPanelEvent, cx| match ev {
+            PrefsPanelEvent::Close => {
+                this.prefs_panel = None;
+                cx.notify();
+            }
+        });
+        self.prefs_panel = Some((panel, sub));
+        cx.notify();
+    }
+
+    /// Refresh the torrent list right away (after adds / removes).
+    fn refresh_now(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let generation = self.generation;
+        cx.spawn(async move |this, cx| {
+            let list = cx.background_executor().spawn(client.list_torrents()).await;
+            this.update(cx, |this, cx| {
+                if this.generation == generation {
+                    this.apply_list(list);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn render_connection_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let (dot, text): (gpui::Rgba, String) = match &self.conn {
             ConnState::Invalid(_) => (theme::error(), "Invalid URL".into()),
@@ -254,6 +346,23 @@ impl RqbitWindow {
                 )),
             )
             .child(div().flex_1())
+            .child(
+                widgets::primary_button("open-add", "Add", self.client.is_some()).when(
+                    self.client.is_some(),
+                    |b| {
+                        b.on_click(cx.listener(|this, _, _, cx| {
+                            this.open_add(cx);
+                        }))
+                    },
+                ),
+            )
+            .child(
+                widgets::button("open-prefs", "Preferences", self.client.is_some())
+                    .when(self.client.is_some(), |b| {
+                        b.on_click(cx.listener(|this, _, _, cx| this.open_prefs(cx)))
+                    }),
+            )
+            .child(div().w(px(8.)))
             .child(div().size(px(8.)).rounded_full().bg(dot))
             .child(div().text_sm().text_color(theme::text_muted()).child(text))
     }
@@ -417,7 +526,8 @@ impl Render for RqbitWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let count = self.torrents.len();
         let connected_empty = matches!(self.conn, ConnState::Connected) && count == 0;
-        div()
+        let root = div()
+            .id("root")
             .relative()
             .flex()
             .flex_col()
@@ -462,6 +572,30 @@ impl Render for RqbitWindow {
                     ),
             )
             .child(self.render_footer())
-            .children(self.render_confirm(cx))
+            .when_some(self.add_panel.as_ref().map(|(p, _)| p.clone()), |d, p| {
+                d.child(widgets::modal("add-overlay", 820., p))
+            })
+            .when_some(self.prefs_panel.as_ref().map(|(p, _)| p.clone()), |d, p| {
+                d.child(widgets::modal("prefs-overlay", 760., p))
+            })
+            .children(self.render_confirm(cx));
+        #[cfg(not(target_family = "wasm"))]
+        let root = root.on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _, cx| {
+            let paths = paths.paths().to_vec();
+            let Some(panel) = this.open_add(cx) else {
+                return;
+            };
+            cx.spawn(async move |_, cx| {
+                let read = cx
+                    .background_executor()
+                    .spawn(async move { files::read_paths(&paths) })
+                    .await;
+                panel
+                    .update(cx, |p, cx| p.add_read_results(read, "drop", cx))
+                    .ok();
+            })
+            .detach();
+        }));
+        root
     }
 }

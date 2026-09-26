@@ -5,9 +5,8 @@ use std::time::Duration;
 
 use anyhow::Context;
 use futures::FutureExt;
-use url::Url;
 
-use super::{ApiFuture, Method, RawResponse};
+use super::{ApiFuture, Method, RawResponse, Request};
 
 #[derive(Clone)]
 pub struct Transport {
@@ -26,22 +25,25 @@ impl Transport {
         Ok(Self { http })
     }
 
-    pub fn send(
-        &self,
-        method: Method,
-        url: Url,
-        basic_auth: Option<(String, String)>,
-    ) -> ApiFuture<RawResponse> {
+    pub fn send(&self, r: Request) -> ApiFuture<RawResponse> {
         let http = self.http.clone();
         async move {
-            let req = match method {
-                Method::Get => http.get(url),
-                Method::Post => http.post(url),
+            let mut req = match r.method {
+                Method::Get => http.get(r.url),
+                Method::Post => http.post(r.url),
             };
-            let req = match &basic_auth {
-                Some((u, p)) => req.basic_auth(u, Some(p)),
-                None => req,
-            };
+            if let Some((u, p)) = &r.basic_auth {
+                req = req.basic_auth(u, Some(p));
+            }
+            if let Some(ct) = r.content_type {
+                req = req.header(reqwest::header::CONTENT_TYPE, ct);
+            }
+            if let Some(body) = r.body {
+                req = req.body(body);
+            }
+            if let Some(t) = r.timeout {
+                req = req.timeout(t);
+            }
             let resp = req.send().map_err(describe_reqwest_error)?;
             let status = resp.status().as_u16();
             let body = resp.bytes().map_err(describe_reqwest_error)?.to_vec();

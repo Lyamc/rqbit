@@ -5,12 +5,10 @@
 
 use std::sync::Arc;
 
+use super::{ApiFuture, Method, RawResponse, Request};
 use anyhow::Context;
 use futures::{AsyncReadExt, FutureExt};
 use gpui::http_client::{AsyncBody, HttpClient, http};
-use url::Url;
-
-use super::{ApiFuture, Method, RawResponse};
 
 #[derive(Clone)]
 pub struct Transport {
@@ -22,29 +20,29 @@ impl Transport {
         Self { http }
     }
 
-    pub fn send(
-        &self,
-        method: Method,
-        url: Url,
-        basic_auth: Option<(String, String)>,
-    ) -> ApiFuture<RawResponse> {
+    pub fn send(&self, r: Request) -> ApiFuture<RawResponse> {
         let http = self.http.clone();
         async move {
             let mut builder = http::Request::builder()
-                .method(match method {
+                .method(match r.method {
                     Method::Get => http::Method::GET,
                     Method::Post => http::Method::POST,
                 })
-                .uri(url.as_str());
-            if let Some((u, p)) = basic_auth {
+                .uri(r.url.as_str());
+            if let Some((u, p)) = r.basic_auth {
                 builder = builder.header(
                     "Authorization",
                     format!("Basic {}", base64(format!("{u}:{p}").as_bytes())),
                 );
             }
-            let req = builder
-                .body(AsyncBody::empty())
-                .context("error building request")?;
+            if let Some(ct) = r.content_type {
+                builder = builder.header("Content-Type", ct);
+            }
+            let body = match r.body {
+                Some(b) => AsyncBody::from(b),
+                None => AsyncBody::empty(),
+            };
+            let req = builder.body(body).context("error building request")?;
             let resp = http
                 .send(req)
                 .await

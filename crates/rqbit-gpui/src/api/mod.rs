@@ -21,6 +21,8 @@ pub use native::Transport;
 #[cfg(target_family = "wasm")]
 pub use web::Transport;
 
+use std::time::Duration;
+
 use anyhow::{Context, bail};
 use futures::FutureExt;
 use futures::future::BoxFuture;
@@ -34,6 +36,18 @@ pub type ApiFuture<T> = BoxFuture<'static, anyhow::Result<T>>;
 pub enum Method {
     Get,
     Post,
+}
+
+/// One HTTP request, as handed to a transport.
+pub struct Request {
+    pub method: Method,
+    pub url: Url,
+    pub basic_auth: Option<(String, String)>,
+    pub body: Option<Vec<u8>>,
+    pub content_type: Option<&'static str>,
+    /// Overall timeout (native only; the browser's fetch has none, callers
+    /// that need one run their own timer, as the web UI does).
+    pub timeout: Option<Duration>,
 }
 
 /// What a transport hands back: status code and body.
@@ -111,11 +125,31 @@ impl ApiClient {
     }
 
     fn request(&self, method: Method, path: &str) -> ApiFuture<Vec<u8>> {
-        let url = match self.url(path) {
-            Ok(u) => u,
-            Err(e) => return futures::future::ready(Err(e)).boxed(),
+        match self.url(path) {
+            Ok(url) => self.send(method, url, None, None),
+            Err(e) => futures::future::ready(Err(e)).boxed(),
+        }
+    }
+
+    fn send(
+        &self,
+        method: Method,
+        url: Url,
+        body: Option<(Vec<u8>, &'static str)>,
+        timeout: Option<Duration>,
+    ) -> ApiFuture<Vec<u8>> {
+        let (body, content_type) = match body {
+            Some((b, ct)) => (Some(b), Some(ct)),
+            None => (None, None),
         };
-        let fut = self.transport.send(method, url, self.basic_auth.clone());
+        let fut = self.transport.send(Request {
+            method,
+            url,
+            basic_auth: self.basic_auth.clone(),
+            body,
+            content_type,
+            timeout,
+        });
         async move {
             let resp = fut.await?;
             check_status(resp.status, &resp.body)?;
@@ -124,22 +158,40 @@ impl ApiClient {
         .boxed()
     }
 
+    fn post_json<T: serde::de::DeserializeOwned + Send + 'static>(
+        &self,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> ApiFuture<T> {
+        let url = match self.url(path) {
+            Ok(u) => u,
+            Err(e) => return futures::future::ready(Err(e)).boxed(),
+        };
+        let body = body.map(|b| (b.to_string().into_bytes(), "application/json"));
+        let fut = self.send(Method::Post, url, body, None);
+        let path = path.to_owned();
+        async move { parse_json(&path, &fut.await?) }.boxed()
+    }
+
+    /// POST a JSON body, ignoring the response body.
+    fn post_json_unit(&self, path: &str, body: &serde_json::Value) -> ApiFuture<()> {
+        let url = match self.url(path) {
+            Ok(u) => u,
+            Err(e) => return futures::future::ready(Err(e)).boxed(),
+        };
+        let body = (body.to_string().into_bytes(), "application/json");
+        self.send(Method::Post, url, Some(body), None)
+            .map(|r| r.map(|_| ()))
+            .boxed()
+    }
+
     fn get_json<T: serde::de::DeserializeOwned + Send + 'static>(
         &self,
         path: &str,
     ) -> ApiFuture<T> {
         let fut = self.request(Method::Get, path);
         let path = path.to_owned();
-        async move {
-            let body = fut.await?;
-            serde_json::from_slice(&body).with_context(|| {
-                format!(
-                    "unexpected response from {path} (is this an rqbit server?): {}",
-                    String::from_utf8_lossy(&body[..body.len().min(200)])
-                )
-            })
-        }
-        .boxed()
+        async move { parse_json(&path, &fut.await?) }.boxed()
     }
 
     fn post(&self, path: &str) -> ApiFuture<()> {
@@ -166,6 +218,121 @@ impl ApiClient {
     pub fn forget(&self, id: usize) -> ApiFuture<()> {
         self.post(&format!("torrents/{id}/forget"))
     }
+
+    /// `POST /torrents`: add a magnet / http(s) URL or .torrent file bytes,
+    /// with the same query parameters as the web UI (overwrite, output_folder,
+    /// magnet_timeout_secs, add_job_id, is_url).
+    pub fn add_torrent(
+        &self,
+        source: AddSource,
+        opts: &AddTorrentOpts,
+    ) -> ApiFuture<AddTorrentResponse> {
+        let mut url = match self.url("torrents") {
+            Ok(u) => u,
+            Err(e) => return futures::future::ready(Err(e)).boxed(),
+        };
+        {
+            let mut q = url.query_pairs_mut();
+            q.append_pair("overwrite", if opts.overwrite { "true" } else { "false" });
+            if let Some(f) = opts.output_folder.as_deref().filter(|f| !f.is_empty()) {
+                q.append_pair("output_folder", f);
+            }
+            if let Some(t) = opts.magnet_timeout_secs {
+                q.append_pair("magnet_timeout_secs", &t.to_string());
+            }
+            if let Some(id) = &opts.add_job_id {
+                q.append_pair("add_job_id", id);
+            }
+            if matches!(source, AddSource::Url(_)) {
+                q.append_pair("is_url", "true");
+            }
+        }
+        let body = match source {
+            AddSource::Url(u) => (u.into_bytes(), "text/plain"),
+            AddSource::TorrentFile(b) => (b, "application/x-bittorrent"),
+        };
+        let fut = self.send(Method::Post, url, Some(body), opts.timeout);
+        async move { parse_json("torrents", &fut.await?) }.boxed()
+    }
+
+    /// `GET /add_jobs/{id}`: what the server is doing with an in-flight add.
+    pub fn get_add_job(&self, job_id: &str) -> ApiFuture<AddJobStatus> {
+        self.get_json(&format!("add_jobs/{}", encode_path_segment(job_id)))
+    }
+
+    /// `POST /add_jobs/{id}/cancel`.
+    pub fn cancel_add_job(&self, job_id: &str) -> ApiFuture<AddJobCancelOutcome> {
+        self.post_json(
+            &format!("add_jobs/{}/cancel", encode_path_segment(job_id)),
+            None,
+        )
+    }
+
+    /// `GET /torrents/limits`.
+    pub fn get_limits(&self) -> ApiFuture<LimitsConfig> {
+        self.get_json("torrents/limits")
+    }
+
+    /// `POST /torrents/limits`.
+    pub fn set_limits(&self, limits: &LimitsConfig) -> ApiFuture<()> {
+        let v = serde_json::to_value(limits).unwrap_or_default();
+        self.post_json_unit("torrents/limits", &v)
+    }
+
+    /// `GET /torrents/preferences`, kept as raw JSON so saving round-trips
+    /// fields this client doesn't know about.
+    pub fn get_preferences(&self) -> ApiFuture<serde_json::Map<String, serde_json::Value>> {
+        self.get_json("torrents/preferences")
+    }
+
+    /// `POST /torrents/preferences` (the full object, like the web UI).
+    pub fn set_preferences(
+        &self,
+        prefs: &serde_json::Map<String, serde_json::Value>,
+    ) -> ApiFuture<()> {
+        let v = serde_json::Value::Object(prefs.clone());
+        self.post_json_unit("torrents/preferences", &v)
+    }
+
+    /// `GET /admin`.
+    pub fn get_admin_status(&self) -> ApiFuture<AdminStatus> {
+        self.get_json("admin")
+    }
+
+    /// `POST /admin/config` with a patch (only the changed keys).
+    pub fn update_admin_config(&self, patch: &serde_json::Value) -> ApiFuture<()> {
+        self.post_json_unit("admin/config", patch)
+    }
+}
+
+/// What to add.
+pub enum AddSource {
+    /// Magnet link or http(s) URL of a .torrent.
+    Url(String),
+    /// Contents of a .torrent file.
+    TorrentFile(Vec<u8>),
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AddTorrentOpts {
+    pub overwrite: bool,
+    pub output_folder: Option<String>,
+    pub magnet_timeout_secs: Option<u64>,
+    pub add_job_id: Option<String>,
+    pub timeout: Option<Duration>,
+}
+
+fn encode_path_segment(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+}
+
+fn parse_json<T: serde::de::DeserializeOwned>(path: &str, body: &[u8]) -> anyhow::Result<T> {
+    serde_json::from_slice(body).with_context(|| {
+        format!(
+            "unexpected response from {path} (is this an rqbit server?): {}",
+            String::from_utf8_lossy(&body[..body.len().min(200)])
+        )
+    })
 }
 
 fn check_status(status: u16, body: &[u8]) -> anyhow::Result<()> {

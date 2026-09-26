@@ -6,7 +6,7 @@
 //! have to depend on `librqbit` (which would drag the whole server into the
 //! client build).
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -117,6 +117,74 @@ pub struct ApiErrorBody {
     pub error_kind: Option<String>,
 }
 
+/// `POST /torrents` response (the parts the GUI uses).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct AddTorrentResponse {
+    pub id: Option<usize>,
+    pub details: AddedTorrentDetails,
+    pub output_folder: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct AddedTorrentDetails {
+    pub name: Option<String>,
+    pub info_hash: String,
+}
+
+/// `GET /add_jobs/{id}`: what the server is doing with an in-flight add.
+/// `stage` is one of starting, fetching_torrent, resolving_metadata,
+/// adopting, waiting_for_server, adding, added, already_managed, list_only,
+/// failed, cancelled.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct AddJobStatus {
+    pub job_id: Option<String>,
+    pub stage: String,
+    pub torrent_id: Option<usize>,
+    pub step: Option<String>,
+    pub busy: Option<bool>,
+    pub error: Option<String>,
+    pub reason: Option<String>,
+    pub stage_secs: f64,
+    pub elapsed_secs: f64,
+}
+
+/// `POST /add_jobs/{id}/cancel`: `result` is cancelled, already_added or
+/// finished.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct AddJobCancelOutcome {
+    pub result: String,
+    pub torrent_id: Option<usize>,
+    pub stage: Option<String>,
+}
+
+/// `GET/POST /torrents/limits` (bytes per second; None = unlimited).
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+pub struct LimitsConfig {
+    #[serde(default)]
+    pub upload_bps: Option<u64>,
+    #[serde(default)]
+    pub download_bps: Option<u64>,
+}
+
+/// `GET /admin`. `persisted` (admin.json) is kept as raw JSON.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct AdminStatus {
+    pub version: String,
+    pub preferences_path: String,
+    pub admin_path: String,
+    pub effective_http_listen_addr: Option<String>,
+    pub env_http_listen_addr: Option<String>,
+    pub env_basic_auth_set: bool,
+    pub persisted: serde_json::Map<String, serde_json::Value>,
+    pub restart_supported: bool,
+    pub notes: Vec<String>,
+}
+
 impl TorrentListItem {
     pub fn display_name(&self) -> String {
         self.name
@@ -219,6 +287,34 @@ mod tests {
         assert!((s.progress_fraction() - 0.5).abs() < 1e-9);
         assert!((s.session_ratio().unwrap() - 0.5).abs() < 1e-9);
         assert!(s.can_pause() && !s.can_start());
+    }
+
+    #[test]
+    fn parses_add_job_types() {
+        let st: AddJobStatus = serde_json::from_str(
+            r#"{"job_id":"add-1","stage":"adding","torrent_id":4,"step":"saving","busy":true,"stage_secs":1.5,"elapsed_secs":3.0}"#,
+        )
+        .unwrap();
+        assert_eq!(st.stage, "adding");
+        assert_eq!(st.torrent_id, Some(4));
+        assert_eq!(st.busy, Some(true));
+        let c: AddJobCancelOutcome =
+            serde_json::from_str(r#"{"result":"already_added","torrent_id":7}"#).unwrap();
+        assert_eq!(
+            (c.result.as_str(), c.torrent_id),
+            ("already_added", Some(7))
+        );
+        let c: AddJobCancelOutcome =
+            serde_json::from_str(r#"{"result":"finished","stage":"failed","error":"x"}"#).unwrap();
+        assert_eq!(c.stage.as_deref(), Some("failed"));
+        let r: AddTorrentResponse = serde_json::from_str(
+            r#"{"id":3,"details":{"name":"n","info_hash":"ab","files":[],"output_folder":"/o"},"output_folder":"/o","seen_peers":null}"#,
+        )
+        .unwrap();
+        assert_eq!(r.id, Some(3));
+        assert_eq!(r.details.name.as_deref(), Some("n"));
+        let l: LimitsConfig = serde_json::from_str(r#"{"upload_bps":null}"#).unwrap();
+        assert_eq!(l, LimitsConfig::default());
     }
 
     #[test]
