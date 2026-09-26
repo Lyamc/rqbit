@@ -26,6 +26,9 @@ disable-upload = ["librqbit/disable-upload"]
 _disable_disk_write_net_benchmark = [
     "librqbit/_disable_disk_write_net_benchmark",
 ]
+# Native desktop GUI (`rqbit gui`), a client of the HTTP API built on GPUI.
+# Off by default; enabling it does not change anything else in the binary.
+gpui = ["dep:rqbit-gpui"]
 
 [dependencies]
 librqbit = { workspace = true, features = [
@@ -61,6 +64,7 @@ tokio-util.workspace = true
 gethostname.workspace = true
 url.workspace = true
 librqbit-dualstack-sockets.workspace = true
+rqbit-gpui = { path = "../rqbit-gpui", optional = true }
 
 [dev-dependencies]
 futures.workspace = true

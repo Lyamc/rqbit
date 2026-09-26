@@ -434,6 +434,9 @@ enum SubCommand {
     Download(DownloadOpts),
     /// Shell completions. eval "$(rqbit completions bash)"
     Completions(CompletionsOpts),
+    /// Native desktop GUI (GPUI). A client of the HTTP API of a local or remote rqbit server.
+    #[cfg(feature = "gpui")]
+    Gui(rqbit_gpui::GuiOpts),
 }
 
 /// Return the API listener socket passed to rqbit by systemd, if any.
@@ -496,6 +499,13 @@ fn main() -> anyhow::Result<()> {
             &mut io::stdout(),
         );
         return Ok(());
+    }
+
+    // The GUI owns the main thread (GPUI event loop) and is only an HTTP
+    // client, so it runs before (and instead of) the tokio runtime below.
+    #[cfg(feature = "gpui")]
+    if let SubCommand::Gui(gui_opts) = &opts.subcommand {
+        return rqbit_gpui::run(gui_opts.clone());
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -1020,6 +1030,8 @@ async fn async_main(mut opts: Opts, cancel: CancellationToken) -> anyhow::Result
             http_api_fut.await
         }
         SubCommand::Completions(_) => unreachable!(),
+        #[cfg(feature = "gpui")]
+        SubCommand::Gui(_) => unreachable!(),
     }
 }
 

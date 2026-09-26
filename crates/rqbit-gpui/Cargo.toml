@@ -1,0 +1,40 @@
+[package]
+name = "rqbit-gpui"
+version.workspace = true
+edition = "2024"
+description = "Native desktop client for rqbit built on GPUI. Talks to an rqbit server over its HTTP API."
+license = "Apache-2.0"
+repository = "https://github.com/ikatson/rqbit"
+publish = false
+
+# This crate is only compiled when the `gpui` feature of the `rqbit` crate is
+# enabled (or when built directly with `cargo build -p rqbit-gpui`). It is
+# deliberately NOT in the workspace `default-members`, so a plain
+# `cargo build` / `cargo test` in the workspace root never pulls in GPUI.
+
+[features]
+default = []
+# TLS for talking to https:// servers from the standalone `rqbit-gpui` binary.
+# When built as part of `rqbit --features gpui` the TLS backend selected for
+# librqbit (default-tls / rust-tls) is shared automatically.
+rustls = ["reqwest/rustls"]
+native-tls = ["reqwest/native-tls"]
+# macOS only: compile GPUI's Metal shaders at runtime instead of at build time
+# (avoids needing the full Xcode `metal` toolchain). Windows release builds
+# compile HLSL with fxc.exe from the Windows SDK at build time; debug builds
+# compile it at runtime.
+runtime-shaders = ["gpui/runtime_shaders"]
+
+[dependencies]
+gpui = "0.2.2"
+anyhow.workspace = true
+clap = { workspace = true, features = ["derive", "env"] }
+reqwest = { workspace = true, features = ["blocking"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+url.workspace = true
+log = "0.4"
+
+[[bin]]
+name = "rqbit-gpui"
+path = "src/main.rs"
