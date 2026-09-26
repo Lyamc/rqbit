@@ -98,6 +98,64 @@ fn parse_answer(body: &str, want_v6: bool) -> Option<IpAddr> {
     }
 }
 
+/// Resolves names on a dedicated OS thread instead of tokio's blocking pool.
+///
+/// The default resolver runs `getaddrinfo` via `spawn_blocking`; on a busy
+/// server (disk I/O through `block_in_place`, a small
+/// `RQBIT_RUNTIME_MAX_BLOCKING_THREADS`) that pool can be saturated for a long
+/// time and every lookup then times out. Also keeps only addresses of the
+/// family being checked.
+struct ThreadResolver {
+    v6: bool,
+}
+
+impl reqwest::dns::Resolve for ThreadResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_owned();
+        let v6 = self.v6;
+        Box::pin(async move {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            std::thread::Builder::new()
+                .name("rqbit-public-ip-dns".to_owned())
+                .spawn(move || {
+                    let r = std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), 0))
+                        .map(|it| it.filter(|a| a.is_ipv6() == v6).collect::<Vec<_>>());
+                    let _ = tx.send(r);
+                })?;
+            let addrs = rx.await.map_err(|_| "resolver thread died")??;
+            if addrs.is_empty() {
+                return Err(format!("no IPv{} address", if v6 { 6 } else { 4 }).into());
+            }
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// Short error text for a failed provider request.
+fn describe_error(e: &reqwest::Error) -> String {
+    if let Some(s) = e.status() {
+        return format!("HTTP {s}");
+    }
+    let kind = if e.is_timeout() {
+        "timed out"
+    } else if e.is_connect() {
+        "can't connect"
+    } else {
+        return e.to_string();
+    };
+    // Innermost cause (e.g. "no IPv6 address", "Network is unreachable").
+    let mut cause: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(e);
+    let mut last = None;
+    while let Some(c) = cause {
+        last = Some(c);
+        cause = c.source();
+    }
+    match last {
+        Some(c) if !c.to_string().is_empty() && c.to_string() != kind => format!("{kind} ({c})"),
+        _ => kind.to_owned(),
+    }
+}
+
 async fn check_family(urls: &[String], v6: bool) -> FamilyResult {
     let local: IpAddr = if v6 {
         Ipv6Addr::UNSPECIFIED.into()
@@ -108,6 +166,7 @@ async fn check_family(urls: &[String], v6: bool) -> FamilyResult {
     let client = match reqwest::Client::builder()
         .local_address(local)
         .no_proxy()
+        .dns_resolver(ThreadResolver { v6 })
         .timeout(REQUEST_TIMEOUT)
         .connect_timeout(Duration::from_secs(4))
         .user_agent(concat!("rqbit/", env!("CARGO_PKG_VERSION")))
@@ -139,19 +198,7 @@ async fn check_family(urls: &[String], v6: bool) -> FamilyResult {
                 }
                 None => errors.push(format!("{url}: unexpected answer")),
             },
-            Err(e) => {
-                let mut msg = if e.is_timeout() {
-                    "timed out".to_owned()
-                } else if e.is_connect() {
-                    "can't connect".to_owned()
-                } else {
-                    e.to_string()
-                };
-                if let Some(s) = e.status() {
-                    msg = format!("HTTP {s}");
-                }
-                errors.push(format!("{url}: {msg}"));
-            }
+            Err(e) => errors.push(format!("{url}: {}", describe_error(&e))),
         }
     }
     FamilyResult {
