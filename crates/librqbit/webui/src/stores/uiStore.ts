@@ -4,6 +4,18 @@ import {
   SortDirection,
   StatusFilter,
 } from "../helper/torrentFilters";
+import {
+  Nav,
+  SelectionState,
+  clearSelected,
+  clickSelect,
+  navigate,
+  pruneSelection,
+  rangeSelect,
+  selectAllIds,
+  toggleFocused,
+  toggleSelect,
+} from "../helper/selection";
 
 const LARGE_SCREEN_BREAKPOINT = 1024;
 
@@ -23,19 +35,44 @@ export interface UIStore {
   setStatusFilter: (filter: StatusFilter) => void;
 
   selectedTorrentIds: Set<number>;
+  /** Range anchor. */
   lastSelectedId: number | null;
+  /** Keyboard cursor (focus ring). */
+  focusedTorrentId: number | null;
   selectTorrent: (id: number) => void;
   toggleSelection: (id: number) => void;
-  selectRange: (id: number, orderedIds: number[]) => void;
+  /** Shift+click; `additive` = ctrl+shift+click. */
+  selectRange: (id: number, orderedIds: number[], additive?: boolean) => void;
   deselectTorrent: (id: number) => void;
   clearSelection: () => void;
   selectAll: (ids: number[]) => void;
-  selectRelative: (direction: "up" | "down", orderedIds: number[]) => void;
+  /** Arrows/Home/End; returns the new focus index in `orderedIds` (-1: none). */
+  navigateSelection: (
+    nav: Nav,
+    extend: boolean,
+    orderedIds: number[],
+  ) => number;
+  /** Space. */
+  toggleFocusedSelection: (orderedIds: number[]) => void;
+  /** Drop ids that no longer exist (after polling). */
+  pruneSelection: (existingIds: Set<number>) => void;
 
   detailsModalTorrentId: number | null;
   openDetailsModal: (id: number) => void;
   closeDetailsModal: () => void;
 }
+
+const toSel = (s: UIStore): SelectionState => ({
+  selected: s.selectedTorrentIds,
+  anchor: s.lastSelectedId,
+  focus: s.focusedTorrentId,
+});
+
+const fromSel = (s: SelectionState) => ({
+  selectedTorrentIds: s.selected,
+  lastSelectedId: s.anchor,
+  focusedTorrentId: s.focus,
+});
 
 export const useUIStore = create<UIStore>((set, get) => ({
   viewMode: getDefaultViewMode(),
@@ -59,57 +96,14 @@ export const useUIStore = create<UIStore>((set, get) => ({
 
   selectedTorrentIds: new Set<number>(),
   lastSelectedId: null,
+  focusedTorrentId: null,
 
-  selectTorrent: (id) => {
-    set({ selectedTorrentIds: new Set([id]), lastSelectedId: id });
-  },
+  selectTorrent: (id) => set(fromSel(clickSelect(toSel(get()), id))),
 
-  toggleSelection: (id) => {
-    const current = get().selectedTorrentIds;
-    const next = new Set(current);
-    if (next.has(id)) {
-      next.delete(id);
-    } else {
-      next.add(id);
-    }
-    set({ selectedTorrentIds: next, lastSelectedId: id });
-  },
+  toggleSelection: (id) => set(fromSel(toggleSelect(toSel(get()), id))),
 
-  selectRange: (id, orderedIds) => {
-    const { lastSelectedId, selectedTorrentIds } = get();
-    if (lastSelectedId === null) {
-      // No anchor, just select this one
-      set({ selectedTorrentIds: new Set([id]), lastSelectedId: id });
-      return;
-    }
-
-    if (selectedTorrentIds.has(id)) {
-      let next = new Set(selectedTorrentIds);
-      next.delete(id);
-      set({ selectedTorrentIds: next });
-      return;
-    }
-
-    const anchorIdx = orderedIds.indexOf(lastSelectedId);
-    const targetIdx = orderedIds.indexOf(id);
-
-    if (anchorIdx === -1 || targetIdx === -1) {
-      // Fallback: just select the target
-      set({ selectedTorrentIds: new Set([id]), lastSelectedId: id });
-      return;
-    }
-
-    const startIdx = Math.min(anchorIdx, targetIdx);
-    const endIdx = Math.max(anchorIdx, targetIdx);
-    const rangeIds = orderedIds.slice(startIdx, endIdx + 1);
-
-    // Extend selection with range
-    const next = new Set(selectedTorrentIds);
-    for (const rangeId of rangeIds) {
-      next.add(rangeId);
-    }
-    set({ selectedTorrentIds: next });
-  },
+  selectRange: (id, orderedIds, additive = false) =>
+    set(fromSel(rangeSelect(toSel(get()), id, orderedIds, additive))),
 
   deselectTorrent: (id) => {
     const current = get().selectedTorrentIds;
@@ -120,58 +114,23 @@ export const useUIStore = create<UIStore>((set, get) => ({
     }
   },
 
-  clearSelection: () => {
-    set({ selectedTorrentIds: new Set(), lastSelectedId: null });
+  clearSelection: () => set(fromSel(clearSelected(toSel(get())))),
+
+  selectAll: (ids) => set(fromSel(selectAllIds(toSel(get()), ids))),
+
+  navigateSelection: (nav, extend, orderedIds) => {
+    const { state, index } = navigate(toSel(get()), nav, extend, orderedIds);
+    set(fromSel(state));
+    return index;
   },
 
-  selectAll: (ids) => {
-    set({ selectedTorrentIds: new Set(ids) });
-  },
+  toggleFocusedSelection: (orderedIds) =>
+    set(fromSel(toggleFocused(toSel(get()), orderedIds))),
 
-  selectRelative: (direction, orderedIds) => {
-    const { selectedTorrentIds, lastSelectedId } = get();
-    if (orderedIds.length === 0) return;
-
-    let currentIdx: number;
-
-    if (selectedTorrentIds.size === 0) {
-      // Nothing selected, select first or last based on direction
-      const newId =
-        direction === "down"
-          ? orderedIds[0]
-          : orderedIds[orderedIds.length - 1];
-      set({ selectedTorrentIds: new Set([newId]), lastSelectedId: newId });
-      return;
-    }
-
-    if (selectedTorrentIds.size === 1) {
-      // Single selection, move from that
-      const currentId = Array.from(selectedTorrentIds)[0];
-      currentIdx = orderedIds.indexOf(currentId);
-    } else {
-      // Multiple selected, use lastSelectedId if valid, otherwise first selected
-      if (lastSelectedId !== null && orderedIds.includes(lastSelectedId)) {
-        currentIdx = orderedIds.indexOf(lastSelectedId);
-      } else {
-        // Find first selected in order
-        currentIdx = orderedIds.findIndex((id) => selectedTorrentIds.has(id));
-      }
-    }
-
-    if (currentIdx === -1) {
-      // Fallback: select first
-      const newId = orderedIds[0];
-      set({ selectedTorrentIds: new Set([newId]), lastSelectedId: newId });
-      return;
-    }
-
-    const newIdx =
-      direction === "down"
-        ? Math.min(currentIdx + 1, orderedIds.length - 1)
-        : Math.max(currentIdx - 1, 0);
-
-    const newId = orderedIds[newIdx];
-    set({ selectedTorrentIds: new Set([newId]), lastSelectedId: newId });
+  pruneSelection: (existingIds) => {
+    const cur = toSel(get());
+    const next = pruneSelection(cur, (id) => existingIds.has(id));
+    if (next !== cur) set(fromSel(next));
   },
 
   detailsModalTorrentId: null,
@@ -180,6 +139,7 @@ export const useUIStore = create<UIStore>((set, get) => ({
       detailsModalTorrentId: id,
       selectedTorrentIds: new Set([id]),
       lastSelectedId: id,
+      focusedTorrentId: id,
     }),
   closeDetailsModal: () => set({ detailsModalTorrentId: null }),
 }));

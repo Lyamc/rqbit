@@ -2,7 +2,7 @@
 //! dialog (`ConfigModal.tsx`): `GET/POST /torrents/limits`,
 //! `GET/POST /torrents/preferences`, `GET /admin` + `POST /admin/config`.
 //! Same tabs: Speed, Connection, BitTorrent, Downloads, Organize,
-//! Completion, Web UI / Admin.
+//! Completion, Interface, Web UI / Admin.
 //!
 //! Saving only sends what changed: limits if edited, the full preferences
 //! object (as read from the server, unknown fields preserved) if any
@@ -31,16 +31,18 @@ enum Tab {
     Downloads,
     Organize,
     Completion,
+    Interface,
     Admin,
 }
 
-const TABS: [(Tab, &str); 7] = [
+const TABS: [(Tab, &str); 8] = [
     (Tab::Speed, "Speed"),
     (Tab::Connection, "Connection"),
     (Tab::BitTorrent, "BitTorrent"),
     (Tab::Downloads, "Downloads"),
     (Tab::Organize, "Organize"),
     (Tab::Completion, "Completion"),
+    (Tab::Interface, "Interface"),
     (Tab::Admin, "Web UI / Admin"),
 ];
 
@@ -88,6 +90,21 @@ struct BoolField {
     initial: bool,
 }
 
+/// One of a few string values (segmented buttons), stored in preferences.
+struct ChoiceField {
+    key: &'static str,
+    label: &'static str,
+    help: &'static str,
+    options: &'static [(&'static str, &'static str)],
+    value: &'static str,
+    initial: &'static str,
+}
+
+const REMOVE_ACTIONS: &[(&str, &str)] = &[
+    ("keep_files", "Remove torrent only (keep files)"),
+    ("delete_files", "Remove torrent and delete files"),
+];
+
 struct TriField {
     key: &'static str,
     clear_key: &'static str,
@@ -105,6 +122,7 @@ enum Row {
     Input(usize),
     Bool(usize),
     Tri(usize),
+    Choice(usize),
     Info(&'static str, String),
     /// Basic auth editor (admin.json).
     Auth,
@@ -118,6 +136,7 @@ struct Loaded {
     inputs: Vec<InputField>,
     bools: Vec<BoolField>,
     tris: Vec<TriField>,
+    choices: Vec<ChoiceField>,
     rows: Vec<(Tab, Row)>,
     auth: AuthFields,
     restart_supported: bool,
@@ -373,6 +392,18 @@ fn plan_save(
         prefs: prefs_changed.then_some(new_prefs),
         admin: (!admin.is_empty()).then_some(admin),
     })
+}
+
+/// Adds changed choice fields to a save plan (the full preferences object,
+/// unknown fields preserved, like `plan_save`).
+fn apply_choices(plan: &mut SavePlan, prefs: &Map<String, Value>, choices: &[(&str, &str, &str)]) {
+    for (key, value, initial) in choices {
+        if value != initial {
+            plan.prefs
+                .get_or_insert_with(|| prefs.clone())
+                .insert((*key).to_owned(), json!(value));
+        }
+    }
 }
 
 impl PrefsPanel {
@@ -1119,12 +1150,42 @@ impl PrefsPanel {
             password_set,
         };
 
+        // Interface (server-persisted UI preferences shared with the web UI).
+        h(&mut rows, Interface, "Removing torrents");
+        let confirm = prefs
+            .get("confirm_remove")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        rows.push((Interface, Row::Bool(bools.len())));
+        bools.push(BoolField {
+            key: "confirm_remove",
+            label: "Confirm before removing torrents",
+            help: "Show the confirmation dialog for Delete (toolbar button and Delete key). When off, torrents are removed right away and their files are kept. Also used by the web UI.",
+            value: confirm,
+            initial: confirm,
+        });
+        let action = match prefs.get("default_remove_action").and_then(Value::as_str) {
+            Some("delete_files") => "delete_files",
+            _ => "keep_files",
+        };
+        let mut choices = Vec::new();
+        rows.push((Interface, Row::Choice(choices.len())));
+        choices.push(ChoiceField {
+            key: "default_remove_action",
+            label: "Default remove action",
+            help: "Presets the dialog's \"Also delete downloaded files\". Deleting files always asks for confirmation, even when confirmation is turned off.",
+            options: REMOVE_ACTIONS,
+            value: action,
+            initial: action,
+        });
+
         self.loaded = Some(Loaded {
             limits,
             prefs,
             inputs,
             bools,
             tris,
+            choices,
             rows,
             auth,
             restart_supported: admin.restart_supported,
@@ -1163,8 +1224,14 @@ impl PrefsPanel {
             &l.auth.initial_user,
             l.auth.password.read(cx).text(),
         );
+        let choices: Vec<(&str, &str, &str)> = l
+            .choices
+            .iter()
+            .map(|c| (c.key, c.value, c.initial))
+            .collect();
         let plan = match plan_save(&l.limits, &l.prefs, &inputs, &bools, &tris) {
             Ok(mut p) => {
+                apply_choices(&mut p, &l.prefs, &choices);
                 if !auth.is_empty() {
                     p.admin.get_or_insert_with(Map::new).extend(auth);
                 }
@@ -1495,6 +1562,54 @@ impl PrefsPanel {
                         )
                         .into_any_element()
                 }
+                Row::Choice(i) => {
+                    let f = &l.choices[*i];
+                    let i = *i;
+                    let last = f.options.len().saturating_sub(1);
+                    // Confirmation off + delete-files default: say it still asks.
+                    let confirm_off = l
+                        .bools
+                        .iter()
+                        .any(|b| b.key == "confirm_remove" && !b.value);
+                    let warn = f.key == "default_remove_action"
+                        && f.value == "delete_files"
+                        && confirm_off;
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(div().text_sm().child(f.label))
+                        .child(div().flex().flex_row().children(
+                            f.options.iter().enumerate().map(|(k, (value, label))| {
+                                let value: &'static str = value;
+                                widgets::segment(
+                                    ("pref-choice", n * 8 + k),
+                                    *label,
+                                    f.value == value,
+                                )
+                                .when(k == 0, |d| d.rounded_l_md())
+                                .when(k == last, |d| d.rounded_r_md())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(l) = &mut this.loaded {
+                                        l.choices[i].value = value;
+                                    }
+                                    cx.notify();
+                                }))
+                            }),
+                        ))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::text_muted())
+                                .child(f.help),
+                        )
+                        .when(warn, |d| {
+                            d.child(div().text_xs().text_color(theme::warning()).child(
+                                "Confirmation is off, but because the default deletes files the dialog is still shown.",
+                            ))
+                        })
+                        .into_any_element()
+                }
                 Row::Tri(i) => {
                     let f = &l.tris[*i];
                     let i = *i;
@@ -1671,6 +1786,29 @@ impl Render for PrefsPanel {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn choices_join_the_prefs_save() {
+        let prefs: Map<String, Value> =
+            serde_json::from_value(json!({"peer_limit": 5, "future_field": 1})).unwrap();
+        let mut plan = SavePlan::default();
+        apply_choices(
+            &mut plan,
+            &prefs,
+            &[("default_remove_action", "keep_files", "keep_files")],
+        );
+        assert_eq!(plan, SavePlan::default());
+        apply_choices(
+            &mut plan,
+            &prefs,
+            &[("default_remove_action", "delete_files", "keep_files")],
+        );
+        let p = plan.prefs.expect("prefs saved");
+        assert_eq!(p["default_remove_action"], "delete_files");
+        assert_eq!(p["future_field"], 1);
+        assert_eq!(p["peer_limit"], 5);
+    }
+
     use super::*;
 
     #[test]

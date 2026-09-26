@@ -6,7 +6,8 @@
     "dev": "vite",
     "dev:mock": "vite --port 3032 --open /mock.html",
     "build": "tsc --noEmit && vite build && node post-build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "for t in selection removePrefs; do esbuild src/helper/$t.test.ts --bundle --platform=node --format=esm --log-level=warning | node --input-type=module || exit 1; done"
   },
   "dependencies": {
     "@restart/ui": "^1.6.6",

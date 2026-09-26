@@ -1,9 +1,11 @@
-import { useContext, useState } from "react";
+import { useContext, useEffect, useState } from "react";
 import { TorrentListItem } from "../../api-types";
 import { APIContext } from "../../context";
 import { ErrorWithLabel } from "../../rqbit-web";
 import { useTorrentStore } from "../../stores/torrentStore";
 import { useUIStore } from "../../stores/uiStore";
+import { usePrefsStore } from "../../stores/prefsStore";
+import { planRemove } from "../../helper/removePrefs";
 import { Button } from "../buttons/Button";
 import { ErrorComponent } from "../ErrorComponent";
 import { Spinner } from "../Spinner";
@@ -19,27 +21,27 @@ export const DeleteTorrentModal: React.FC<{
   const [deleteFiles, setDeleteFiles] = useState(false);
   const [error, setError] = useState<ErrorWithLabel | null>(null);
   const [deleting, setDeleting] = useState(false);
+  // Removing without a dialog (confirmation turned off in preferences).
+  const [silent, setSilent] = useState(false);
 
   const API = useContext(APIContext);
   const refreshTorrents = useTorrentStore((state) => state.refreshTorrents);
   const clearSelection = useUIStore((state) => state.clearSelection);
-
-  if (!show || torrents.length === 0) {
-    return null;
-  }
+  const preferences = usePrefsStore((state) => state.preferences);
 
   const close = () => {
     setDeleteFiles(false);
     setError(null);
     setDeleting(false);
+    setSilent(false);
     onHide();
   };
 
-  const deleteTorrents = async () => {
+  const deleteTorrents = async (withFiles: boolean) => {
     setDeleting(true);
     setError(null);
 
-    const deleteMethod = deleteFiles ? API.delete : API.forget;
+    const deleteMethod = withFiles ? API.delete : API.forget;
     const errors: string[] = [];
 
     for (const torrent of torrents) {
@@ -57,12 +59,32 @@ export const DeleteTorrentModal: React.FC<{
         details: { text: errors.join("\n") },
       });
       setDeleting(false);
+      // Show the dialog with the error.
+      setSilent(false);
     } else {
       clearSelection();
       refreshTorrents();
       close();
     }
   };
+
+  // Each time the dialog is requested: preset "delete files" from the
+  // default action; without confirmation remove right away (files kept:
+  // planRemove never skips the dialog when files would be deleted).
+  useEffect(() => {
+    if (!show || torrents.length === 0) return;
+    const plan = planRemove(preferences);
+    setDeleteFiles(plan.deleteFiles);
+    setError(null);
+    if (!plan.confirm && !plan.deleteFiles) {
+      setSilent(true);
+      void deleteTorrents(false);
+    }
+  }, [show]);
+
+  if (!show || torrents.length === 0 || silent) {
+    return null;
+  }
 
   const isBulk = torrents.length > 1;
   const title = isBulk
@@ -122,8 +144,13 @@ export const DeleteTorrentModal: React.FC<{
         <Button variant="cancel" onClick={close}>
           Cancel
         </Button>
-        <Button variant="danger" onClick={deleteTorrents} disabled={deleting}>
+        <Button
+          variant="danger"
+          onClick={() => deleteTorrents(deleteFiles)}
+          disabled={deleting}
+        >
           {isBulk ? `Delete ${torrents.length} Torrents` : "Delete Torrent"}
+          {deleteFiles ? " + Files" : ""}
         </Button>
       </ModalFooter>
     </Modal>

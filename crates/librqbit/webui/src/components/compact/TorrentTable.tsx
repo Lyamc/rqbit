@@ -1,5 +1,12 @@
-import { useMemo, useCallback, useEffect, useState, useRef, forwardRef } from "react";
-import { Virtuoso } from "react-virtuoso";
+import {
+  useMemo,
+  useCallback,
+  useEffect,
+  useState,
+  useRef,
+  forwardRef,
+} from "react";
+import { Virtuoso, VirtuosoHandle } from "react-virtuoso";
 import { TorrentListItem } from "../../api-types";
 import { TorrentTableRow } from "./TorrentTableRow";
 import { useUIStore } from "../../stores/uiStore";
@@ -7,6 +14,7 @@ import { Spinner } from "../Spinner";
 import { TableHeader } from "./TableHeader";
 import { statusSortValue } from "../../helper/status";
 import { isTorrentVisible, SortDirection } from "../../helper/torrentFilters";
+import { Nav } from "../../helper/selection";
 import {
   TORRENT_TABLE_CELL_PAD,
   TORRENT_TABLE_GRID,
@@ -18,11 +26,7 @@ const GutterScroller = forwardRef<
   React.HTMLAttributes<HTMLDivElement>
 >(function GutterScroller({ style, ...props }, ref) {
   return (
-    <div
-      {...props}
-      ref={ref}
-      style={{ ...style, scrollbarGutter: "stable" }}
-    />
+    <div {...props} ref={ref} style={{ ...style, scrollbarGutter: "stable" }} />
   );
 });
 
@@ -97,7 +101,11 @@ export const TorrentTable: React.FC<TorrentTableProps> = ({
   const selectTorrent = useUIStore((state) => state.selectTorrent);
   const toggleSelection = useUIStore((state) => state.toggleSelection);
   const selectRange = useUIStore((state) => state.selectRange);
-  const selectRelative = useUIStore((state) => state.selectRelative);
+  const focusedTorrentId = useUIStore((state) => state.focusedTorrentId);
+  const navigateSelection = useUIStore((state) => state.navigateSelection);
+  const toggleFocusedSelection = useUIStore(
+    (state) => state.toggleFocusedSelection,
+  );
   const selectAll = useUIStore((state) => state.selectAll);
   const clearSelection = useUIStore((state) => state.clearSelection);
   const searchQuery = useUIStore((state) => state.searchQuery);
@@ -165,42 +173,93 @@ export const TorrentTable: React.FC<TorrentTableProps> = ({
 
   const orderedIdsRef = useRef<number[]>([]);
   orderedIdsRef.current = visibleTorrentIds;
+  const virtuosoRef = useRef<VirtuosoHandle>(null);
 
+  // Keyboard: arrows/Home/End move the cursor (shift extends the range,
+  // ctrl just moves), Space toggles the cursor row, Enter shows its details.
+  // Ctrl+A / Esc / Delete live in useKeyboardShortcuts.
   useEffect(() => {
+    const NAV_KEYS: Record<string, Nav> = {
+      ArrowUp: "up",
+      ArrowDown: "down",
+      Home: "home",
+      End: "end",
+    };
     const handleKeyDown = (e: KeyboardEvent) => {
-      const activeElement = document.activeElement;
+      if (e.defaultPrevented || e.altKey) return;
+      const el = (e.target as HTMLElement | null) ?? document.activeElement;
       if (
-        activeElement &&
-        (activeElement.tagName === "INPUT" ||
-          activeElement.tagName === "TEXTAREA" ||
-          activeElement.tagName === "SELECT")
+        el instanceof HTMLElement &&
+        (el.tagName === "INPUT" ||
+          el.tagName === "TEXTAREA" ||
+          el.tagName === "SELECT" ||
+          el.isContentEditable)
       ) {
         return;
       }
-
-      if (e.key === "ArrowDown") {
+      if (document.querySelector('[role="dialog"]')) return;
+      const ordered = orderedIdsRef.current;
+      const nav = NAV_KEYS[e.key];
+      if (nav) {
         e.preventDefault();
-        selectRelative("down", orderedIdsRef.current);
-      } else if (e.key === "ArrowUp") {
+        const index = navigateSelection(nav, e.shiftKey, ordered);
+        if (index >= 0) {
+          virtuosoRef.current?.scrollIntoView({ index, behavior: "auto" });
+        }
+        return;
+      }
+      // Space/Enter on a focused button or link keep their normal meaning.
+      const onControl =
+        el instanceof HTMLElement &&
+        (el.tagName === "BUTTON" ||
+          el.tagName === "A" ||
+          !!el.closest("button"));
+      if (e.key === " " && !e.shiftKey && !onControl) {
         e.preventDefault();
-        selectRelative("up", orderedIdsRef.current);
+        toggleFocusedSelection(ordered);
+        return;
+      }
+      if (e.key === "Enter" && !onControl && !e.shiftKey) {
+        const { focusedTorrentId, selectedTorrentIds } = useUIStore.getState();
+        const target =
+          focusedTorrentId !== null && ordered.includes(focusedTorrentId)
+            ? focusedTorrentId
+            : selectedTorrentIds.size === 1
+              ? [...selectedTorrentIds][0]
+              : null;
+        if (target !== null) {
+          e.preventDefault();
+          // The details pane follows a single selection.
+          selectTorrent(target);
+        }
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectRelative]);
+  }, [navigateSelection, toggleFocusedSelection, selectTorrent]);
 
   const handleRowClick = useCallback(
     (id: number, e: React.MouseEvent) => {
+      const mod = e.ctrlKey || e.metaKey;
       if (e.shiftKey) {
+        // No text selection on shift-click; move focus off inputs so the
+        // keyboard keeps working on the list.
         e.preventDefault();
-        selectRange(id, orderedIdsRef.current);
+        window.getSelection()?.removeAllRanges();
+        const active = document.activeElement;
+        if (active instanceof HTMLElement && active !== document.body) {
+          active.blur();
+        }
+        selectRange(id, orderedIdsRef.current, mod);
+      } else if (mod) {
+        e.preventDefault();
+        toggleSelection(id);
       } else {
         selectTorrent(id);
       }
     },
-    [selectRange, selectTorrent],
+    [selectRange, selectTorrent, toggleSelection],
   );
 
   const itemContent = useCallback(
@@ -211,12 +270,19 @@ export const TorrentTable: React.FC<TorrentTableProps> = ({
           key={torrent.id}
           torrent={torrent}
           isSelected={selectedTorrentIds.has(torrent.id)}
+          isFocused={focusedTorrentId === torrent.id}
           onRowClick={handleRowClick}
           onCheckboxChange={toggleSelection}
         />
       );
     },
-    [filteredTorrents, selectedTorrentIds, handleRowClick, toggleSelection],
+    [
+      filteredTorrents,
+      selectedTorrentIds,
+      focusedTorrentId,
+      handleRowClick,
+      toggleSelection,
+    ],
   );
 
   if (loading) {
@@ -359,6 +425,7 @@ export const TorrentTable: React.FC<TorrentTableProps> = ({
       </div>
       <div className="flex-1 min-h-0">
         <Virtuoso
+          ref={virtuosoRef}
           totalCount={filteredTorrents?.length ?? 0}
           itemContent={itemContent}
           style={{ height: "100%" }}

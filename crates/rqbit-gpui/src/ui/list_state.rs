@@ -223,11 +223,30 @@ pub fn visible_rows(
     rows.into_iter().map(|(i, _)| i).collect()
 }
 
-/// Multi-selection (web UI `uiStore.ts`).
+/// Keyboard navigation target for [`Selection::navigate`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Nav {
+    Up,
+    Down,
+    Home,
+    End,
+}
+
+/// File-manager style multi-selection over the displayed (sorted/filtered)
+/// list, keyed by torrent id so it survives polling. Same semantics as the
+/// web UI's `helper/selection.ts`:
+///
+/// - click: only that row; anchor + focus move there;
+/// - shift+click: anchor..row replaces the selection (anchor kept);
+///   ctrl+shift+click adds the range;
+/// - ctrl/cmd+click, Space: toggle the row; anchor + focus move there;
+/// - arrows / Home / End (with or without ctrl): move the focus only;
+///   with shift: anchor..focus replaces the selection.
 #[derive(Default, Debug)]
 pub struct Selection {
     pub ids: HashSet<usize>,
     anchor: Option<usize>,
+    focus: Option<usize>,
 }
 
 impl Selection {
@@ -240,79 +259,140 @@ impl Selection {
     pub fn is_empty(&self) -> bool {
         self.ids.is_empty()
     }
+    /// The keyboard cursor (focus ring).
+    pub fn focus(&self) -> Option<usize> {
+        self.focus
+    }
+    /// The focused row if it is displayed.
+    pub fn visible_focus(&self, ordered: &[usize]) -> Option<usize> {
+        self.focus.filter(|f| ordered.contains(f))
+    }
+    /// Plain click.
     pub fn select_one(&mut self, id: usize) {
         self.ids = HashSet::from([id]);
         self.anchor = Some(id);
+        self.focus = Some(id);
     }
+    /// Ctrl/Cmd+click, checkbox, Space.
     pub fn toggle(&mut self, id: usize) {
         if !self.ids.remove(&id) {
             self.ids.insert(id);
         }
         self.anchor = Some(id);
+        self.focus = Some(id);
     }
-    /// Shift-click: extend from the anchor to `id` in display order.
-    pub fn select_range(&mut self, id: usize, ordered: &[usize]) {
-        let Some(anchor) = self.anchor else {
-            return self.select_one(id);
-        };
-        if self.ids.contains(&id) {
-            self.ids.remove(&id);
-            return;
-        }
-        let (Some(a), Some(b)) = (
-            ordered.iter().position(|x| *x == anchor),
-            ordered.iter().position(|x| *x == id),
-        ) else {
+    /// Shift+click (`additive` = ctrl+shift+click): select anchor..`id` in
+    /// display order. The anchor stays put so repeated shift-clicks re-span
+    /// from the same row.
+    pub fn select_range(&mut self, id: usize, ordered: &[usize], additive: bool) {
+        let anchor_ix = self
+            .anchor
+            .and_then(|a| ordered.iter().position(|x| *x == a));
+        let (Some(a), Some(b)) = (anchor_ix, ordered.iter().position(|x| *x == id)) else {
+            if additive {
+                return self.toggle(id);
+            }
             return self.select_one(id);
         };
         let (lo, hi) = (a.min(b), a.max(b));
+        if !additive {
+            self.ids.clear();
+        }
         self.ids.extend(ordered[lo..=hi].iter().copied());
+        self.focus = Some(id);
     }
+    /// Arrow keys / Home / End. Moves the focus; with `extend` (shift) the
+    /// selection becomes anchor..focus. Returns the new focus' index in
+    /// `ordered` (to scroll it into view).
+    pub fn navigate(&mut self, nav: Nav, extend: bool, ordered: &[usize]) -> Option<usize> {
+        if ordered.is_empty() {
+            return None;
+        }
+        let last = ordered.len() - 1;
+        let pos = |id: usize| ordered.iter().position(|x| *x == id);
+        // Where the cursor is: the focus, else the first displayed selected row.
+        let current = self
+            .focus
+            .and_then(pos)
+            .or_else(|| ordered.iter().position(|x| self.ids.contains(x)));
+        let target = match (nav, current) {
+            (Nav::Home, _) => 0,
+            (Nav::End, _) => last,
+            (Nav::Up, Some(i)) => i.saturating_sub(1),
+            (Nav::Down, Some(i)) => (i + 1).min(last),
+            (Nav::Up, None) => last,
+            (Nav::Down, None) => 0,
+        };
+        if extend {
+            let anchor = self
+                .anchor
+                .filter(|a| pos(*a).is_some())
+                .or(current.map(|i| ordered[i]))
+                .unwrap_or(ordered[target]);
+            let a = pos(anchor).unwrap_or(target);
+            let (lo, hi) = (a.min(target), a.max(target));
+            self.ids = ordered[lo..=hi].iter().copied().collect();
+            self.anchor = Some(anchor);
+        }
+        self.focus = Some(ordered[target]);
+        Some(target)
+    }
+    /// Space: toggle the focused (displayed) row.
+    pub fn toggle_focused(&mut self, ordered: &[usize]) -> bool {
+        match self.visible_focus(ordered) {
+            Some(f) => {
+                self.toggle(f);
+                true
+            }
+            None => false,
+        }
+    }
+    /// Ctrl+A / header checkbox.
     pub fn select_all(&mut self, ids: &[usize]) {
         self.ids = ids.iter().copied().collect();
     }
+    /// Esc. The focus stays so the keyboard cursor doesn't jump.
     pub fn clear(&mut self) {
         self.ids.clear();
         self.anchor = None;
     }
-    /// Arrow keys: move a single selection up / down in display order.
-    pub fn select_relative(&mut self, down: bool, ordered: &[usize]) {
-        if ordered.is_empty() {
-            return;
-        }
-        let current = if self.ids.len() == 1 {
-            self.ids
-                .iter()
-                .next()
-                .and_then(|id| ordered.iter().position(|x| x == id))
-        } else if self.ids.is_empty() {
-            let id = if down {
-                ordered[0]
-            } else {
-                ordered[ordered.len() - 1]
-            };
-            return self.select_one(id);
-        } else {
-            self.anchor
-                .and_then(|a| ordered.iter().position(|x| *x == a))
-                .or_else(|| ordered.iter().position(|x| self.ids.contains(x)))
-        };
-        let Some(ix) = current else {
-            return self.select_one(ordered[0]);
-        };
-        let next = if down {
-            (ix + 1).min(ordered.len() - 1)
-        } else {
-            ix.saturating_sub(1)
-        };
-        self.select_one(ordered[next]);
-    }
-    /// Drop ids that no longer exist.
+    /// Drop ids that no longer exist (after a list refresh).
     pub fn retain_existing(&mut self, exists: impl Fn(usize) -> bool) {
         self.ids.retain(|id| exists(*id));
         if self.anchor.is_some_and(|a| !exists(a)) {
             self.anchor = None;
         }
+        if self.focus.is_some_and(|f| !exists(f)) {
+            self.focus = None;
+        }
+    }
+}
+
+/// How Remove/Delete behaves given the server preferences
+/// (`confirm_remove`, `default_remove_action`; web UI `helper/removePrefs.ts`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemovePlan {
+    /// Show the confirmation dialog.
+    pub confirm: bool,
+    /// Preset of "also delete files" (the action when there is no dialog).
+    pub delete_files: bool,
+}
+
+/// Deleting files never happens without a confirmation, so a "delete files"
+/// default always shows the dialog; unknown preferences also confirm.
+pub fn plan_remove(prefs: Option<&serde_json::Map<String, serde_json::Value>>) -> RemovePlan {
+    let Some(p) = prefs else {
+        return RemovePlan {
+            confirm: true,
+            delete_files: false,
+        };
+    };
+    let delete_files =
+        p.get("default_remove_action").and_then(|v| v.as_str()) == Some("delete_files");
+    let confirm = p.get("confirm_remove").and_then(|v| v.as_bool()) != Some(false) || delete_files;
+    RemovePlan {
+        confirm,
+        delete_files,
     }
 }
 
@@ -460,25 +540,135 @@ mod tests {
         );
     }
 
+    fn set(v: &[usize]) -> HashSet<usize> {
+        v.iter().copied().collect()
+    }
+
     #[test]
-    fn selection() {
+    fn selection_clicks() {
         let order = [5, 4, 3, 2, 1];
         let mut s = Selection::default();
         s.select_one(4);
-        s.select_range(2, &order);
-        assert_eq!(s.len(), 3);
-        s.toggle(3);
-        assert!(!s.contains(3) && s.contains(4) && s.contains(2));
-        s.select_relative(true, &order);
-        assert_eq!(s.ids, HashSet::from([2]));
-        s.select_relative(false, &order);
-        assert_eq!(s.ids, HashSet::from([3]));
+        assert_eq!((s.ids.clone(), s.focus()), (set(&[4]), Some(4)));
+        // Shift+click spans from the anchor and replaces the selection.
+        s.select_range(2, &order, false);
+        assert_eq!(s.ids, set(&[4, 3, 2]));
+        assert_eq!(s.focus(), Some(2));
+        // Anchor unchanged: shift+click the other way shrinks/re-spans.
+        s.select_range(5, &order, false);
+        assert_eq!(s.ids, set(&[5, 4]));
+        // Ctrl+click toggles and moves the anchor.
+        s.toggle(1);
+        assert_eq!(s.ids, set(&[5, 4, 1]));
+        s.toggle(4);
+        assert_eq!(s.ids, set(&[5, 1]));
+        // Ctrl+shift+click adds anchor(4)..2 to the existing selection.
+        s.select_range(2, &order, true);
+        assert_eq!(s.ids, set(&[5, 4, 3, 2, 1]));
+        // Shift+click without an anchor behaves like a click.
         s.clear();
-        s.select_relative(true, &order);
-        assert_eq!(s.ids, HashSet::from([5]));
+        s.select_range(3, &order, false);
+        assert_eq!(s.ids, set(&[3]));
+        // Anchor filtered out of the display: plain click.
+        s.select_range(1, &[1, 2], false);
+        assert_eq!(s.ids, set(&[1]));
+    }
+
+    #[test]
+    fn selection_keyboard() {
+        let order = [5, 4, 3, 2, 1];
+        let mut s = Selection::default();
+        // Arrows move the cursor only.
+        assert_eq!(s.navigate(Nav::Down, false, &order), Some(0));
+        assert_eq!(s.focus(), Some(5));
+        assert!(s.is_empty());
+        s.navigate(Nav::Down, false, &order);
+        assert_eq!(s.focus(), Some(4));
+        assert!(s.is_empty());
+        // Space toggles the focused row and anchors there.
+        assert!(s.toggle_focused(&order));
+        assert_eq!(s.ids, set(&[4]));
+        // Shift+Down extends anchor..focus, shift+Up shrinks it.
+        s.navigate(Nav::Down, true, &order);
+        s.navigate(Nav::Down, true, &order);
+        assert_eq!(s.ids, set(&[4, 3, 2]));
+        s.navigate(Nav::Up, true, &order);
+        assert_eq!(s.ids, set(&[4, 3]));
+        // Past the anchor flips direction.
+        s.navigate(Nav::Up, true, &order);
+        s.navigate(Nav::Up, true, &order);
+        assert_eq!(s.ids, set(&[5, 4]));
+        assert_eq!(s.focus(), Some(5));
+        // Clamped at the top.
+        assert_eq!(s.navigate(Nav::Up, false, &order), Some(0));
+        // Ctrl+Down / plain Down: cursor moves, selection kept; Space adds.
+        s.navigate(Nav::Down, false, &order);
+        s.navigate(Nav::Down, false, &order);
+        s.navigate(Nav::Down, false, &order);
+        assert_eq!(s.focus(), Some(2));
+        s.toggle_focused(&order);
+        assert_eq!(s.ids, set(&[5, 4, 2]));
+        s.toggle_focused(&order);
+        assert_eq!(s.ids, set(&[5, 4]));
+        // Shift+End / Shift+Home from the anchor (2).
+        assert_eq!(s.navigate(Nav::End, true, &order), Some(4));
+        assert_eq!(s.ids, set(&[2, 1]));
+        s.navigate(Nav::Home, true, &order);
+        assert_eq!(s.ids, set(&[5, 4, 3, 2]));
+        s.navigate(Nav::End, false, &order);
+        assert_eq!(s.focus(), Some(1));
+        // Select all / clear keeps the cursor.
         s.select_all(&order);
-        s.retain_existing(|id| id != 1);
-        assert_eq!(s.len(), 4);
+        assert_eq!(s.len(), 5);
+        s.clear();
+        assert!(s.is_empty());
+        assert_eq!(s.focus(), Some(1));
+        // Up with no cursor starts at the bottom; Space needs a visible cursor.
+        let mut t = Selection::default();
+        assert!(!t.toggle_focused(&order));
+        t.navigate(Nav::Up, false, &order);
+        assert_eq!(t.focus(), Some(1));
+        assert!(!t.toggle_focused(&[5, 4]));
+        assert_eq!(t.navigate(Nav::Down, false, &[]), None);
+    }
+
+    #[test]
+    fn selection_survives_refresh() {
+        let mut s = Selection::default();
+        s.select_one(3);
+        s.navigate(Nav::Down, true, &[3, 2, 1]);
+        s.retain_existing(|id| id != 2);
+        assert_eq!(s.ids, set(&[3]));
+        assert_eq!(s.focus(), None);
+        // Anchor 3 still exists: shift+click spans from it in the new order.
+        s.select_range(1, &[3, 1], false);
+        assert_eq!(s.ids, set(&[3, 1]));
+    }
+
+    #[test]
+    fn remove_plan() {
+        let plan = |v: serde_json::Value| plan_remove(v.as_object());
+        let p = |confirm, delete_files| RemovePlan {
+            confirm,
+            delete_files,
+        };
+        assert_eq!(plan_remove(None), p(true, false));
+        assert_eq!(plan(serde_json::json!({})), p(true, false));
+        assert_eq!(
+            plan(serde_json::json!({"confirm_remove": false})),
+            p(false, false)
+        );
+        assert_eq!(
+            plan(serde_json::json!({"default_remove_action": "delete_files"})),
+            p(true, true)
+        );
+        // Deleting files always asks.
+        assert_eq!(
+            plan(
+                serde_json::json!({"confirm_remove": false, "default_remove_action": "delete_files"})
+            ),
+            p(true, true)
+        );
     }
 
     #[test]

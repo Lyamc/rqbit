@@ -260,7 +260,13 @@ export interface SessionPreferences {
   completion_actions?: CompletionAction[];
   /** Live default max peers per newly added torrent. */
   peer_limit?: number | null;
+  /** UI: ask before removing torrents (default true). Deleting files always asks. */
+  confirm_remove?: boolean;
+  /** UI: default of the remove dialog's "also delete files" (default keep_files). */
+  default_remove_action?: RemoveAction;
 }
+
+export type RemoveAction = "keep_files" | "delete_files";
 
 // Interface for the Torrent Stats API response
 export interface LiveTorrentStats {

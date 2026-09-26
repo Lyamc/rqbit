@@ -13,6 +13,8 @@ import {
 interface TorrentTableRowProps {
   torrent: TorrentListItem;
   isSelected: boolean;
+  /** Keyboard cursor. */
+  isFocused?: boolean;
   onRowClick: (id: number, e: React.MouseEvent) => void;
   onCheckboxChange: (id: number) => void;
 }
@@ -20,6 +22,7 @@ interface TorrentTableRowProps {
 const TorrentTableRowUnmemoized: React.FC<TorrentTableRowProps> = ({
   torrent,
   isSelected,
+  isFocused = false,
   onRowClick,
   onCheckboxChange,
 }) => {
@@ -67,9 +70,10 @@ const TorrentTableRowUnmemoized: React.FC<TorrentTableRowProps> = ({
     <div
       role="row"
       onMouseDown={handleRowClick}
+      aria-selected={isSelected}
       className={`${TORRENT_TABLE_GRID} cursor-pointer border-b border-divider text-sm h-8 ${
         isSelected ? "bg-primary/10" : "hover:bg-surface-raised"
-      }`}
+      } ${isFocused ? "ring-1 ring-inset ring-primary" : ""}`}
     >
       <div
         role="gridcell"
@@ -83,7 +87,10 @@ const TorrentTableRowUnmemoized: React.FC<TorrentTableRowProps> = ({
           className="w-4 h-4 rounded border-divider-strong bg-surface text-primary focus:ring-primary"
         />
       </div>
-      <div role="gridcell" className="px-1 min-w-0 flex items-center justify-center">
+      <div
+        role="gridcell"
+        className="px-1 min-w-0 flex items-center justify-center"
+      >
         <StatusIcon
           className="w-5 h-5"
           error={!!error}

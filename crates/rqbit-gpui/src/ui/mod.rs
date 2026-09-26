@@ -23,8 +23,9 @@ use std::time::Duration;
 use crate::time::Instant;
 
 use gpui::{
-    ClickEvent, Context, Entity, FocusHandle, KeyDownEvent, SharedString, Subscription, Task,
-    Window, deferred, div, prelude::*, px, uniform_list,
+    ClickEvent, Context, Entity, FocusHandle, KeyDownEvent, ScrollStrategy, SharedString,
+    Subscription, Task, UniformListScrollHandle, Window, deferred, div, prelude::*, px,
+    uniform_list,
 };
 
 use crate::api::{
@@ -34,7 +35,7 @@ use crate::format::{format_bytes, format_speed, format_uptime};
 use add_panel::{AddPanel, AddPanelEvent};
 use details::{DetailsEvent, DetailsPanel};
 use events_panel::{EventsPanel, EventsPanelEvent};
-use list_state::{FixAction, Selection, SortColumn, SortDir, StatusFilter};
+use list_state::{FixAction, Nav, Selection, SortColumn, SortDir, StatusFilter};
 use prefs_panel::{PrefsPanel, PrefsPanelEvent};
 use text_input::{TextInput, TextInputEvent};
 
@@ -104,6 +105,8 @@ pub struct RqbitWindow {
     action_error: Option<String>,
     confirm_delete: Option<DeleteDialog>,
     selection: Selection,
+    /// Scroll position of the torrent list (keeps the keyboard cursor in view).
+    list_scroll: UniformListScrollHandle,
     filter: StatusFilter,
     filter_menu_open: bool,
     sort: SortColumn,
@@ -131,6 +134,8 @@ pub struct RqbitWindow {
     session_stats: Option<api::SessionStats>,
     limits: Option<api::LimitsConfig>,
     public_ip: Option<api::PublicIp>,
+    /// Server preferences used by the UI itself (remove/delete behaviour).
+    ui_prefs: Option<serde_json::Map<String, serde_json::Value>>,
     stats_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -165,6 +170,7 @@ impl RqbitWindow {
             action_error: None,
             confirm_delete: None,
             selection: Selection::default(),
+            list_scroll: UniformListScrollHandle::new(),
             filter: StatusFilter::All,
             filter_menu_open: false,
             sort: SortColumn::Id,
@@ -185,6 +191,7 @@ impl RqbitWindow {
             session_stats: None,
             limits: None,
             public_ip: None,
+            ui_prefs: None,
             stats_task: None,
             _subscriptions: vec![sub, search_sub],
         };
@@ -231,6 +238,7 @@ impl RqbitWindow {
         self.session_stats = None;
         self.limits = None;
         self.public_ip = None;
+        self.ui_prefs = None;
 
         match parse_base_url(&raw) {
             Err(e) => self.conn = ConnState::Invalid(format!("{e:#}")),
@@ -278,6 +286,16 @@ impl RqbitWindow {
                         } else {
                             None
                         };
+                        // Remove/delete preferences (may be changed elsewhere).
+                        let prefs = if n.is_multiple_of(15) {
+                            Some(
+                                cx.background_executor()
+                                    .spawn(stats_client.get_preferences())
+                                    .await,
+                            )
+                        } else {
+                            None
+                        };
                         let limits = if n.is_multiple_of(5) {
                             Some(
                                 cx.background_executor()
@@ -300,6 +318,9 @@ impl RqbitWindow {
                                 }
                                 if let Some(Ok(p)) = public_ip {
                                     this.public_ip = Some(p);
+                                }
+                                if let Some(Ok(p)) = prefs {
+                                    this.ui_prefs = Some(p);
                                 }
                                 cx.notify();
                             })
@@ -538,9 +559,16 @@ impl RqbitWindow {
         if items.is_empty() {
             return;
         }
+        let plan = list_state::plan_remove(self.ui_prefs.as_ref());
+        if !plan.confirm && !plan.delete_files {
+            // Confirmation off in Preferences: remove now, keep the files.
+            let ids = items.into_iter().map(|(id, _)| id).collect();
+            self.run_action(ids, TorrentAction::Forget, true, cx);
+            return;
+        }
         self.confirm_delete = Some(DeleteDialog {
             items,
-            delete_files: false,
+            delete_files: plan.delete_files,
         });
         cx.notify();
     }
@@ -595,10 +623,11 @@ impl RqbitWindow {
     ) {
         text_input::focus(window, &self.focus_handle, cx);
         let m = ev.modifiers();
+        let cmd = m.control || m.platform;
         if m.shift {
             let ids = self.visible_ids();
-            self.selection.select_range(id, &ids);
-        } else if m.control || m.platform {
+            self.selection.select_range(id, &ids, cmd);
+        } else if cmd {
             self.selection.toggle(id);
         } else {
             self.selection.select_one(id);
@@ -658,13 +687,31 @@ impl RqbitWindow {
             return;
         }
         let ks = &ev.keystroke;
-        let cmd = ks.modifiers.control || ks.modifiers.platform;
-        match ks.key.as_str() {
-            "up" | "down" => {
-                let ids = self.visible_ids();
-                self.selection.select_relative(ks.key == "down", &ids);
+        let m = &ks.modifiers;
+        let cmd = m.control || m.platform;
+        let nav = match ks.key.as_str() {
+            "up" => Some(Nav::Up),
+            "down" => Some(Nav::Down),
+            "home" => Some(Nav::Home),
+            "end" => Some(Nav::End),
+            _ => None,
+        };
+        if let Some(nav) = nav {
+            // Plain / ctrl: move the cursor only; shift: extend the range.
+            let ids = self.visible_ids();
+            if let Some(ix) = self.selection.navigate(nav, m.shift, &ids) {
+                self.reveal_row(ix, nav);
             }
-            "a" if cmd => {
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        match ks.key.as_str() {
+            "space" if !m.shift && !m.alt => {
+                let ids = self.visible_ids();
+                self.selection.toggle_focused(&ids);
+            }
+            "a" if cmd && !m.shift => {
                 let ids = self.visible_ids();
                 self.selection.select_all(&ids);
             }
@@ -674,9 +721,14 @@ impl RqbitWindow {
                 self.selection.clear();
             }
             "enter" => {
-                if self.selection.len() == 1
-                    && let Some(id) = self.selection.ids.iter().next().copied()
-                {
+                // Details for the cursor row (or the single selected one).
+                let ids = self.visible_ids();
+                let target = self.selection.visible_focus(&ids).or_else(|| {
+                    (self.selection.len() == 1)
+                        .then(|| self.selection.ids.iter().next().copied())
+                        .flatten()
+                });
+                if let Some(id) = target {
                     self.open_details(id, cx);
                 }
             }
@@ -684,6 +736,16 @@ impl RqbitWindow {
         }
         cx.stop_propagation();
         cx.notify();
+    }
+
+    /// Scrolls the list just enough to show row `ix` (at the edge it moved
+    /// towards).
+    fn reveal_row(&self, ix: usize, nav: Nav) {
+        let strategy = match nav {
+            Nav::Down | Nav::End => ScrollStrategy::Bottom,
+            Nav::Up | Nav::Home => ScrollStrategy::Top,
+        };
+        self.list_scroll.scroll_to_item(ix, strategy);
     }
 
     /// Opens (or returns the open) Add panel.
@@ -833,11 +895,36 @@ impl RqbitWindow {
         let sub = cx.subscribe(&panel, |this, _, ev: &PrefsPanelEvent, cx| match ev {
             PrefsPanelEvent::Close => {
                 this.prefs_panel = None;
+                this.reload_ui_prefs(cx);
                 cx.notify();
             }
         });
         self.prefs_panel = Some((panel, sub));
         cx.notify();
+    }
+
+    /// Re-reads the preferences the UI uses (after the Preferences panel).
+    fn reload_ui_prefs(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let generation = self.generation;
+        cx.spawn(async move |this, cx| {
+            let res = cx
+                .background_executor()
+                .spawn(client.get_preferences())
+                .await;
+            this.update(cx, |this, cx| {
+                if this.generation == generation
+                    && let Ok(p) = res
+                {
+                    this.ui_prefs = Some(p);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Refresh the torrent list right away (after adds / removes).
@@ -1545,17 +1632,27 @@ impl Render for RqbitWindow {
                         uniform_list(
                             "torrents",
                             count,
-                            cx.processor(|this, range: std::ops::Range<usize>, _window, cx| {
+                            cx.processor(|this, range: std::ops::Range<usize>, window, cx| {
+                                // Focus ring only while the list has keyboard focus.
+                                let cursor = this
+                                    .focus_handle
+                                    .is_focused(window)
+                                    .then(|| this.selection.focus())
+                                    .flatten();
                                 range
                                     .filter_map(|ix| {
                                         let t = this.torrents.get(*this.visible.get(ix)?)?;
-                                        let pending = this.pending.contains(&t.id);
-                                        let selected = this.selection.contains(t.id);
-                                        Some(torrent_table::row(t, ix, selected, pending, cx))
+                                        let state = torrent_table::RowState {
+                                            selected: this.selection.contains(t.id),
+                                            focused: cursor == Some(t.id),
+                                            pending: this.pending.contains(&t.id),
+                                        };
+                                        Some(torrent_table::row(t, ix, state, cx))
                                     })
                                     .collect::<Vec<_>>()
                             }),
                         )
+                        .with_scroll(&self.list_scroll)
                         .flex_1(),
                     ),
             )
@@ -1592,6 +1689,22 @@ impl Render for RqbitWindow {
             .detach();
         }));
         root
+    }
+}
+
+/// `UniformList::track_scroll` takes the handle by reference after gpui 0.2.2.
+trait TrackScrollCompat {
+    fn with_scroll(self, handle: &UniformListScrollHandle) -> Self;
+}
+
+impl TrackScrollCompat for gpui::UniformList {
+    #[cfg(not(feature = "gpui-main"))]
+    fn with_scroll(self, handle: &UniformListScrollHandle) -> Self {
+        self.track_scroll(handle.clone())
+    }
+    #[cfg(feature = "gpui-main")]
+    fn with_scroll(self, handle: &UniformListScrollHandle) -> Self {
+        self.track_scroll(handle)
     }
 }
 

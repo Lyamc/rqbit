@@ -244,13 +244,26 @@ pub fn damage_short_text(t: &TorrentListItem) -> Option<String> {
     }
 }
 
+/// Per-row selection state.
+#[derive(Clone, Copy, Default)]
+pub struct RowState {
+    pub selected: bool,
+    /// Keyboard cursor (focus ring).
+    pub focused: bool,
+    pub pending: bool,
+}
+
 pub fn row(
     t: &TorrentListItem,
     ix: usize,
-    selected: bool,
-    pending: bool,
+    state: RowState,
     cx: &mut Context<RqbitWindow>,
 ) -> AnyElement {
+    let RowState {
+        selected,
+        focused,
+        pending,
+    } = state;
     let id = t.id;
     let name: SharedString = t.display_name().into();
     let stats = t.stats.as_ref();
@@ -315,6 +328,7 @@ pub fn row(
 
     div()
         .id(("row", id))
+        .relative()
         .w_full()
         .flex()
         .flex_row()
@@ -442,5 +456,17 @@ pub fn row(
         )
         .child(cell(W_ETA).text_color(theme::text_muted()).child(eta))
         .child(cell(W_PEERS).text_color(theme::text_muted()).child(peers))
+        // Keyboard cursor: an outline drawn over the row (no layout shift).
+        .when(focused, |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .border_1()
+                    .border_color(theme::primary()),
+            )
+        })
         .into_any_element()
 }

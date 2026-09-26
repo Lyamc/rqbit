@@ -7,6 +7,8 @@ import { CompletionTab } from "./CompletionTab";
 import { AdminTab } from "./AdminTab";
 import { ConnectionTab } from "./ConnectionTab";
 import { BitTorrentTab } from "./BitTorrentTab";
+import { InterfaceTab } from "./InterfaceTab";
+import { usePrefsStore } from "../../stores/prefsStore";
 import { APIContext } from "../../context";
 import {
   LimitsConfig,
@@ -46,6 +48,8 @@ const defaultPreferences = (): SessionPreferences => ({
   incomplete_extension: "",
   completion_actions: [],
   peer_limit: null,
+  confirm_remove: true,
+  default_remove_action: "keep_files",
 });
 
 const emptyAdmin = (): AdminConfigPublic => ({
@@ -210,6 +214,8 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({
       if (Object.keys(adminPatch).length > 0) {
         await API.updateAdminConfig(adminPatch);
       }
+      // Remove/delete behaviour follows the saved preferences right away.
+      usePrefsStore.getState().setPreferences(preferences);
       onClose();
     } catch (e) {
       setError({
@@ -299,6 +305,16 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({
           label: "Completion",
           content: (
             <CompletionTab
+              preferences={preferences}
+              onChange={patchPreferences}
+            />
+          ),
+        },
+        {
+          id: "interface",
+          label: "Interface",
+          content: (
+            <InterfaceTab
               preferences={preferences}
               onChange={patchPreferences}
             />

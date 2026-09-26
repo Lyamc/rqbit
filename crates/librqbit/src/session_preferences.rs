@@ -29,6 +29,17 @@ pub enum CompletionAction {
     DropIncompleteExt,
 }
 
+/// What the UIs' remove/delete buttons do by default.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoveAction {
+    /// Remove the torrent from rqbit, keep the downloaded files.
+    #[default]
+    KeepFiles,
+    /// Remove the torrent and delete its files.
+    DeleteFiles,
+}
+
 /// Persisted session-level user preferences.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionPreferences {
@@ -122,6 +133,20 @@ pub struct SessionPreferences {
     /// Applied live when preferences are saved. None / unset = engine default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_limit: Option<usize>,
+
+    /// UI: ask before removing torrents. Deleting files always asks, whatever
+    /// this says. **On by default.**
+    #[serde(default = "default_true")]
+    pub confirm_remove: bool,
+
+    /// UI: default action of Remove/Delete (preset of the dialog's "also
+    /// delete files" checkbox).
+    #[serde(default)]
+    pub default_remove_action: RemoveAction,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_recovery_backoff_base_secs() -> u64 {
@@ -160,6 +185,8 @@ impl Default for SessionPreferences {
             incomplete_extension: None,
             completion_actions: Vec::new(),
             peer_limit: None,
+            confirm_remove: true,
+            default_remove_action: RemoveAction::KeepFiles,
         }
     }
 }
@@ -466,5 +493,31 @@ fn run_shell_hook_sync(
             cmd.env(k, v);
         }
         cmd.status()
+    }
+}
+
+#[cfg(test)]
+mod remove_pref_tests {
+    use super::*;
+
+    #[test]
+    fn remove_prefs_defaults_and_round_trip() {
+        // Older preferences.json without the fields: confirm on, keep files.
+        let p: SessionPreferences =
+            serde_json::from_str(r#"{"soft_recover_on_io_error": false}"#).unwrap();
+        assert!(p.confirm_remove);
+        assert_eq!(p.default_remove_action, RemoveAction::KeepFiles);
+        assert_eq!(p, SessionPreferences::default());
+
+        let p: SessionPreferences = serde_json::from_str(
+            r#"{"soft_recover_on_io_error": false, "confirm_remove": false,
+                "default_remove_action": "delete_files"}"#,
+        )
+        .unwrap();
+        assert!(!p.confirm_remove);
+        assert_eq!(p.default_remove_action, RemoveAction::DeleteFiles);
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["confirm_remove"], false);
+        assert_eq!(v["default_remove_action"], "delete_files");
     }
 }
