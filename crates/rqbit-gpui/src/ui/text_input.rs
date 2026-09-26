@@ -19,6 +19,8 @@ use super::theme;
 
 pub enum TextInputEvent {
     Submit(String),
+    /// The text changed (typing, paste, clear, `set_text`).
+    Changed,
 }
 
 pub struct TextInput {
@@ -86,6 +88,7 @@ impl TextInput {
 
     pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         self.text = text.into();
+        cx.emit(TextInputEvent::Changed);
         cx.notify();
     }
 
@@ -130,6 +133,7 @@ impl TextInput {
             _ => return,
         }
         cx.stop_propagation();
+        cx.emit(TextInputEvent::Changed);
         cx.notify();
     }
 }
@@ -185,6 +189,7 @@ impl EntityInputHandler for TextInput {
             }
             _ => self.insert(text),
         }
+        cx.emit(TextInputEvent::Changed);
         cx.notify();
     }
 

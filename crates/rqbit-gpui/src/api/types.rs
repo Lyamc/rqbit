@@ -50,6 +50,91 @@ pub struct TorrentStats {
     pub status_detail: Option<StatusDetail>,
     pub queue_position: Option<u32>,
     pub repair_count: Option<u64>,
+    /// Present when files are damaged (unreadable) or a repair ran.
+    pub damage: Option<DamageStats>,
+}
+
+/// Mirrors `DamageStats` in api-types.ts (fields the UI uses).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct DamageStats {
+    pub damaged_files: Vec<DamagedFileStats>,
+    pub repair: Option<RepairStatus>,
+    pub recovery: Option<RecoveryStats>,
+    pub needs_attention: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct DamagedFileStats {
+    pub file_id: usize,
+    pub path: String,
+    pub errors: u64,
+    pub eio: bool,
+    pub last_error: String,
+    pub pieces_failed: u64,
+    pub auto_repair_attempts: Option<u32>,
+    pub next_auto_repair_in_secs: Option<u64>,
+    pub needs_attention: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct RecoveryStats {
+    pub max_attempts: u32,
+    pub pieces_waiting: u32,
+    pub pieces_needing_attention: u32,
+    pub max_piece_attempts: u32,
+    pub next_retry_in_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct RepairStatus {
+    /// "running" | "done" | "failed"
+    pub state: String,
+    pub auto: bool,
+    pub scanned_bytes: u64,
+    pub total_bytes: u64,
+    pub files_total: u32,
+    pub files_done: u32,
+    pub current_file: Option<String>,
+    pub summary: Option<RepairSummary>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct RepairSummary {
+    pub files_scanned: u32,
+    pub files_repaired: u32,
+    pub files_failed: u32,
+    pub bytes_unreadable: u64,
+    pub bytes_zeroed: u64,
+    pub pieces_to_redownload: u64,
+    pub pieces_invalidated: u64,
+    pub files: Vec<FileRepairOutcome>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct FileRepairOutcome {
+    pub file_id: usize,
+    pub path: String,
+    pub method: String,
+}
+
+impl DamageStats {
+    pub fn has_damaged_files(&self) -> bool {
+        !self.damaged_files.is_empty()
+    }
+    /// Pieces held back / given up after I/O errors, or files whose auto repair gave up.
+    pub fn has_recovery_issues(&self) -> bool {
+        self.recovery.is_some() || self.needs_attention == Some(true)
+    }
+    pub fn is_repair_running(&self) -> bool {
+        self.repair.as_ref().is_some_and(|r| r.state == "running")
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

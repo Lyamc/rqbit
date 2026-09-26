@@ -35,6 +35,9 @@ pub fn error() -> Rgba {
 pub fn error_bg() -> Rgba {
     rgba(0xef44442e)
 }
+pub fn selected() -> Rgba {
+    rgba(0x3b82f62e)
+}
 pub fn overlay() -> Hsla {
     gpui::hsla(0.0, 0.0, 0.0, 0.55)
 }

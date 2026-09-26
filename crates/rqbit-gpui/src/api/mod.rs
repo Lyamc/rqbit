@@ -213,6 +213,43 @@ impl ApiClient {
         self.post(&format!("torrents/{id}/pause"))
     }
 
+    pub fn restart(&self, id: usize) -> ApiFuture<()> {
+        self.post(&format!("torrents/{id}/restart"))
+    }
+
+    /// Soft re-check of a torrent in error state (web UI "Fix errors").
+    pub fn fix_errors(&self, id: usize) -> ApiFuture<()> {
+        self.post(&format!("torrents/{id}/fix_errors"))
+    }
+
+    /// Full re-hash of all pieces (`POST /torrents/{id}/recheck`).
+    pub fn recheck(&self, id: usize) -> ApiFuture<()> {
+        self.post(&format!("torrents/{id}/recheck"))
+    }
+
+    /// Repair damaged files (punch out unreadable ranges, re-download).
+    /// `files` = None repairs all damaged files.
+    pub fn repair_files(&self, id: usize, files: Option<Vec<usize>>) -> ApiFuture<()> {
+        let body = match files {
+            Some(f) => serde_json::json!({ "files": f }),
+            None => serde_json::json!({}),
+        };
+        self.post_json_unit(&format!("torrents/{id}/repair_files"), &body)
+    }
+
+    /// Queue order: action is "top" | "up" | "down" | "bottom".
+    pub fn queue_move(&self, ids: &[usize], action: &str) -> ApiFuture<()> {
+        self.post_json_unit(
+            "torrents/queue/move",
+            &serde_json::json!({ "ids": ids, "action": action }),
+        )
+    }
+
+    /// Removes the torrent and deletes its downloaded files.
+    pub fn delete(&self, id: usize) -> ApiFuture<()> {
+        self.post(&format!("torrents/{id}/delete"))
+    }
+
     /// Removes the torrent from the session but keeps the downloaded files
     /// (`/forget`, as opposed to `/delete`).
     pub fn forget(&self, id: usize) -> ApiFuture<()> {
