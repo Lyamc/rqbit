@@ -76,3 +76,18 @@ pub async fn h_resolve_magnet(
     }
     Ok((headers, content).into_response())
 }
+
+#[derive(serde::Deserialize, Default)]
+pub struct PublicIpQuery {
+    #[serde(default)]
+    refresh: bool,
+}
+
+/// `GET /public_ip`: this server's public IPv4/IPv6 (its own egress, e.g.
+/// the VPN exit), with the last check time and per-family errors.
+pub async fn h_public_ip(
+    State(state): State<ApiState>,
+    axum::extract::Query(q): axum::extract::Query<PublicIpQuery>,
+) -> Result<impl IntoResponse> {
+    Ok(axum::Json(state.public_ip.get(q.refresh).await))
+}

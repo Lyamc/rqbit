@@ -130,6 +130,7 @@ pub struct RqbitWindow {
     /// Footer: `/stats` and `/torrents/limits`.
     session_stats: Option<api::SessionStats>,
     limits: Option<api::LimitsConfig>,
+    public_ip: Option<api::PublicIp>,
     stats_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -183,6 +184,7 @@ impl RqbitWindow {
             events_task: None,
             session_stats: None,
             limits: None,
+            public_ip: None,
             stats_task: None,
             _subscriptions: vec![sub, search_sub],
         };
@@ -228,6 +230,7 @@ impl RqbitWindow {
         self.stats_task = None;
         self.session_stats = None;
         self.limits = None;
+        self.public_ip = None;
 
         match parse_base_url(&raw) {
             Err(e) => self.conn = ConnState::Invalid(format!("{e:#}")),
@@ -265,6 +268,16 @@ impl RqbitWindow {
                             .background_executor()
                             .spawn(stats_client.session_stats())
                             .await;
+                        // Public IP: every 60 s (the server re-checks every 5 min).
+                        let public_ip = if n.is_multiple_of(30) {
+                            Some(
+                                cx.background_executor()
+                                    .spawn(stats_client.public_ip(false))
+                                    .await,
+                            )
+                        } else {
+                            None
+                        };
                         let limits = if n.is_multiple_of(5) {
                             Some(
                                 cx.background_executor()
@@ -284,6 +297,9 @@ impl RqbitWindow {
                                 }
                                 if let Some(Ok(l)) = limits {
                                     this.limits = Some(l);
+                                }
+                                if let Some(Ok(p)) = public_ip {
+                                    this.public_ip = Some(p);
                                 }
                                 cx.notify();
                             })
@@ -1023,11 +1039,11 @@ impl RqbitWindow {
     }
 
     fn render_footer(&self) -> impl IntoElement {
-        let base = self
-            .client
-            .as_ref()
-            .map(|c| c.base_url().to_string())
-            .unwrap_or_default();
+        let (conn_text, conn_tip) = match &self.client {
+            Some(c) => connection_label(c.base_url(), c.last_connection()),
+            None => (String::new(), String::new()),
+        };
+        let (ip_text, ip_tip) = public_ip_label(self.public_ip.as_ref());
         let fmt = |mbps: f64| {
             let s = format_speed(mbps);
             if s.is_empty() {
@@ -1055,7 +1071,22 @@ impl RqbitWindow {
             .bg(theme::surface())
             .text_xs()
             .text_color(theme::text_muted())
-            .child(div().flex_1().truncate().child(base));
+            .child(
+                div()
+                    .id("footer-conn")
+                    .flex_1()
+                    .truncate()
+                    .tooltip(widgets::text_tooltip(conn_tip.into()))
+                    .child(conn_text),
+            )
+            .when(!ip_text.is_empty(), |d| {
+                d.child(
+                    div()
+                        .id("footer-public-ip")
+                        .tooltip(widgets::text_tooltip(ip_tip.into()))
+                        .child(ip_text),
+                )
+            });
         match &self.session_stats {
             // Web UI footer: speed (session total), uptime.
             Some(s) => footer
@@ -1347,6 +1378,104 @@ impl RqbitWindow {
     }
 }
 
+/// `host:port` with the scheme's default port made explicit; IPv6 literals
+/// in brackets.
+fn host_port(url: &url::Url) -> String {
+    let host = match url.host() {
+        Some(url::Host::Ipv6(a)) => format!("[{a}]"),
+        Some(h) => h.to_string(),
+        None => String::new(),
+    };
+    match url.port_or_known_default() {
+        Some(p) => format!("{host}:{p}"),
+        None => host,
+    }
+}
+
+/// Footer connection text + tooltip, from the client's own view of its
+/// connection: native shows `local <--> remote` of the socket that carried
+/// the last response (the resolved address, not the hostname); the browser
+/// can't see either socket address, so only the origin's host:port.
+fn connection_label(base: &url::Url, conn: Option<api::ConnEndpoints>) -> (String, String) {
+    let target = host_port(base);
+    match conn {
+        Some(c) => {
+            let remote = c.remote.to_string(); // [v6]:port for IPv6
+            let text = match c.local {
+                Some(l) => format!("{l} <--> {remote}"),
+                None => remote.clone(),
+            };
+            (
+                text,
+                format!(
+                    "{base} → {target} resolved to {remote}{}",
+                    c.local
+                        .map(|l| format!(", from local {l}"))
+                        .unwrap_or_default()
+                ),
+            )
+        }
+        None if cfg!(target_family = "wasm") => (
+            target,
+            format!(
+                "{base}\nBrowsers don't reveal the resolved server IP or the local \
+                 port of a connection to web pages, so only the host is shown."
+            ),
+        ),
+        None => (target, format!("{base} (not connected yet)")),
+    }
+}
+
+/// Footer public IP text + tooltip (`GET /public_ip`).
+fn public_ip_label(p: Option<&api::PublicIp>) -> (String, String) {
+    let Some(p) = p else {
+        return (String::new(), String::new());
+    };
+    if !p.enabled {
+        return (String::new(), String::new());
+    }
+    let mut parts = Vec::new();
+    if let Some(ip) = &p.ipv4.ip {
+        parts.push(ip.clone());
+    }
+    if let Some(ip) = &p.ipv6.ip {
+        parts.push(ip.clone());
+    }
+    let text = if parts.is_empty() {
+        if p.checked_at.is_none() {
+            "public IP: checking…".to_owned()
+        } else {
+            "public IP: unknown".to_owned()
+        }
+    } else {
+        format!("public {}", parts.join(" · "))
+    };
+    let fam = |name: &str, f: &api::PublicIpFamily| match (&f.ip, &f.error) {
+        (Some(ip), _) => format!(
+            "{name}: {ip}{}",
+            f.source
+                .as_ref()
+                .map(|s| format!(" (via {s})"))
+                .unwrap_or_default()
+        ),
+        (None, Some(e)) => format!("{name}: none ({e})"),
+        (None, None) => format!("{name}: not checked"),
+    };
+    let checked = match (&p.checked_at, p.age_secs) {
+        (Some(t), Some(a)) => format!("checked {} ({a}s ago)", details::format_event_time(t)),
+        (Some(t), None) => format!("checked {}", details::format_event_time(t)),
+        _ => "not checked yet".to_owned(),
+    };
+    (
+        text,
+        format!(
+            "Server's public address (its own egress, e.g. the VPN exit)\n{}\n{}\n{checked}",
+            fam("IPv4", &p.ipv4),
+            fam("IPv6", &p.ipv6)
+        ),
+    )
+}
+
 impl Render for RqbitWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let query = self.search_input.read(cx).text().to_owned();
@@ -1463,5 +1592,58 @@ impl Render for RqbitWindow {
             .detach();
         }));
         root
+    }
+}
+
+#[cfg(test)]
+mod footer_tests {
+    use super::*;
+
+    #[test]
+    fn host_ports() {
+        let u = |s: &str| url::Url::parse(s).unwrap();
+        assert_eq!(host_port(&u("https://r.witherow.ca/")), "r.witherow.ca:443");
+        assert_eq!(host_port(&u("http://10.0.0.2:9030/")), "10.0.0.2:9030");
+        assert_eq!(host_port(&u("http://[::1]:3030/")), "[::1]:3030");
+        assert_eq!(host_port(&u("http://example.com/")), "example.com:80");
+    }
+
+    #[test]
+    fn native_connection_uses_socket_addrs() {
+        let base = url::Url::parse("https://r.example/").unwrap();
+        let c = api::ConnEndpoints {
+            local: Some("192.168.0.30:54321".parse().unwrap()),
+            remote: "[2001:db8::5]:443".parse().unwrap(),
+        };
+        let (text, tip) = connection_label(&base, Some(c));
+        assert_eq!(text, "192.168.0.30:54321 <--> [2001:db8::5]:443");
+        assert!(tip.contains("r.example:443"), "{tip}");
+        let c = api::ConnEndpoints {
+            local: None,
+            remote: "192.168.0.101:9030".parse().unwrap(),
+        };
+        assert_eq!(connection_label(&base, Some(c)).0, "192.168.0.101:9030");
+    }
+
+    #[test]
+    fn public_ip_text() {
+        assert_eq!(public_ip_label(None).0, "");
+        let p = api::PublicIp {
+            enabled: true,
+            ipv4: api::PublicIpFamily {
+                ip: Some("203.0.113.7".into()),
+                ..Default::default()
+            },
+            ipv6: api::PublicIpFamily {
+                error: Some("can't connect".into()),
+                ..Default::default()
+            },
+            checked_at: Some("2026-01-01T00:00:00Z".into()),
+            age_secs: Some(3),
+            checking: false,
+        };
+        let (t, tip) = public_ip_label(Some(&p));
+        assert_eq!(t, "public 203.0.113.7");
+        assert!(tip.contains("IPv6: none (can't connect)"), "{tip}");
     }
 }

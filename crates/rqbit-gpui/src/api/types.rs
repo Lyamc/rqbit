@@ -610,3 +610,23 @@ pub struct FsListResponse {
     pub entries: Vec<FsEntry>,
     pub truncated: Option<bool>,
 }
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct PublicIpFamily {
+    pub ip: Option<String>,
+    pub source: Option<String>,
+    pub error: Option<String>,
+}
+
+/// `GET /public_ip`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct PublicIp {
+    pub enabled: bool,
+    pub ipv4: PublicIpFamily,
+    pub ipv6: PublicIpFamily,
+    pub checked_at: Option<String>,
+    pub age_secs: Option<u64>,
+    pub checking: bool,
+}

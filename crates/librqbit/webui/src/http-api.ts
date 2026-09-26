@@ -24,6 +24,7 @@ import {
   EventPage,
   EventSummary,
   RepairCounters,
+  PublicIpInfo,
 } from "./api-types";
 
 // Define API URL and base path
@@ -308,6 +309,22 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
       "GET",
       `/events/summary${sinceSeq !== undefined ? `?since_seq=${sinceSeq}` : ""}`,
     );
+  },
+
+  getPublicIp: (refresh?: boolean): Promise<PublicIpInfo> => {
+    return makeRequest("GET", `/public_ip${refresh ? "?refresh=true" : ""}`);
+  },
+
+  getConnectionTarget: (): string | null => {
+    try {
+      const u = new URL(apiUrl || "/", window.location.href);
+      if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+      const port = u.port || (u.protocol === "https:" ? "443" : "80");
+      // u.hostname keeps the brackets of IPv6 literals.
+      return `${u.hostname}:${port}`;
+    } catch {
+      return null;
+    }
   },
 
   resetEventCounters: (): Promise<RepairCounters> => {

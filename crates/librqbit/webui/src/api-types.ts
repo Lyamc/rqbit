@@ -658,6 +658,13 @@ export interface RqbitAPI {
   /** Event log (repairs, recovery failures, I/O errors). */
   getEvents?: (q: EventQuery) => Promise<EventPage>;
   getEventsSummary?: (sinceSeq?: number) => Promise<EventSummary>;
+  /** Server's public IPv4/IPv6 as seen from its own network (e.g. VPN exit). */
+  getPublicIp?: (refresh?: boolean) => Promise<PublicIpInfo>;
+  /**
+   * host:port the browser talks to (default port made explicit). Browsers
+   * don't expose the resolved IP or the local port, so that's all we show.
+   */
+  getConnectionTarget?: () => string | null;
   resetEventCounters?: () => Promise<RepairCounters>;
   /** Scan the torrent's files for unreadable ranges and repair them (background job). */
   repairFiles?: (
@@ -735,4 +742,20 @@ export interface EventSummary {
   log_bytes: number;
   log_cap_bytes: number;
   log_segments: number;
+}
+
+export interface PublicIpFamily {
+  ip: string | null;
+  source: string | null;
+  error: string | null;
+}
+
+export interface PublicIpInfo {
+  enabled: boolean;
+  ipv4: PublicIpFamily;
+  ipv6: PublicIpFamily;
+  checked_at: string | null;
+  age_secs: number | null;
+  check_interval_secs: number;
+  checking: boolean;
 }

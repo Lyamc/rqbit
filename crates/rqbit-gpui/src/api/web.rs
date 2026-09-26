@@ -56,7 +56,11 @@ impl Transport {
                 .read_to_end(&mut body)
                 .await
                 .context("error reading response body")?;
-            Ok(RawResponse { status, body })
+            Ok(RawResponse {
+                status,
+                body,
+                conn: None,
+            })
         }
         .boxed()
     }

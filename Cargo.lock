@@ -7679,6 +7679,7 @@ dependencies = [
  "clap",
  "futures",
  "gpui",
+ "hyper-util",
  "js-sys",
  "log",
  "reqwest",

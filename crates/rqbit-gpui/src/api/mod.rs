@@ -21,6 +21,8 @@ pub use native::Transport;
 #[cfg(target_family = "wasm")]
 pub use web::Transport;
 
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
@@ -56,6 +58,17 @@ pub struct Request {
 pub struct RawResponse {
     pub status: u16,
     pub body: Vec<u8>,
+    /// Socket endpoints of the connection that carried it (native only;
+    /// browsers don't expose them).
+    pub conn: Option<ConnEndpoints>,
+}
+
+/// The client's view of its TCP connection to the server: the address it
+/// actually connected to (after DNS / happy eyeballs) and its own end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConnEndpoints {
+    pub local: Option<SocketAddr>,
+    pub remote: SocketAddr,
 }
 
 /// A cheap-to-clone handle to one rqbit server.
@@ -64,6 +77,7 @@ pub struct ApiClient {
     transport: Transport,
     base: Url,
     basic_auth: Option<(String, String)>,
+    last_conn: Arc<Mutex<Option<ConnEndpoints>>>,
 }
 
 /// Normalises what the user typed into the connection field into a base URL.
@@ -112,6 +126,18 @@ impl ApiClient {
             transport,
             base,
             basic_auth,
+            last_conn: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Endpoints of the connection used by the latest response (native).
+    pub fn last_connection(&self) -> Option<ConnEndpoints> {
+        *self.last_conn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn note_conn(slot: &Mutex<Option<ConnEndpoints>>, conn: Option<ConnEndpoints>) {
+        if conn.is_some() {
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = conn;
         }
     }
 
@@ -144,6 +170,7 @@ impl ApiClient {
             Some((b, ct)) => (Some(b), Some(ct)),
             None => (None, None),
         };
+        let slot = self.last_conn.clone();
         let fut = self.transport.send(Request {
             method,
             url,
@@ -155,6 +182,7 @@ impl ApiClient {
         });
         async move {
             let resp = fut.await?;
+            Self::note_conn(&slot, resp.conn);
             check_status(resp.status, &resp.body)?;
             Ok(resp.body)
         }
@@ -259,6 +287,7 @@ impl ApiClient {
             Ok(u) => u,
             Err(e) => return futures::future::ready(Err(e)).boxed(),
         };
+        let slot = self.last_conn.clone();
         let fut = self.transport.send(Request {
             method: Method::Get,
             url,
@@ -270,6 +299,7 @@ impl ApiClient {
         });
         async move {
             let resp = fut.await?;
+            Self::note_conn(&slot, resp.conn);
             check_status(resp.status, &resp.body)?;
             Ok(resp.body)
         }
@@ -342,6 +372,15 @@ impl ApiClient {
 
     pub fn reset_event_counters(&self) -> ApiFuture<()> {
         self.post("events/counters/reset")
+    }
+
+    /// `GET /public_ip`: the server's public addresses (its own egress).
+    pub fn public_ip(&self, refresh: bool) -> ApiFuture<PublicIp> {
+        self.get_json(if refresh {
+            "public_ip?refresh=true"
+        } else {
+            "public_ip"
+        })
     }
 
     /// `GET /stats`: session totals and speeds (header stats).

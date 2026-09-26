@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::Context;
 use futures::FutureExt;
 
-use super::{ApiFuture, Method, RawResponse, Request};
+use super::{ApiFuture, ConnEndpoints, Method, RawResponse, Request};
 
 #[derive(Clone)]
 pub struct Transport {
@@ -49,8 +49,21 @@ impl Transport {
             }
             let resp = req.send().map_err(describe_reqwest_error)?;
             let status = resp.status().as_u16();
+            let conn = resp
+                .extensions()
+                .get::<hyper_util::client::legacy::connect::HttpInfo>()
+                .map(|i| ConnEndpoints {
+                    local: Some(i.local_addr()),
+                    remote: i.remote_addr(),
+                })
+                .or_else(|| {
+                    resp.remote_addr().map(|remote| ConnEndpoints {
+                        local: None,
+                        remote,
+                    })
+                });
             let body = resp.bytes().map_err(describe_reqwest_error)?.to_vec();
-            Ok(RawResponse { status, body })
+            Ok(RawResponse { status, body, conn })
         }
         .boxed()
     }
@@ -78,4 +91,30 @@ fn describe_reqwest_error(e: reqwest::Error) -> anyhow::Error {
         msg = format!("{msg}: {root}");
     }
     anyhow::anyhow!(msg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `RQBIT_TEST_URL=http://127.0.0.1:3031/ cargo test -p rqbit-gpui -- --ignored`
+    #[test]
+    #[ignore]
+    fn reports_socket_endpoints() {
+        let url = std::env::var("RQBIT_TEST_URL").expect("RQBIT_TEST_URL");
+        let t = Transport::new().unwrap();
+        let r = futures::executor::block_on(t.send(Request {
+            method: Method::Get,
+            url: url::Url::parse(&url).unwrap().join("stats").unwrap(),
+            basic_auth: None,
+            body: None,
+            content_type: None,
+            accept: None,
+            timeout: None,
+        }))
+        .unwrap();
+        let c = r.conn.expect("connection info");
+        eprintln!("{:?} <--> {}", c.local, c.remote);
+        assert!(c.local.is_some());
+    }
 }

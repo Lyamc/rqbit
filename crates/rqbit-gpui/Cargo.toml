@@ -39,6 +39,9 @@ chrono = { workspace = true, features = ["wasmbind"] }
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 clap = { workspace = true, features = ["derive", "env"] }
 reqwest = { workspace = true, features = ["blocking"] }
+# Local/remote socket addresses of the connection reqwest actually used
+# (footer); reqwest stores hyper-util's HttpInfo in response extensions.
+hyper-util = { version = "0.1", default-features = false, features = ["client-legacy"] }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 web-time = "1"

@@ -47,6 +47,7 @@ async fn h_api_root(parts: Parts) -> impl IntoResponse {
             "GET /torrents": "List torrents",
             "GET /torrents/playlist": "Generate M3U8 playlist for all files in all torrents",
             "GET /stats": "Global session stats",
+            "GET /public_ip": "Public IPv4/IPv6 as seen from the server's network (?refresh=true re-checks, cached 30s)",
             "GET /metrics": "Prometheus metrics",
             "GET /stream_logs": "Continuously stream logs",
             "GET /web/": "Web UI",
@@ -92,6 +93,7 @@ pub fn make_api_router(state: ApiState) -> Router {
         .route("/dht/stats", get(dht::h_dht_stats))
         .route("/dht/table", get(dht::h_dht_table))
         .route("/stats", get(torrents::h_session_stats))
+        .route("/public_ip", get(other::h_public_ip))
         .route("/torrents", get(torrents::h_torrents_list))
         .route("/torrents/{id}", get(torrents::h_torrent_details))
         .route("/torrents/{id}/haves", get(torrents::h_torrent_haves))
