@@ -38,13 +38,17 @@ impl ServerBrowser {
             this.update(cx, |b, cx| {
                 match r {
                     Ok(r) => {
+                        b.loading = false;
                         if let [only] = r.roots.as_slice() {
                             let p = only.path.clone();
                             b.open(p, cx);
                         }
                         b.roots = Some(r.roots);
                     }
-                    Err(e) => b.error = Some(format!("Can't list server folders: {e:#}")),
+                    Err(e) => {
+                        b.loading = false;
+                        b.error = Some(format!("Can't list server folders: {e:#}"))
+                    }
                 }
                 cx.notify();
             })

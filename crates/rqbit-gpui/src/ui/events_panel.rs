@@ -410,38 +410,47 @@ impl EventsPanel {
                     .child(
                         div()
                             .flex()
-                            .flex_row()
-                            .flex_wrap()
+                            .flex_col()
                             .flex_1()
                             .min_w(px(0.))
-                            .gap_x_1()
-                            .when_some(name, |d, name| match linkable {
-                                Some(hash) => d
-                                    .child(
-                                        widgets::link(("ev-open", seq), name).text_sm().on_click(
-                                            cx.listener(move |_, _, _, cx| {
-                                                cx.stop_propagation();
-                                                cx.emit(EventsPanelEvent::OpenTorrent(hash.clone()))
-                                            }),
-                                        ),
-                                    )
-                                    .child(div().text_color(theme::text_muted()).child("·")),
-                                None => d
-                                    .child(div().text_color(theme::text_muted()).child(name))
-                                    .child(div().text_color(theme::text_muted()).child("·")),
+                            .overflow_hidden()
+                            .when_some(name, |d, name| {
+                                d.child(match linkable {
+                                    Some(hash) => widgets::link(("ev-open", seq), name)
+                                        .text_sm()
+                                        .truncate()
+                                        .on_click(cx.listener(move |_, _, _, cx| {
+                                            cx.stop_propagation();
+                                            cx.emit(EventsPanelEvent::OpenTorrent(hash.clone()))
+                                        }))
+                                        .into_any_element(),
+                                    None => div()
+                                        .truncate()
+                                        .text_color(theme::text_muted())
+                                        .child(name)
+                                        .into_any_element(),
+                                })
                             })
-                            .child(div().child(e.message.clone()))
-                            .when(count > 1, |d| {
-                                d.child(
-                                    div()
-                                        .px_1()
-                                        .rounded_sm()
-                                        .bg(theme::error_bg())
-                                        .text_xs()
-                                        .text_color(theme::error())
-                                        .child(format!("×{count}")),
-                                )
-                            }),
+                            .child(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .flex_row()
+                                    .gap_2()
+                                    .child(div().flex_1().min_w(px(0.)).child(e.message.clone()))
+                                    .when(count > 1, |d| {
+                                        d.child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .px_1()
+                                                .rounded_sm()
+                                                .bg(theme::error_bg())
+                                                .text_xs()
+                                                .text_color(theme::error())
+                                                .child(format!("×{count}")),
+                                        )
+                                    }),
+                            ),
                     ),
             )
             .when(expanded, |d| {
