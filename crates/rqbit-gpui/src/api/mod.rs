@@ -454,6 +454,9 @@ impl ApiClient {
             if let Some(t) = opts.magnet_timeout_secs {
                 q.append_pair("magnet_timeout_secs", &t.to_string());
             }
+            if opts.defer_metadata {
+                q.append_pair("defer_metadata", "true");
+            }
             if let Some(id) = &opts.add_job_id {
                 q.append_pair("add_job_id", id);
             }
@@ -541,6 +544,8 @@ pub struct AddTorrentOpts {
     pub overwrite: bool,
     pub output_folder: Option<String>,
     pub magnet_timeout_secs: Option<u64>,
+    /// Magnets: return at once; the server resolves metadata in the background.
+    pub defer_metadata: bool,
     pub add_job_id: Option<String>,
     pub timeout: Option<Duration>,
 }

@@ -99,7 +99,7 @@ fn torrent_from_bytes(bytes: Bytes) -> anyhow::Result<ParsedTorrentFile> {
 
 #[derive(Default)]
 pub struct SessionDatabase {
-    torrents: HashMap<TorrentId, ManagedTorrentHandle>,
+    pub(crate) torrents: HashMap<TorrentId, ManagedTorrentHandle>,
 }
 
 impl SessionDatabase {
@@ -133,7 +133,7 @@ pub struct Session {
     output_folder: PathBuf,
     peer_opts: PeerConnectionOptions,
     default_storage_factory: Option<BoxStorageFactory>,
-    persistence: Option<Arc<dyn SessionPersistenceStore>>,
+    pub(crate) persistence: Option<Arc<dyn SessionPersistenceStore>>,
     trackers: HashSet<url::Url>,
 
     lsd: Option<LocalServiceDiscovery>,
@@ -154,6 +154,9 @@ pub struct Session {
 
     /// Admin/server settings (persisted as admin.json). Restart often required.
     pub admin: AdminConfigStore,
+
+    /// Magnets accepted with `defer_metadata`, resolving in the background.
+    pub(crate) pending: crate::pending_magnets::PendingMagnets,
 
     /// Path for persisted rate limits (limits.json).
     limits_path: PathBuf,
@@ -339,6 +342,11 @@ pub struct AddTorrentOptions {
     /// Give up resolving magnet metadata after this long (default: wait forever).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub magnet_resolve_timeout: Option<Duration>,
+
+    /// Magnets only (HTTP API): return at once with a reserved id and resolve the
+    /// metadata in the background (see [`crate::pending_magnets`]).
+    #[serde(default)]
+    pub defer_metadata: bool,
 }
 
 pub struct ListOnlyResponse {
@@ -858,6 +866,12 @@ impl Session {
                 .map(|p| p.join("admin.json"))
                 .unwrap_or_else(|| PathBuf::from("admin.json"));
             let admin = AdminConfigStore::load_or_default(admin_path).await;
+            let pending = crate::pending_magnets::PendingMagnets::load(
+                preferences_path
+                    .parent()
+                    .map(|p| p.join("pending-magnets.json"))
+                    .unwrap_or_else(|| PathBuf::from("pending-magnets.json")),
+            );
             let queue = Arc::new(crate::torrent_queue::TorrentQueue::load(
                 preferences_path
                     .parent()
@@ -917,6 +931,7 @@ impl Session {
                 queue,
                 events,
                 admin,
+                pending,
                 limits_path,
                 ipv4_only: opts.ipv4_only,
                 trackers: opts.trackers,
@@ -1031,6 +1046,7 @@ impl Session {
 
             session.start_speed_estimator_updater();
             session.start_queue_manager();
+            session.resume_pending_magnets();
 
             Ok(session)
         }
@@ -1648,8 +1664,18 @@ impl Session {
             // that isn't persisted yet) get the same id. That used to return
             // AlreadyManaged for a *different* torrent and silently drop the
             // add. Allocate a free id under the db lock instead.
-            let id = if opts.preferred_id.is_none() && g.torrents.contains_key(&id) {
-                let free = g.torrents.keys().copied().max().map(|m| m + 1).unwrap_or(0);
+            let id = if opts.preferred_id.is_none()
+                && (g.torrents.contains_key(&id) || this.pending.contains_id(id))
+            {
+                // Ids reserved by magnets still resolving metadata are taken too.
+                let free = g
+                    .torrents
+                    .keys()
+                    .copied()
+                    .chain(this.pending.max_id())
+                    .max()
+                    .map(|m| m + 1)
+                    .unwrap_or(0);
                 debug!(requested = id, allocated = free, "torrent id already in use, allocating a new one");
                 free
             } else {

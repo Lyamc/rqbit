@@ -35,11 +35,16 @@ const TorrentTableRowUnmemoized: React.FC<TorrentTableRowProps> = ({
   const live = !!stats?.live;
   const damageText = damageShortText(stats?.damage);
 
+  // Magnet still resolving metadata: size and progress aren't known yet.
+  const noMetadata =
+    (torrent.total_pieces ?? 0) === 0 && !finished && totalBytes === 0;
   const progressPercentage = error
     ? 100
-    : totalBytes === 0
-      ? 100
-      : Math.round((progressBytes / totalBytes) * 100);
+    : noMetadata
+      ? 0
+      : totalBytes === 0
+        ? 100
+        : Math.round((progressBytes / totalBytes) * 100);
 
   const downloadSpeed = stats?.live?.download_speed?.human_readable ?? "-";
   const uploadSpeed = stats?.live?.upload_speed?.human_readable ?? "-";
@@ -134,7 +139,7 @@ const TorrentTableRowUnmemoized: React.FC<TorrentTableRowProps> = ({
         <StatusBadge stats={stats} compact />
       </div>
       <div role="gridcell" className={numericCell}>
-        {formatBytes(totalBytes)}
+        {noMetadata ? "—" : formatBytes(totalBytes)}
       </div>
       <div role="gridcell" className={`${cellBase} text-center`}>
         <div className="flex items-center gap-2">

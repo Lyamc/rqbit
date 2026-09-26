@@ -174,6 +174,9 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
     if (opts?.magnet_timeout_secs) {
       url += `&magnet_timeout_secs=${opts.magnet_timeout_secs}`;
     }
+    if (opts?.defer_metadata) {
+      url += "&defer_metadata=true";
+    }
     if (opts?.add_job_id) {
       url += `&add_job_id=${encodeURIComponent(opts.add_job_id)}`;
     }

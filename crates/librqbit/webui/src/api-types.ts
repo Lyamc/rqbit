@@ -44,6 +44,8 @@ export interface AddTorrentResponse {
   details: TorrentDetails;
   output_folder: string;
   seen_peers?: Array<string>;
+  /** Magnet accepted with `defer_metadata`: resolving metadata in the background. */
+  resolving?: boolean;
 }
 
 export interface ListTorrentsResponse {
@@ -487,6 +489,9 @@ export interface AddTorrentOptions {
   add_job_id?: string;
   /** Server gives up resolving magnet metadata after this many seconds. */
   magnet_timeout_secs?: number | null;
+  /** Magnets: return at once with a torrent id; the server resolves metadata in
+   *  the background and lists the torrent as "Resolving metadata". */
+  defer_metadata?: boolean;
 }
 
 export type Value = string | number | boolean;

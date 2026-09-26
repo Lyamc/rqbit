@@ -34,6 +34,9 @@ pub struct TorrentAddQueryParams {
     pub add_job_id: Option<String>,
     /// Fail a magnet add if metadata can't be fetched within this many seconds.
     pub magnet_timeout_secs: Option<u64>,
+    /// Magnets: don't wait for metadata; return a torrent id at once and resolve in the
+    /// background (the torrent shows as "Resolving metadata").
+    pub defer_metadata: Option<bool>,
 }
 
 impl Serialize for OnlyFiles {
@@ -121,6 +124,7 @@ impl TorrentAddQueryParams {
             adopt_foreign_incomplete: self.adopt_foreign_incomplete,
             add_job_id: self.add_job_id,
             magnet_resolve_timeout: self.magnet_timeout_secs.map(Duration::from_secs),
+            defer_metadata: self.defer_metadata.unwrap_or(false),
             ..Default::default()
         }
     }

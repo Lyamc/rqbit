@@ -13,8 +13,11 @@
 //!
 //! Every add carries an `add_job_id`; the server's progress is polled with
 //! `GET /add_jobs/{id}` and cancels go through `POST /add_jobs/{id}/cancel`,
-//! exactly like the web UI (magnets also send `magnet_timeout_secs=170` and
-//! give up client-side after 3 minutes; other adds after 15 minutes).
+//! exactly like the web UI. Magnets are sent with `defer_metadata=true`: the
+//! server answers at once with a torrent id (listed as "Resolving metadata"),
+//! so the client only gives up after 1 minute without an answer; other adds
+//! after 15 minutes. When every item went in, the panel shows "All added" and
+//! closes after 1.5 s; any failure keeps it open.
 //!
 //! - "Browse server…": pick .torrent files on the server (`/fs/list`),
 //!   added with `from_server_path`.
@@ -41,10 +44,12 @@ use crate::sources::{self, SourceKind};
 use crate::time::Instant;
 
 const DEFAULT_CONCURRENCY: usize = 4;
-/// Client-side give-up for magnets; the server is asked to stop a bit
-/// earlier (`magnet_timeout_secs`) so a dead magnet fails with its error.
-const MAGNET_TIMEOUT: Duration = Duration::from_secs(3 * 60);
-const MAGNET_SERVER_TIMEOUT_SECS: u64 = 170;
+/// Magnets are sent with `defer_metadata`: the server answers at once and
+/// resolves the metadata in the background (errors show on the torrent row
+/// and in Events), so this only bounds a server that doesn't answer.
+const MAGNET_TIMEOUT: Duration = Duration::from_secs(60);
+/// "All added": close the panel this long after the last item went in.
+const AUTO_CLOSE_AFTER: Duration = Duration::from_millis(1500);
 /// Other adds can wait a long time for a disk slot behind hash checks.
 const OTHER_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const JOB_POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -142,6 +147,10 @@ pub struct AddPanel {
     batch_output_folder: Option<String>,
     message: Option<String>,
     browser: Option<(Entity<ServerBrowser>, Subscription)>,
+    /// Every item went in: showing "All added" before closing (bumped to
+    /// invalidate a pending auto-close when the queue changes).
+    all_added: bool,
+    auto_close_gen: u64,
 }
 
 impl EventEmitter<AddPanelEvent> for AddPanel {}
@@ -207,7 +216,7 @@ fn stage_label(st: Option<&AddJobStatus>) -> String {
 fn timeout_error(magnet: bool, timeout: Duration) -> String {
     if magnet {
         format!(
-            "Timed out after {} waiting for torrent metadata — no peer sent it. The magnet may be dead or poorly seeded; retry later or use a .torrent file.",
+            "Gave up after {} waiting for the server to accept the magnet; the add was cancelled (nothing added).",
             format_duration(timeout)
         )
     } else {
@@ -238,6 +247,8 @@ impl AddPanel {
             batch_output_folder: None,
             message: None,
             browser: None,
+            all_added: false,
+            auto_close_gen: 0,
         }
     }
 
@@ -308,6 +319,8 @@ impl AddPanel {
             job: None,
             in_batch: false,
         });
+        self.all_added = false;
+        self.auto_close_gen += 1;
     }
 
     fn has_url(&self, text: &str) -> bool {
@@ -538,6 +551,7 @@ impl AddPanel {
                         if p.batch_added > 0 {
                             cx.emit(AddPanelEvent::Added);
                         }
+                        p.maybe_auto_close(cx);
                     }
                     cx.notify();
                 })
@@ -546,6 +560,28 @@ impl AddPanel {
             .detach();
         }
         cx.notify();
+    }
+
+    /// Every item in the queue went in (added or already in rqbit): show
+    /// "All added" and close after a moment. Any failure keeps the panel open.
+    fn maybe_auto_close(&mut self, cx: &mut Context<Self>) {
+        if !all_went_in(self.items.iter().map(|i| &i.status)) {
+            return;
+        }
+        self.all_added = true;
+        self.auto_close_gen += 1;
+        let gen_at = self.auto_close_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(AUTO_CLOSE_AFTER).await;
+            this.update(cx, |p, cx| {
+                if p.all_added && p.auto_close_gen == gen_at && !p.running {
+                    p.all_added = false;
+                    p.close(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn claim_next(&mut self) -> Option<Work> {
@@ -582,7 +618,8 @@ impl AddPanel {
         let opts = AddTorrentOpts {
             overwrite,
             output_folder: self.batch_output_folder.clone(),
-            magnet_timeout_secs: magnet.then_some(MAGNET_SERVER_TIMEOUT_SECS),
+            magnet_timeout_secs: None,
+            defer_metadata: magnet,
             add_job_id: Some(job_id.clone()),
             // Our own timer cancels first; this only bounds a dead connection.
             timeout: Some(timeout + Duration::from_secs(60)),
@@ -752,7 +789,13 @@ impl AddPanel {
                         item.added_id = r.id.or(item.added_id);
                     }
                     let fs = final_stage.as_ref();
-                    if fs.is_some_and(|s| s.stage == "already_managed") {
+                    if r.resolving && !r.already_managed {
+                        item.note = Some(
+                            "Added — resolving metadata in the background (progress and errors show in the torrent list)."
+                                .into(),
+                        );
+                    }
+                    if r.already_managed || fs.is_some_and(|s| s.stage == "already_managed") {
                         ItemStatus::AlreadyInRqbit(r.id.or(fs.and_then(|s| s.torrent_id)))
                     } else {
                         added = true;
@@ -1306,6 +1349,23 @@ impl Render for AddPanel {
                         )),
                 )
             })
+            .when(self.all_added, |d| {
+                d.child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg({
+                            let mut c = theme::success();
+                            c.a = 0.12;
+                            c
+                        })
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme::success())
+                        .child("✓ All added — closing…"),
+                )
+            })
             .when_some(progress, |d, (text, frac, color)| {
                 d.child(
                     div()
@@ -1368,9 +1428,30 @@ impl Render for AddPanel {
     }
 }
 
+/// Auto-close rule: a non-empty queue where every item was added or was
+/// already in rqbit (anything failed, cancelled or not started keeps it open).
+fn all_went_in<'a>(mut statuses: impl Iterator<Item = &'a ItemStatus>) -> bool {
+    let mut any = false;
+    let ok = statuses.all(|s| {
+        any = true;
+        matches!(s, ItemStatus::Added(_) | ItemStatus::AlreadyInRqbit(_))
+    });
+    any && ok
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_close_only_when_everything_went_in() {
+        use ItemStatus::*;
+        assert!(all_went_in([Added(Some(1)), AlreadyInRqbit(Some(2))].iter()));
+        assert!(!all_went_in([Added(Some(1)), Failed("x".into())].iter()));
+        assert!(!all_went_in([Added(Some(1)), Cancelled].iter()));
+        assert!(!all_went_in([Added(Some(1)), Ready].iter()));
+        assert!(!all_went_in(std::iter::empty()));
+    }
 
     #[test]
     fn job_ids_are_unique_and_url_safe() {
@@ -1384,7 +1465,7 @@ mod tests {
     #[test]
     fn labels() {
         assert_eq!(format_elapsed(Duration::from_secs(75)), "1:15");
-        assert_eq!(format_duration(MAGNET_TIMEOUT), "3 min");
+        assert_eq!(format_duration(MAGNET_TIMEOUT), "1 min");
         assert_eq!(stage_label(None), "sending to server…");
         let st = AddJobStatus {
             stage: "adding".into(),
@@ -1396,6 +1477,6 @@ mod tests {
             stage_label(Some(&st)),
             "adding: saving (server busy checking other torrents)…"
         );
-        assert!(timeout_error(true, MAGNET_TIMEOUT).contains("3 min"));
+        assert!(timeout_error(true, MAGNET_TIMEOUT).contains("1 min"));
     }
 }

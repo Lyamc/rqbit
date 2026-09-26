@@ -62,6 +62,12 @@ pub struct StatusDetail {
     pub queue_position: Option<usize>,
 }
 
+impl StatusDetail {
+    pub fn simple(kind: StatusKind, label: String) -> Self {
+        Self { kind, label, progress: None, next_retry_in_secs: None, queue_position: None }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActiveOp {
     Moving,

@@ -81,6 +81,8 @@ pub mod kind {
     pub const ADOPTION: &str = "adoption";
     pub const TORRENT_ERROR: &str = "torrent_error";
     pub const RECHECK: &str = "recheck";
+    pub const METADATA_RESOLVED: &str = "metadata_resolved";
+    pub const METADATA_FAILED: &str = "metadata_failed";
 }
 
 fn one() -> u64 {

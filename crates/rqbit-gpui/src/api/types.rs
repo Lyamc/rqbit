@@ -211,6 +211,12 @@ pub struct AddTorrentResponse {
     pub id: Option<usize>,
     pub details: AddedTorrentDetails,
     pub output_folder: String,
+    /// Magnet accepted with `defer_metadata`: resolving metadata in the background.
+    #[serde(default)]
+    pub resolving: bool,
+    /// Deferred magnet add: the info hash was already in rqbit (or resolving).
+    #[serde(default)]
+    pub already_managed: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

@@ -274,8 +274,15 @@ pub fn row(
     };
     let error: Option<SharedString> = stats.and_then(|s| s.error.clone()).map(Into::into);
     let damage = damage_short_text(t);
+    // Magnet still resolving metadata: the size isn't known yet.
     let size = stats
-        .map(|s| format_bytes(s.total_bytes))
+        .map(|s| {
+            if s.total_bytes == 0 && !s.finished && t.total_pieces == 0 {
+                "—".to_owned()
+            } else {
+                format_bytes(s.total_bytes)
+            }
+        })
         .unwrap_or_default();
     let frac = stats.map(|s| s.progress_fraction()).unwrap_or(0.0);
     let live = stats.and_then(|s| s.live.as_ref());

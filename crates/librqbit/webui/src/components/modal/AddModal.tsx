@@ -13,6 +13,7 @@ import { FilesystemBrowser } from "../filesystem/FilesystemBrowser";
 import { StagingItem, StagingQueue } from "../add/StagingQueue";
 import { UrlLinesEditor } from "../add/UrlLinesEditor";
 import { extractTorrentSources } from "../../helper/parseTorrentSources";
+import { shouldAutoClose } from "../../helper/autoClose";
 import {
   TransferCandidate,
   TransferCandidateChild,
@@ -32,13 +33,14 @@ import {
 
 const DEFAULT_CONCURRENCY = 4;
 
-// POST /torrents for a magnet doesn't return until the torrent's metadata has
-// been fetched from peers (DHT/trackers). Ask the server to give up a bit
-// before our own client-side timeout so a dead magnet fails with a clear
-// server error. Each add carries an add_job_id: the server reports what it is
-// doing (GET /add_jobs/{id}) and cancels it for real (POST .../cancel).
-const MAGNET_TIMEOUT_MS = 3 * 60_000;
-const MAGNET_SERVER_TIMEOUT_SECS = 170;
+// Magnets are added with defer_metadata: the server accepts them at once (with
+// a torrent id, duplicate check by info hash) and resolves the metadata in the
+// background; failures show on the torrent row and in Events, not here. Each
+// add carries an add_job_id: the server reports what it is doing
+// (GET /add_jobs/{id}) and cancels it for real (POST .../cancel).
+const MAGNET_TIMEOUT_MS = 60_000;
+/** Close the window this long after everything was added. */
+const AUTO_CLOSE_MS = 1500;
 // Other adds can legitimately wait a long time for a disk slot while other
 // torrents are being hash-checked (reported as "waiting_for_server").
 const OTHER_TIMEOUT_MS = 15 * 60_000;
@@ -92,6 +94,7 @@ type ItemOpts = {
   output_folder?: string;
   adopt_foreign_incomplete?: "auto";
   magnet_timeout_secs?: number;
+  defer_metadata?: boolean;
   add_job_id?: string;
 };
 
@@ -187,6 +190,16 @@ export const AddModal: React.FC<Props> = ({
   const [uploadBusy, setUploadBusy] = useState(false);
   const [uploadMsg, setUploadMsg] = useState<string | null>(null);
   const cancelRef = useRef({ cancelled: false });
+  const [allAdded, setAllAdded] = useState(false);
+  const autoCloseRef = useRef<number | undefined>(undefined);
+  useEffect(
+    () => () => {
+      if (autoCloseRef.current !== undefined) {
+        window.clearTimeout(autoCloseRef.current);
+      }
+    },
+    [],
+  );
   // In-flight add requests (by staging item id), so Stop / close / × can
   // cancel them on the server.
   const inFlightRef = useRef(new Map<string, InFlightAdd>());
@@ -347,6 +360,11 @@ export const AddModal: React.FC<Props> = ({
   };
 
   const handleClose = () => {
+    if (autoCloseRef.current !== undefined) {
+      window.clearTimeout(autoCloseRef.current);
+      autoCloseRef.current = undefined;
+    }
+    setAllAdded(false);
     if (running) {
       cancelRef.current.cancelled = true;
       cancelAll();
@@ -851,15 +869,21 @@ export const AddModal: React.FC<Props> = ({
                 }
               }, 1000)
             : undefined;
-          if (magnet) itemOpts.magnet_timeout_secs = MAGNET_SERVER_TIMEOUT_SECS;
+          if (magnet) itemOpts.defer_metadata = true;
           const timeoutError = () =>
             new Error(
-              magnet
-                ? `Timed out after ${formatDuration(timeoutMs)} waiting for torrent metadata — no peer sent it. The magnet may be dead or poorly seeded; retry later or use a .torrent file.`
-                : `Gave up after ${formatDuration(timeoutMs)} waiting for the server; the add was cancelled (nothing added).`,
+              `Gave up after ${formatDuration(timeoutMs)} waiting for the server; the add was cancelled (nothing added).`,
             );
           try {
-            const res = await addOne(item, itemOpts, { signal: job.ctrl.signal });
+            const res = await addOne(item, itemOpts, {
+              signal: job.ctrl.signal,
+            });
+            if (res?.resolving) {
+              setItem(item.id, {
+                addedTorrentId: res.id ?? undefined,
+                note: "Added — resolving metadata in the background (progress and errors show in the torrent list).",
+              });
+            }
             if (job.outcome === "already_added") {
               setItem(item.id, {
                 addedTorrentId: res?.id ?? job.torrentId,
@@ -899,6 +923,24 @@ export const AddModal: React.FC<Props> = ({
       if (result.ok > 0) {
         refreshTorrents();
       }
+      // Everything in the queue went in (added or already in rqbit): show
+      // "All added" briefly and close. Any error keeps the window open.
+      // (queueRef may lag the last progress update: judge this run's items by
+      // the result, and only the rest of the queue by its state.)
+      const inRun = new Set(work.map((w) => w.id));
+      const others = queueRef.current.filter((i) => !inRun.has(i.id));
+      if (
+        shouldAutoClose(
+          result,
+          others.map((i) => i.status),
+        )
+      ) {
+        setAllAdded(true);
+        autoCloseRef.current = window.setTimeout(() => {
+          autoCloseRef.current = undefined;
+          handleClose();
+        }, AUTO_CLOSE_MS);
+      }
     } finally {
       setRunning(false);
     }
@@ -910,7 +952,11 @@ export const AddModal: React.FC<Props> = ({
     init: { signal: AbortSignal },
   ): Promise<AddTorrentResponse> => {
     if (item.kind === "server_path" && item.serverPath) {
-      return await API.uploadTorrentFromServerPath(item.serverPath, itemOpts, init);
+      return await API.uploadTorrentFromServerPath(
+        item.serverPath,
+        itemOpts,
+        init,
+      );
     } else if (item.kind === "torrent_bytes" && item.bytes) {
       const name = item.label.endsWith(".torrent")
         ? item.label
@@ -1220,6 +1266,14 @@ export const AddModal: React.FC<Props> = ({
           )}
         </div>
 
+        {allAdded && (
+          <div
+            className="mt-3 rounded bg-green-600/10 px-3 py-2 text-sm font-medium text-green-700 dark:text-green-400"
+            data-testid="add-all-added"
+          >
+            ✓ All added — closing…
+          </div>
+        )}
         {progress && (
           <div className="mt-3 mb-2 flex flex-col gap-1">
             <div className="text-sm text-secondary">
