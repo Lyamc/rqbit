@@ -106,6 +106,10 @@ enum Row {
     Bool(usize),
     Tri(usize),
     Info(&'static str, String),
+    /// Basic auth editor (admin.json).
+    Auth,
+    /// Reload preferences.json / restart the process.
+    AdminOps,
 }
 
 struct Loaded {
@@ -115,6 +119,41 @@ struct Loaded {
     bools: Vec<BoolField>,
     tris: Vec<TriField>,
     rows: Vec<(Tab, Row)>,
+    auth: AuthFields,
+    restart_supported: bool,
+}
+
+struct AuthFields {
+    enabled: bool,
+    initial_enabled: bool,
+    user: Entity<TextInput>,
+    initial_user: String,
+    password: Entity<TextInput>,
+    password_set: bool,
+}
+
+/// admin.json keys for a basic auth change (web UI AdminTab): nothing if
+/// unchanged; the password only when typed.
+fn auth_patch(
+    enabled: bool,
+    initial_enabled: bool,
+    user: &str,
+    initial_user: &str,
+    password: &str,
+) -> Map<String, Value> {
+    let mut m = Map::new();
+    let user = user.trim();
+    if enabled == initial_enabled && (!enabled || (user == initial_user && password.is_empty())) {
+        return m;
+    }
+    m.insert("basic_auth_enabled".into(), json!(enabled));
+    if enabled {
+        m.insert("basic_auth_user".into(), json!(user));
+        if !password.is_empty() {
+            m.insert("basic_auth_password".into(), json!(password));
+        }
+    }
+    m
 }
 
 pub struct PrefsPanel {
@@ -125,6 +164,7 @@ pub struct PrefsPanel {
     error: Option<String>,
     message: Option<String>,
     loaded: Option<Loaded>,
+    confirm_restart: bool,
 }
 
 impl EventEmitter<PrefsPanelEvent> for PrefsPanel {}
@@ -284,7 +324,12 @@ fn plan_save(
             }
             Target::Admin => match f.kind {
                 Kind::Text => {
-                    admin.insert(f.key.to_owned(), json!(text));
+                    admin.insert(
+                        f.key.to_owned(),
+                        // "" clears (e.g. the listen address); null would
+                        // mean "unchanged" to the server.
+                        json!(text),
+                    );
                 }
                 _ => match parse_int(f.label, text) {
                     Ok(Some(v)) if v > 0 => {
@@ -340,6 +385,7 @@ impl PrefsPanel {
             error: None,
             message: None,
             loaded: None,
+            confirm_restart: false,
         };
         this.reload(cx);
         this
@@ -1026,30 +1072,52 @@ impl PrefsPanel {
             },
         );
         h(&mut rows, Admin, "HTTP API (restart required)");
-        info(
+        input(
+            Admin,
+            Target::Admin,
+            "http_api_listen_addr",
+            None,
+            Kind::Text,
+            "Listen address",
+            "Host:port for the HTTP API / web UI. Applied on next start if RQBIT_HTTP_API_LISTEN_ADDR is unset.",
+            "0.0.0.0:9030",
             &mut rows,
-            "listen address",
-            value_to_text(persisted.get("http_api_listen_addr")),
+            cx,
         );
-        info(
-            &mut rows,
-            "basic auth",
-            match persisted.get("basic_auth_enabled").and_then(Value::as_bool) {
-                Some(true) => format!(
-                    "enabled (user {})",
-                    value_to_text(persisted.get("basic_auth_user"))
-                ),
-                _ => "disabled".into(),
-            },
-        );
+        rows.push((Admin, Row::Auth));
         for n in &admin.notes {
             note(&mut rows, Admin, n);
         }
-        note(
-            &mut rows,
-            Admin,
-            "Editing the HTTP listen address / basic auth and Reload / Restart are in the web UI (Configure → Web UI / Admin) for now.",
-        );
+        h(&mut rows, Admin, "Operations");
+        rows.push((Admin, Row::AdminOps));
+        let initial_enabled = persisted
+            .get("basic_auth_enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let initial_user = value_to_text(persisted.get("basic_auth_user"));
+        let password_set = persisted
+            .get("basic_auth_password_set")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let auth = AuthFields {
+            enabled: initial_enabled,
+            initial_enabled,
+            user: cx.new(|cx| TextInput::new(initial_user.clone(), "username", cx)),
+            initial_user,
+            password: cx.new(|cx| {
+                TextInput::new(
+                    "",
+                    if password_set {
+                        "leave blank to keep current"
+                    } else {
+                        "password"
+                    },
+                    cx,
+                )
+                .masked()
+            }),
+            password_set,
+        };
 
         self.loaded = Some(Loaded {
             limits,
@@ -1058,6 +1126,8 @@ impl PrefsPanel {
             bools,
             tris,
             rows,
+            auth,
+            restart_supported: admin.restart_supported,
         });
     }
 
@@ -1086,8 +1156,20 @@ impl PrefsPanel {
             .iter()
             .map(|t| (t.key, t.clear_key, t.inverted, t.value, t.initial))
             .collect();
+        let auth = auth_patch(
+            l.auth.enabled,
+            l.auth.initial_enabled,
+            l.auth.user.read(cx).text(),
+            &l.auth.initial_user,
+            l.auth.password.read(cx).text(),
+        );
         let plan = match plan_save(&l.limits, &l.prefs, &inputs, &bools, &tris) {
-            Ok(p) => p,
+            Ok(mut p) => {
+                if !auth.is_empty() {
+                    p.admin.get_or_insert_with(Map::new).extend(auth);
+                }
+                p
+            }
             Err(errs) => {
                 self.error = Some(errs.join("\n"));
                 self.message = None;
@@ -1159,6 +1241,45 @@ impl PrefsPanel {
         cx.notify();
     }
 
+    /// `POST /admin/reload` or `/admin/restart`.
+    fn admin_op(&mut self, restart: bool, cx: &mut Context<Self>) {
+        self.confirm_restart = false;
+        self.saving = true;
+        self.error = None;
+        self.message = None;
+        let client = self.client.clone();
+        cx.spawn(async move |this, cx| {
+            let fut = if restart {
+                client.admin_restart()
+            } else {
+                client.admin_reload()
+            };
+            let r = cx.background_executor().spawn(fut).await;
+            this.update(cx, |p, cx| {
+                p.saving = false;
+                match r {
+                    Ok(()) if restart => {
+                        p.message = Some(
+                            "Restart signaled. The client reconnects once the service is back."
+                                .into(),
+                        )
+                    }
+                    Ok(()) => {
+                        p.message = Some(
+                            "Reloaded preferences.json from disk into the live session.".into(),
+                        );
+                        p.reload(cx);
+                    }
+                    Err(e) => p.error = Some(format!("{e:#}")),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn render_rows(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         let Some(l) = &self.loaded else {
             return Vec::new();
@@ -1209,6 +1330,141 @@ impl PrefsPanel {
                                     .text_xs()
                                     .text_color(theme::text_muted())
                                     .child(f.help),
+                            )
+                        })
+                        .into_any_element()
+                }
+                Row::Auth => {
+                    let a = &l.auth;
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            widgets::checkbox(
+                                "pref-auth",
+                                "Enable HTTP basic authentication",
+                                a.enabled,
+                                true,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(l) = &mut this.loaded {
+                                    l.auth.enabled = !l.auth.enabled;
+                                }
+                                cx.notify();
+                            })),
+                        )
+                        .child(
+                            div()
+                                .pl(px(24.))
+                                .text_xs()
+                                .text_color(theme::text_muted())
+                                .child("Username/password for the API and web UI. Applied on next start if RQBIT_HTTP_BASIC_AUTH_USERPASS is unset."),
+                        )
+                        .when(a.enabled, |d| {
+                            d.child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap_2()
+                                    .pl(px(24.))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .w(px(220.))
+                                            .child(div().text_sm().child("Username"))
+                                            .child(a.user.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .w(px(220.))
+                                            .child(div().text_sm().child(if a.password_set {
+                                                "Password (blank = keep)"
+                                            } else {
+                                                "Password"
+                                            }))
+                                            .child(a.password.clone()),
+                                    ),
+                            )
+                        })
+                        .into_any_element()
+                }
+                Row::AdminOps => {
+                    let enabled = !self.saving;
+                    let restart_ok = enabled && l.restart_supported;
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .gap_2()
+                                .child(
+                                    widgets::button(
+                                        "admin-reload",
+                                        "Force-reload preferences.json",
+                                        enabled,
+                                    )
+                                    .when(enabled, |b| {
+                                        b.on_click(
+                                            cx.listener(|this, _, _, cx| this.admin_op(false, cx)),
+                                        )
+                                    }),
+                                )
+                                .when(!self.confirm_restart, |d| {
+                                    d.child(
+                                        widgets::button(
+                                            "admin-restart",
+                                            "Restart rqbit…",
+                                            restart_ok,
+                                        )
+                                        .when(restart_ok, |b| {
+                                            b.on_click(cx.listener(|this, _, _, cx| {
+                                                this.confirm_restart = true;
+                                                cx.notify();
+                                            }))
+                                        }),
+                                    )
+                                }),
+                        )
+                        .when(self.confirm_restart, |d| {
+                            d.child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(div().text_xs().child(
+                                        "Restart the rqbit process? Torrents resume after the service manager brings it back.",
+                                    ))
+                                    .child(
+                                        widgets::danger_button("admin-restart-yes", "Restart")
+                                            .on_click(
+                                                cx.listener(|this, _, _, cx| this.admin_op(true, cx)),
+                                            ),
+                                    )
+                                    .child(
+                                        widgets::button("admin-restart-no", "Cancel", true)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.confirm_restart = false;
+                                                cx.notify();
+                                            })),
+                                    ),
+                            )
+                        })
+                        .when(!l.restart_supported, |d| {
+                            d.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::text_muted())
+                                    .child("Restart API not available on this server."),
                             )
                         })
                         .into_any_element()
@@ -1416,6 +1672,24 @@ impl Render for PrefsPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_patches() {
+        assert!(auth_patch(false, false, "", "", "").is_empty());
+        assert!(auth_patch(true, true, "bob", "bob", "").is_empty());
+        let m = auth_patch(false, true, "bob", "bob", "");
+        assert_eq!(Value::Object(m), json!({"basic_auth_enabled": false}));
+        let m = auth_patch(true, true, "bob", "bob", "pw");
+        assert_eq!(
+            Value::Object(m),
+            json!({"basic_auth_enabled": true, "basic_auth_user": "bob", "basic_auth_password": "pw"})
+        );
+        let m = auth_patch(true, false, " al ", "", "");
+        assert_eq!(
+            Value::Object(m),
+            json!({"basic_auth_enabled": true, "basic_auth_user": "al"})
+        );
+    }
 
     fn fv<'a>(
         target: Target,

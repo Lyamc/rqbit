@@ -30,6 +30,8 @@ pub struct TextInput {
     multiline: bool,
     /// Height of the multi line box.
     rows: usize,
+    /// Show bullets instead of the text (passwords).
+    masked: bool,
 }
 
 impl EventEmitter<TextInputEvent> for TextInput {}
@@ -68,6 +70,7 @@ impl TextInput {
             focus_handle: cx.focus_handle(),
             multiline: false,
             rows: 1,
+            masked: false,
         }
     }
 
@@ -80,6 +83,12 @@ impl TextInput {
         this.multiline = true;
         this.rows = rows.max(2);
         this
+    }
+
+    /// Password field: renders bullets.
+    pub fn masked(mut self) -> Self {
+        self.masked = true;
+        self
     }
 
     pub fn text(&self) -> &str {
@@ -282,7 +291,11 @@ impl Render for TextInput {
                         .text_color(theme::text_muted())
                         .child(self.placeholder.clone())
                 } else {
-                    div().text_color(theme::text()).child(self.text.clone())
+                    div().text_color(theme::text()).child(if self.masked {
+                        "•".repeat(self.text.chars().count())
+                    } else {
+                        self.text.clone()
+                    })
                 })
                 .when(focused, |d| d.child(caret()))
                 .into_any_element();

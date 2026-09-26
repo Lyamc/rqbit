@@ -16,16 +16,22 @@
 //! exactly like the web UI (magnets also send `magnet_timeout_secs=170` and
 //! give up client-side after 3 minutes; other adds after 15 minutes).
 //!
-//! Not ported (web UI only for now): Browse server, Transfer from other
-//! client, and server-side .zip extraction.
+//! - "Browse server…": pick .torrent files on the server (`/fs/list`),
+//!   added with `from_server_path`.
+//!
+//! Not ported (web UI only for now): Transfer from other client, and
+//! server-side .zip extraction.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use gpui::{Context, Entity, EventEmitter, SharedString, Window, div, prelude::*, px};
+use gpui::{
+    Context, Entity, EventEmitter, SharedString, Subscription, Window, div, prelude::*, px,
+};
 
 use super::files::PickedFile;
+use super::server_browser::{ServerBrowser, ServerBrowserEvent};
 use super::text_input::TextInput;
 use super::{theme, widgets};
 use crate::api::{
@@ -53,6 +59,7 @@ pub enum AddPanelEvent {
 enum ItemSource {
     Url { text: String, magnet: bool },
     File { bytes: Arc<Vec<u8>> },
+    ServerPath { path: String },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -134,6 +141,7 @@ pub struct AddPanel {
     /// Output folder captured when Add was pressed.
     batch_output_folder: Option<String>,
     message: Option<String>,
+    browser: Option<(Entity<ServerBrowser>, Subscription)>,
 }
 
 impl EventEmitter<AddPanelEvent> for AddPanel {}
@@ -229,7 +237,48 @@ impl AddPanel {
             batch_added: 0,
             batch_output_folder: None,
             message: None,
+            browser: None,
         }
+    }
+
+    fn toggle_browser(&mut self, cx: &mut Context<Self>) {
+        if self.browser.take().is_some() {
+            cx.notify();
+            return;
+        }
+        let b = cx.new(|cx| ServerBrowser::new(self.client.clone(), cx));
+        let sub = cx.subscribe(&b, |this, _, ev: &ServerBrowserEvent, cx| {
+            match ev {
+                ServerBrowserEvent::Close => this.browser = None,
+                ServerBrowserEvent::Confirm(paths) => {
+                    let mut n = 0;
+                    for p in paths {
+                        let dup = this.items.iter().any(|i| {
+                            matches!(&i.source, Some(ItemSource::ServerPath { path }) if path == p)
+                        });
+                        if dup {
+                            continue;
+                        }
+                        let label = p.rsplit(['/', '\\']).next().unwrap_or(p).to_owned();
+                        this.push_item(
+                            label,
+                            "server",
+                            Some(ItemSource::ServerPath { path: p.clone() }),
+                            ItemStatus::Ready,
+                        );
+                        n += 1;
+                    }
+                    this.message = Some(format!(
+                        "Staged {n} server file{}.",
+                        if n == 1 { "" } else { "s" }
+                    ));
+                    this.browser = None;
+                }
+            }
+            cx.notify();
+        });
+        self.browser = Some((b, sub));
+        cx.notify();
     }
 
     pub fn is_running(&self) -> bool {
@@ -541,6 +590,7 @@ impl AddPanel {
         let src = match source {
             ItemSource::Url { text, .. } => AddSource::Url(text),
             ItemSource::File { bytes } => AddSource::TorrentFile(bytes.to_vec()),
+            ItemSource::ServerPath { path } => AddSource::ServerPath(path),
         };
         Some(Work {
             key,
@@ -1124,8 +1174,13 @@ impl Render for AddPanel {
                         widgets::button("choose-files", "Choose .torrent files…", !running)
                             .when(!running, |b| b.on_click(cx.listener(|this, _, _, cx| this.choose_files(cx)))),
                     )
+                    .child(
+                        widgets::button("browse-server", "Browse server…", !running)
+                            .when(!running, |b| b.on_click(cx.listener(|this, _, _, cx| this.toggle_browser(cx)))),
+                    )
                     .child(div().text_xs().text_color(theme::text_muted()).child(drop_hint)),
             )
+            .when_some(self.browser.as_ref().map(|(b, _)| b.clone()), |d, b| d.child(b))
             .when_some(self.message.clone(), |d, m| {
                 d.child(div().text_xs().text_color(theme::text_muted()).child(m))
             })
@@ -1247,7 +1302,7 @@ impl Render for AddPanel {
                                 )),
                         )
                         .child(div().text_xs().text_color(theme::text_muted()).child(
-                            "Browse server, Transfer from other client and .zip unpacking are in the web UI's Add dialog.",
+                            "Transfer from other client and .zip unpacking are in the web UI's Add dialog.",
                         )),
                 )
             })

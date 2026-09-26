@@ -418,15 +418,22 @@ impl ApiClient {
             if let Some(id) = &opts.add_job_id {
                 q.append_pair("add_job_id", id);
             }
-            if matches!(source, AddSource::Url(_)) {
-                q.append_pair("is_url", "true");
+            match &source {
+                AddSource::Url(_) => {
+                    q.append_pair("is_url", "true");
+                }
+                AddSource::ServerPath(p) => {
+                    q.append_pair("from_server_path", p);
+                }
+                AddSource::TorrentFile(_) => {}
             }
         }
         let body = match source {
-            AddSource::Url(u) => (u.into_bytes(), "text/plain"),
-            AddSource::TorrentFile(b) => (b, "application/x-bittorrent"),
+            AddSource::Url(u) => Some((u.into_bytes(), "text/plain")),
+            AddSource::TorrentFile(b) => Some((b, "application/x-bittorrent")),
+            AddSource::ServerPath(_) => None,
         };
-        let fut = self.send(Method::Post, url, Some(body), opts.timeout);
+        let fut = self.send(Method::Post, url, body, opts.timeout);
         async move { parse_json("torrents", &fut.await?) }.boxed()
     }
 
@@ -486,6 +493,8 @@ pub enum AddSource {
     Url(String),
     /// Contents of a .torrent file.
     TorrentFile(Vec<u8>),
+    /// A .torrent file on the server (`from_server_path`, "Browse server").
+    ServerPath(String),
 }
 
 #[derive(Clone, Debug, Default)]

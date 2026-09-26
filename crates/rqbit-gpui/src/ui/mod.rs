@@ -11,6 +11,7 @@ mod events_panel;
 mod files;
 mod list_state;
 mod prefs_panel;
+mod server_browser;
 mod text_input;
 mod theme;
 mod torrent_table;
@@ -29,7 +30,7 @@ use gpui::{
 use crate::api::{
     self, ApiClient, ListTorrentsResponse, TorrentListItem, Transport, parse_base_url,
 };
-use crate::format::format_speed;
+use crate::format::{format_bytes, format_speed, format_uptime};
 use add_panel::{AddPanel, AddPanelEvent};
 use details::{DetailsEvent, DetailsPanel};
 use events_panel::{EventsPanel, EventsPanelEvent};
@@ -42,6 +43,8 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Slower retry while the server is unreachable.
 const RETRY_INTERVAL: Duration = Duration::from_secs(3);
 /// Events badge refresh (web UI: 15 s).
+/// Footer session stats refresh.
+const STATS_INTERVAL: Duration = Duration::from_secs(2);
 const EVENTS_SUMMARY_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Per-torrent actions, run one torrent at a time over a set of ids
@@ -124,6 +127,10 @@ pub struct RqbitWindow {
     /// Highest event seq the user has seen (persisted per server).
     events_seen: Option<u64>,
     events_task: Option<Task<()>>,
+    /// Footer: `/stats` and `/torrents/limits`.
+    session_stats: Option<api::SessionStats>,
+    limits: Option<api::LimitsConfig>,
+    stats_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -174,6 +181,9 @@ impl RqbitWindow {
             events_summary: None,
             events_seen: None,
             events_task: None,
+            session_stats: None,
+            limits: None,
+            stats_task: None,
             _subscriptions: vec![sub, search_sub],
         };
         this.connect(url, cx);
@@ -215,6 +225,9 @@ impl RqbitWindow {
         self.events_panel = None;
         self.events_summary = None;
         self.events_task = None;
+        self.stats_task = None;
+        self.session_stats = None;
+        self.limits = None;
 
         match parse_base_url(&raw) {
             Err(e) => self.conn = ConnState::Invalid(format!("{e:#}")),
@@ -223,6 +236,7 @@ impl RqbitWindow {
                 self.client = Some(client.clone());
                 self.conn = ConnState::Connecting;
                 let generation = self.generation;
+                let client_for_stats = client.clone();
                 self.poll_task = Some(cx.spawn(async move |this, cx| {
                     loop {
                         let res = cx.background_executor().spawn(client.list_torrents()).await;
@@ -243,6 +257,44 @@ impl RqbitWindow {
                     }
                 }));
                 self.events_seen = crate::store::get(&self.seen_key()).and_then(|v| v.parse().ok());
+                let stats_client = client_for_stats.clone();
+                self.stats_task = Some(cx.spawn(async move |this, cx| {
+                    let mut n: u64 = 0;
+                    loop {
+                        let stats = cx
+                            .background_executor()
+                            .spawn(stats_client.session_stats())
+                            .await;
+                        let limits = if n.is_multiple_of(5) {
+                            Some(
+                                cx.background_executor()
+                                    .spawn(stats_client.get_limits())
+                                    .await,
+                            )
+                        } else {
+                            None
+                        };
+                        let alive = this
+                            .update(cx, |this, cx| {
+                                if this.generation != generation {
+                                    return;
+                                }
+                                if let Ok(s) = stats {
+                                    this.session_stats = Some(s);
+                                }
+                                if let Some(Ok(l)) = limits {
+                                    this.limits = Some(l);
+                                }
+                                cx.notify();
+                            })
+                            .is_ok();
+                        if !alive {
+                            return;
+                        }
+                        n += 1;
+                        cx.background_executor().timer(STATS_INTERVAL).await;
+                    }
+                }));
                 self.events_task = Some(cx.spawn(async move |this, cx| {
                     loop {
                         let Ok(()) = this.update(cx, |this, cx| this.refresh_events_summary(cx))
@@ -971,27 +1023,28 @@ impl RqbitWindow {
     }
 
     fn render_footer(&self) -> impl IntoElement {
-        let (down, up) = self
-            .torrents
-            .iter()
-            .filter_map(|t| t.stats.as_ref()?.live.as_ref())
-            .fold((0.0, 0.0), |(d, u), l| {
-                (d + l.download_speed.mbps, u + l.upload_speed.mbps)
-            });
-        let fmt = |v: f64| {
-            let s = format_speed(v);
+        let base = self
+            .client
+            .as_ref()
+            .map(|c| c.base_url().to_string())
+            .unwrap_or_default();
+        let fmt = |mbps: f64| {
+            let s = format_speed(mbps);
             if s.is_empty() {
                 "0 Bytes/s".to_owned()
             } else {
                 s
             }
         };
-        let base = self
-            .client
+        let limit = |bps: Option<u64>| match bps {
+            Some(b) if b > 0 => format!(" · limit {}/s", format_bytes(b)),
+            _ => String::new(),
+        };
+        let (dl_limit, ul_limit) = self
+            .limits
             .as_ref()
-            .map(|c| c.base_url().to_string())
-            .unwrap_or_default();
-        div()
+            .map_or((None, None), |l| (l.download_bps, l.upload_bps));
+        let footer = div()
             .flex()
             .flex_row()
             .gap_4()
@@ -1002,9 +1055,38 @@ impl RqbitWindow {
             .bg(theme::surface())
             .text_xs()
             .text_color(theme::text_muted())
-            .child(div().flex_1().truncate().child(base))
-            .child(format!("↓ {}", fmt(down)))
-            .child(format!("↑ {}", fmt(up)))
+            .child(div().flex_1().truncate().child(base));
+        match &self.session_stats {
+            // Web UI footer: speed (session total), uptime.
+            Some(s) => footer
+                .child(format!(
+                    "↓ {} ({}){}",
+                    fmt(s.download_speed.mbps),
+                    format_bytes(s.counters.fetched_bytes),
+                    limit(dl_limit)
+                ))
+                .child(format!(
+                    "↑ {} ({}){}",
+                    fmt(s.upload_speed.mbps),
+                    format_bytes(s.counters.uploaded_bytes),
+                    limit(ul_limit)
+                ))
+                .child(format!("{} peers", s.peers.live))
+                .child(format!("up {}", format_uptime(s.uptime_seconds))),
+            // Older server without /stats: sum the list.
+            None => {
+                let (down, up) = self
+                    .torrents
+                    .iter()
+                    .filter_map(|t| t.stats.as_ref()?.live.as_ref())
+                    .fold((0.0, 0.0), |(d, u), l| {
+                        (d + l.download_speed.mbps, u + l.upload_speed.mbps)
+                    });
+                footer
+                    .child(format!("↓ {}{}", fmt(down), limit(dl_limit)))
+                    .child(format!("↑ {}{}", fmt(up), limit(ul_limit)))
+            }
+        }
     }
 
     fn render_toolbar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
