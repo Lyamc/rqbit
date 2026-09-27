@@ -105,7 +105,11 @@ pub fn make_api_router(state: ApiState) -> Router {
             "/torrents/{id}/stream/{file_id}/{*filename}",
             get(streaming::h_torrent_stream_file),
         )
-        .route("/torrents/limits", get(configure::h_get_session_ratelimits));
+        .route("/torrents/limits", get(configure::h_get_session_ratelimits))
+        .route(
+            "/torrents/preferences",
+            get(configure::h_get_session_preferences),
+        );
 
     if !state.opts.read_only {
         api_router = api_router
@@ -115,12 +119,24 @@ pub fn make_api_router(state: ApiState) -> Router {
                 post(configure::h_update_session_ratelimits),
             )
             .route(
+                "/torrents/preferences",
+                post(configure::h_update_session_preferences),
+            )
+            .route(
                 "/torrents/{id}/pause",
                 post(torrents::h_torrent_action_pause),
             )
             .route(
                 "/torrents/{id}/start",
                 post(torrents::h_torrent_action_start),
+            )
+            .route(
+                "/torrents/{id}/restart",
+                post(torrents::h_torrent_action_restart),
+            )
+            .route(
+                "/torrents/{id}/fix_errors",
+                post(torrents::h_torrent_action_fix_errors),
             )
             .route(
                 "/torrents/{id}/forget",

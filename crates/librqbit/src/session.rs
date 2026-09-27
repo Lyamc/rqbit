@@ -26,6 +26,7 @@ use crate::{
     peer_connection::PeerConnectionOptions,
     read_buf::ReadBuf,
     session_persistence::{SessionPersistenceStore, json::JsonSessionPersistenceStore},
+    session_preferences::{SessionPreferences, SessionPreferencesStore},
     session_stats::SessionStats,
     spawn_utils::BlockingSpawner,
     storage::{
@@ -137,6 +138,9 @@ pub struct Session {
     // Limits and throttling
     pub(crate) concurrent_initialize_semaphore: Arc<tokio::sync::Semaphore>,
     pub ratelimits: Limits,
+
+    /// Session-level preferences (persisted as preferences.json).
+    pub preferences: SessionPreferencesStore,
 
     pub blocklist: IpRanges,
     pub allowlist: Option<IpRanges>,
@@ -777,6 +781,25 @@ impl Session {
                 }
             };
 
+            let preferences_path = {
+                let folder = match &opts.persistence {
+                    Some(SessionPersistenceConfig::Json { folder: Some(f) }) => f.clone(),
+                    Some(SessionPersistenceConfig::Json { folder: None }) => {
+                        SessionPersistenceConfig::default_json_persistence_folder()
+                            .unwrap_or_else(|_| default_output_folder.clone())
+                    }
+                    #[cfg(feature = "postgres")]
+                    Some(SessionPersistenceConfig::Postgres { .. }) => {
+                        SessionPersistenceConfig::default_json_persistence_folder()
+                            .unwrap_or_else(|_| default_output_folder.clone())
+                    }
+                    None => SessionPersistenceConfig::default_json_persistence_folder()
+                        .unwrap_or_else(|_| default_output_folder.clone()),
+                };
+                folder.join("preferences.json")
+            };
+            let preferences = SessionPreferencesStore::load_or_default(preferences_path).await;
+
             let session = Arc::new(Self {
                 persistence,
                 bitv_factory,
@@ -801,6 +824,7 @@ impl Session {
                 )),
                 udp_tracker_client,
                 ratelimits: Limits::new(opts.ratelimits),
+                preferences,
                 ipv4_only: opts.ipv4_only,
                 trackers: opts.trackers,
                 disable_trackers: opts.disable_trackers,
@@ -1600,6 +1624,14 @@ impl Session {
         {
             warn!(storage=?p, error=?e, "error updating metadata")
         }
+    }
+
+    pub fn preferences(&self) -> SessionPreferences {
+        self.preferences.get()
+    }
+
+    pub async fn update_preferences(&self, prefs: SessionPreferences) -> anyhow::Result<()> {
+        self.preferences.update(prefs).await
     }
 
     pub async fn pause(&self, handle: &ManagedTorrentHandle) -> anyhow::Result<()> {

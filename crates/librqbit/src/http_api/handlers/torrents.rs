@@ -214,6 +214,28 @@ pub async fn h_torrent_action_start(
         .map(axum::Json)
 }
 
+pub async fn h_torrent_action_restart(
+    State(state): State<ApiState>,
+    Path(idx): Path<TorrentIdOrHash>,
+) -> Result<impl IntoResponse> {
+    state
+        .api
+        .api_torrent_action_restart(idx)
+        .await
+        .map(axum::Json)
+}
+
+pub async fn h_torrent_action_fix_errors(
+    State(state): State<ApiState>,
+    Path(idx): Path<TorrentIdOrHash>,
+) -> Result<impl IntoResponse> {
+    state
+        .api
+        .api_torrent_action_fix_errors(idx)
+        .await
+        .map(axum::Json)
+}
+
 pub async fn h_torrent_action_forget(
     State(state): State<ApiState>,
     Path(idx): Path<TorrentIdOrHash>,

@@ -2,7 +2,12 @@ import React, { useContext, useEffect, useState } from "react";
 import { TabbedConfigModal } from "../modal/TabbedConfigModal";
 import { RateLimitsTab } from "./RateLimitsTab";
 import { APIContext } from "../../context";
-import { LimitsConfig, ErrorDetails } from "../../api-types";
+import {
+  LimitsConfig,
+  SessionPreferences,
+  ErrorDetails,
+} from "../../api-types";
+import { FormCheckbox } from "../forms/FormCheckbox";
 import { ErrorWithLabel } from "../../rqbit-web";
 import { Spinner } from "../Spinner";
 import { Modal } from "../modal/Modal";
@@ -21,6 +26,9 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({
     upload_bps: null,
     download_bps: null,
   });
+  const [preferences, setPreferences] = useState<SessionPreferences>({
+    soft_recover_on_io_error: false,
+  });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<ErrorWithLabel | null>(null);
@@ -31,12 +39,13 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({
     if (isOpen) {
       setLoading(true);
       setError(null);
-      API.getLimits()
-        .then((config) => {
+      Promise.all([API.getLimits(), API.getPreferences()])
+        .then(([config, prefs]) => {
           setLimits(config);
+          setPreferences(prefs);
         })
         .catch((e: ErrorDetails) => {
-          setError({ text: "Error loading limits", details: e });
+          setError({ text: "Error loading configuration", details: e });
         })
         .finally(() => setLoading(false));
     }
@@ -47,6 +56,7 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({
     setError(null);
     try {
       await API.setLimits(limits);
+      await API.setPreferences(preferences);
       onClose();
     } catch (e) {
       setError({ text: "Error saving limits", details: e as ErrorDetails });
@@ -93,7 +103,19 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({
           id: "other",
           label: "Other",
           content: (
-            <div className="text-secondary py-2">
+            <div className="text-secondary py-2 space-y-3">
+              <FormCheckbox
+                checked={preferences.soft_recover_on_io_error}
+                name="soft_recover_on_io_error"
+                label="Soft-recover on disk I/O errors"
+                help="When a write fails, invalidate only the affected piece and redownload it instead of fatally stopping the torrent. Saved on the server."
+                onChange={(e) =>
+                  setPreferences((p) => ({
+                    ...p,
+                    soft_recover_on_io_error: e.target.checked,
+                  }))
+                }
+              />
               <p>
                 All other parameters (DHT, connections, persistence, etc.) can
                 be configured via{" "}

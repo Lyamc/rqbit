@@ -4,6 +4,7 @@
 import {
   AddTorrentResponse,
   LimitsConfig,
+  SessionPreferences,
   ListTorrentsResponse,
   PeerStatsSnapshot,
   RqbitAPI,
@@ -556,6 +557,16 @@ export const MockAPI: RqbitAPI & { getVersion: () => Promise<string> } = {
     torrentStates.set(index, "live");
   },
 
+  restart: async (index: number): Promise<void> => {
+    await new Promise((r) => setTimeout(r, 50));
+    torrentStates.set(index, "live");
+  },
+
+  fixErrors: async (index: number): Promise<void> => {
+    await new Promise((r) => setTimeout(r, 50));
+    torrentStates.set(index, "live");
+  },
+
   forget: async (index: number): Promise<void> => {
     await new Promise((r) => setTimeout(r, 50));
     deletedTorrents.add(index);
@@ -595,6 +606,11 @@ export const MockAPI: RqbitAPI & { getVersion: () => Promise<string> } = {
 
     return haves;
   },
+
+  getPreferences: async (): Promise<SessionPreferences> => {
+    return { soft_recover_on_io_error: false };
+  },
+  setPreferences: async (_prefs: SessionPreferences): Promise<void> => {},
 
   getLimits: async (): Promise<LimitsConfig> => {
     return { upload_bps: null, download_bps: null };

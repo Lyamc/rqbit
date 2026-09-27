@@ -2,6 +2,7 @@ import {
   AddTorrentResponse,
   ErrorDetails,
   LimitsConfig,
+  SessionPreferences,
   ListTorrentsResponse,
   PeerStatsSnapshot,
   RqbitAPI,
@@ -170,6 +171,14 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
     return makeRequest("POST", `/torrents/${index}/start`);
   },
 
+  restart: (index: number): Promise<void> => {
+    return makeRequest("POST", `/torrents/${index}/restart`);
+  },
+
+  fixErrors: (index: number): Promise<void> => {
+    return makeRequest("POST", `/torrents/${index}/fix_errors`);
+  },
+
   forget: (index: number): Promise<void> => {
     return makeRequest("POST", `/torrents/${index}/forget`);
   },
@@ -203,5 +212,11 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
   },
   setLimits: (limits: LimitsConfig): Promise<void> => {
     return makeRequest("POST", "/torrents/limits", limits, true);
+  },
+  getPreferences: (): Promise<SessionPreferences> => {
+    return makeRequest("GET", "/torrents/preferences");
+  },
+  setPreferences: (prefs: SessionPreferences): Promise<void> => {
+    return makeRequest("POST", "/torrents/preferences", prefs, true);
   },
 };
