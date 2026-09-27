@@ -608,8 +608,14 @@ export const MockAPI: RqbitAPI & { getVersion: () => Promise<string> } = {
   },
 
   getPreferences: async (): Promise<SessionPreferences> => {
-    return { soft_recover_on_io_error: false };
+    return { soft_recover_on_io_error: false, on_complete_hook: null, move_completed_path: null, move_completed_copy: false };
   },
+  renameFile: async (_index: number, _fileId: number, _newPath: string): Promise<void> => {},
+  relocateTorrent: async (
+    _index: number,
+    _destination: string,
+    _copy?: boolean,
+  ): Promise<void> => {},
   setPreferences: async (_prefs: SessionPreferences): Promise<void> => {},
 
   getLimits: async (): Promise<LimitsConfig> => {

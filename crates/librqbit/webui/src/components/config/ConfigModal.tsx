@@ -8,6 +8,7 @@ import {
   ErrorDetails,
 } from "../../api-types";
 import { FormCheckbox } from "../forms/FormCheckbox";
+import { FormInput } from "../forms/FormInput";
 import { ErrorWithLabel } from "../../rqbit-web";
 import { Spinner } from "../Spinner";
 import { Modal } from "../modal/Modal";
@@ -28,6 +29,9 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({
   });
   const [preferences, setPreferences] = useState<SessionPreferences>({
     soft_recover_on_io_error: false,
+    on_complete_hook: "",
+    move_completed_path: "",
+    move_completed_copy: false,
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -56,7 +60,15 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({
     setError(null);
     try {
       await API.setLimits(limits);
-      await API.setPreferences(preferences);
+      await API.setPreferences({
+        ...preferences,
+        on_complete_hook: preferences.on_complete_hook?.trim()
+          ? preferences.on_complete_hook
+          : null,
+        move_completed_path: preferences.move_completed_path?.trim()
+          ? preferences.move_completed_path
+          : null,
+      });
       onClose();
     } catch (e) {
       setError({ text: "Error saving limits", details: e as ErrorDetails });
@@ -113,6 +125,44 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({
                   setPreferences((p) => ({
                     ...p,
                     soft_recover_on_io_error: e.target.checked,
+                  }))
+                }
+              />
+              <FormInput
+                name="on_complete_hook"
+                label="On-complete hook (shell)"
+                value={preferences.on_complete_hook ?? ""}
+                placeholder="e.g. notify-send done $RQBIT_NAME"
+                help="Shell command run when a torrent finishes. Env: RQBIT_TORRENT_ID, RQBIT_INFO_HASH, RQBIT_NAME, RQBIT_OUTPUT_FOLDER."
+                onChange={(e) =>
+                  setPreferences((p) => ({
+                    ...p,
+                    on_complete_hook: e.target.value || null,
+                  }))
+                }
+              />
+              <FormInput
+                name="move_completed_path"
+                label="Move completed to"
+                value={preferences.move_completed_path ?? ""}
+                placeholder="/data/completed"
+                help="If set, move (or copy) torrent files here when download finishes. Seeding continues from the new location."
+                onChange={(e) =>
+                  setPreferences((p) => ({
+                    ...p,
+                    move_completed_path: e.target.value || null,
+                  }))
+                }
+              />
+              <FormCheckbox
+                checked={!!preferences.move_completed_copy}
+                name="move_completed_copy"
+                label="Copy instead of move when completing"
+                help="Leave originals in place and copy into the completed folder."
+                onChange={(e) =>
+                  setPreferences((p) => ({
+                    ...p,
+                    move_completed_copy: e.target.checked,
                   }))
                 }
               />

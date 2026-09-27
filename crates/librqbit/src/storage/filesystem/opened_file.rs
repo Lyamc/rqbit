@@ -2,7 +2,7 @@ use std::{
     fs::File,
     io::IoSlice,
     ops::{Deref, DerefMut},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use anyhow::Context;
@@ -191,6 +191,51 @@ impl OpenedFile {
         let g = parking_lot::RwLockWriteGuard::downgrade(g);
         Ok(RwLockReadGuard::try_map(g, |f| f.fd.as_ref()).ok().unwrap())
     }
+
+    pub fn is_dummy(&self) -> bool {
+        let g = self.file.read();
+        g.fd.is_none() && g.path.as_os_str().is_empty()
+    }
+
+    #[allow(dead_code)]
+    pub fn current_path(&self) -> PathBuf {
+        self.file.read().path.clone()
+    }
+
+    pub fn close_fd(&self) -> anyhow::Result<()> {
+        let mut g = self.file.write();
+        g.fd = None;
+        Ok(())
+    }
+
+    pub fn reopen(&self, path: PathBuf, f: File) -> anyhow::Result<()> {
+        let mut g = self.file.write();
+        g.path = path;
+        g.fd = Some(f);
+        #[cfg(windows)]
+        {
+            g.tried_marking_sparse = false;
+        }
+        Ok(())
+    }
+
+    /// Close the FD, rename the on-disk path, leave FD closed (caller reopens).
+    pub fn close_and_rename(&self, new_full_path: &Path) -> anyhow::Result<()> {
+        let mut g = self.file.write();
+        g.fd = None;
+        let old = g.path.clone();
+        if old.as_os_str().is_empty() {
+            anyhow::bail!("dummy file has no path");
+        }
+        if old != new_full_path {
+            std::fs::rename(&old, new_full_path).with_context(|| {
+                format!("error renaming {old:?} -> {new_full_path:?}")
+            })?;
+            g.path = new_full_path.to_path_buf();
+        }
+        Ok(())
+    }
+
 }
 
 #[cfg(test)]

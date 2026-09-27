@@ -457,3 +457,40 @@ pub async fn h_create_torrent(
         }
     }
 }
+
+#[derive(Deserialize)]
+pub struct RenameFileBody {
+    pub file_id: usize,
+    pub new_path: String,
+}
+
+pub async fn h_rename_file(
+    State(state): State<ApiState>,
+    Path(id): Path<TorrentIdOrHash>,
+    axum::Json(body): axum::Json<RenameFileBody>,
+) -> Result<impl IntoResponse> {
+    state
+        .api
+        .api_torrent_action_rename_file(id, body.file_id, body.new_path)
+        .await
+        .map(axum::Json)
+}
+
+#[derive(Deserialize)]
+pub struct RelocateBody {
+    pub destination: String,
+    #[serde(default)]
+    pub copy: bool,
+}
+
+pub async fn h_relocate(
+    State(state): State<ApiState>,
+    Path(id): Path<TorrentIdOrHash>,
+    axum::Json(body): axum::Json<RelocateBody>,
+) -> Result<impl IntoResponse> {
+    state
+        .api
+        .api_torrent_action_relocate(id, body.destination, body.copy)
+        .await
+        .map(axum::Json)
+}

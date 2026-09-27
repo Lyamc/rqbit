@@ -62,6 +62,12 @@ export const APIContext = createContext<RqbitAPI>({
   getPreferences: function () {
     throw new Error("Function not implemented.");
   },
+  renameFile: function () {
+    return Promise.reject(new Error("API not set"));
+  },
+  relocateTorrent: function () {
+    return Promise.reject(new Error("API not set"));
+  },
   setPreferences: function () {
     throw new Error("Function not implemented.");
   },

@@ -56,8 +56,42 @@ export const FilesTab: React.FC<FilesTabProps> = ({
     return <div className="p-4 text-tertiary">Loading...</div>;
   }
 
+  const renameSelected = async () => {
+    if (selectedFiles.size !== 1) {
+      setCloseableError({
+        text: "Select exactly one file to rename",
+        details: undefined,
+      });
+      return;
+    }
+    const fileId = Array.from(selectedFiles)[0];
+    const current = detailsResponse.files[fileId]?.name ?? "";
+    const next = window.prompt("New relative path for file", current);
+    if (!next || next === current) return;
+    try {
+      await API.renameFile(torrentId, fileId, next);
+      onRefresh?.();
+      setCloseableError(null);
+    } catch (e) {
+      setCloseableError({
+        text: "Error renaming file",
+        details: e as ErrorDetails,
+      });
+    }
+  };
+
   return (
     <div className="p-2 text-sm">
+      <div className="mb-2 flex gap-2">
+        <button
+          type="button"
+          className="px-2 py-1 rounded border border-divider text-xs hover:bg-surface-raised"
+          onClick={renameSelected}
+          disabled={savingSelectedFiles}
+        >
+          Rename selected
+        </button>
+      </div>
       <FileListInput
         torrentId={torrentId}
         torrentDetails={detailsResponse}

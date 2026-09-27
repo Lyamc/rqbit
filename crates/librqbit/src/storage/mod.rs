@@ -172,6 +172,31 @@ pub trait TorrentStorage: Send + Sync {
     /// This is used to make the underlying object useless when e.g. pausing the torrent.
     fn take(&self) -> anyhow::Result<Box<dyn TorrentStorage>>;
 
+
+    /// Rename a file on-disk path while keeping the same file_id / piece mapping.
+    /// Default: not supported.
+    fn rename_file(
+        &self,
+        _shared: &ManagedTorrentShared,
+        _metadata: &TorrentMetadata,
+        _file_id: usize,
+        _new_relative_path: &Path,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("rename_file not supported by this storage")
+    }
+
+    /// Move or copy all torrent files to a new output folder and reopen handles there.
+    /// Default: not supported.
+    fn relocate_output(
+        &self,
+        _shared: &ManagedTorrentShared,
+        _metadata: &TorrentMetadata,
+        _new_output_folder: &Path,
+        _copy: bool,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("relocate_output not supported by this storage")
+    }
+
     /// Callback called every time a piece has completed and has been validated.
     /// Default implementation does nothing, but can be override in trait implementations.
     fn on_piece_completed(&self, _piece_index: ValidPieceIndex) -> anyhow::Result<()> {
@@ -210,6 +235,27 @@ impl<U: TorrentStorage + ?Sized> TorrentStorage for Box<U> {
         metadata: &TorrentMetadata,
     ) -> anyhow::Result<()> {
         (**self).init(shared, metadata)
+    }
+
+
+    fn rename_file(
+        &self,
+        shared: &ManagedTorrentShared,
+        metadata: &TorrentMetadata,
+        file_id: usize,
+        new_relative_path: &Path,
+    ) -> anyhow::Result<()> {
+        (**self).rename_file(shared, metadata, file_id, new_relative_path)
+    }
+
+    fn relocate_output(
+        &self,
+        shared: &ManagedTorrentShared,
+        metadata: &TorrentMetadata,
+        new_output_folder: &Path,
+        copy: bool,
+    ) -> anyhow::Result<()> {
+        (**self).relocate_output(shared, metadata, new_output_folder, copy)
     }
 
     fn on_piece_completed(&self, piece_id: ValidPieceIndex) -> anyhow::Result<()> {

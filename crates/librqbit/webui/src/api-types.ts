@@ -130,6 +130,9 @@ export interface LimitsConfig {
 
 export interface SessionPreferences {
   soft_recover_on_io_error: boolean;
+  on_complete_hook?: string | null;
+  move_completed_path?: string | null;
+  move_completed_copy?: boolean;
 }
 
 // Interface for the Torrent Stats API response
@@ -275,6 +278,8 @@ export interface RqbitAPI {
 
   pause: (index: number) => Promise<void>;
   updateOnlyFiles: (index: number, files: number[]) => Promise<void>;
+  renameFile: (index: number, fileId: number, newPath: string) => Promise<void>;
+  relocateTorrent: (index: number, destination: string, copy?: boolean) => Promise<void>;
   start: (index: number) => Promise<void>;
   restart: (index: number) => Promise<void>;
   fixErrors: (index: number) => Promise<void>;
