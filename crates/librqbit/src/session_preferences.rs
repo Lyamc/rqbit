@@ -155,6 +155,21 @@ pub struct SessionPreferences {
     /// Default download order (piece picker); torrents and files may override it.
     #[serde(default)]
     pub download_order: crate::download_order::DownloadOrderDefaults,
+
+    /// Orphan cleanup: scan the default folders every N hours and report what it finds
+    /// (to Events and the Cleanup view). Never moves or deletes anything by itself.
+    /// 0 / unset = off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_scan_hours: Option<u64>,
+
+    /// Orphan cleanup ignores anything modified in the last N minutes. Unset = 60.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_min_age_minutes: Option<u64>,
+
+    /// Extra folders to offer in the Cleanup view (must be under the download folder,
+    /// a completion Move / organize folder, or `RQBIT_FS_BROWSE_ROOTS`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cleanup_extra_roots: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -203,6 +218,9 @@ impl Default for SessionPreferences {
             rules: Default::default(),
             queue_seed_rotation_secs: None,
             download_order: Default::default(),
+            cleanup_scan_hours: None,
+            cleanup_min_age_minutes: None,
+            cleanup_extra_roots: Vec::new(),
         }
     }
 }

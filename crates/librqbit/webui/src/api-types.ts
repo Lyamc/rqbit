@@ -274,6 +274,9 @@ export interface SessionPreferences {
   queue_seed_rotation_secs?: number | null;
   /** Default download order (piece picker). */
   download_order?: DownloadOrderDefaults;
+  cleanup_scan_hours?: number | null;
+  cleanup_min_age_minutes?: number | null;
+  cleanup_extra_roots?: string[];
 }
 
 export type RemoveAction = "keep_files" | "delete_files";
@@ -296,6 +299,86 @@ export interface RemoveOutcome {
   kept_files: number;
   actions_run: string[];
   final_folder?: string;
+}
+
+// ---- Orphan cleanup
+export interface CleanupRoot {
+  path: string;
+  kind: "download" | "move" | "organize" | "custom";
+  default_on: boolean;
+  exists: boolean;
+}
+export interface CleanupScanSummary {
+  scan_id: string;
+  time: number;
+  items: number;
+  total_bytes: number;
+  scheduled: boolean;
+}
+export interface CleanupRootsResponse {
+  roots: CleanupRoot[];
+  min_age_minutes: number;
+  scan_hours: number | null;
+  allowed_parents: string[];
+  latest_scan: CleanupScanSummary | null;
+}
+export interface CleanupItem {
+  id: number;
+  path: string;
+  root: string;
+  kind: "file" | "dir";
+  size: number;
+  mtime: number | null;
+  files: number;
+  reason: string;
+}
+export interface CleanupScan {
+  scan_id: string;
+  time: number;
+  roots: string[];
+  min_age_minutes: number;
+  items: CleanupItem[];
+  skipped: {
+    recent: number;
+    symlinks: number;
+    hidden: number;
+    errors: string[];
+    truncated: boolean;
+  };
+  total_bytes: number;
+  torrents_checked: number;
+  protected_folders: number;
+  scheduled: boolean;
+  duration_ms: number;
+}
+export interface CleanupItemResult {
+  id: number | null;
+  path: string;
+  ok: boolean;
+  error?: string;
+  moved_to?: string;
+  size: number;
+}
+export interface CleanupApplyOutcome {
+  action: "quarantine" | "delete";
+  ok: number;
+  failed: number;
+  bytes: number;
+  batches?: string[];
+  results: CleanupItemResult[];
+}
+export interface QuarantineBatch {
+  id: string;
+  root: string;
+  dir: string;
+  created: number;
+  items: {
+    original: string;
+    stored: string;
+    kind: string;
+    size: number;
+    files: number;
+  }[];
 }
 
 export interface RemovePreviewItem {
@@ -848,6 +931,26 @@ export interface RqbitAPI {
     opts?: { wait?: boolean },
   ) => Promise<RemoveOutcome>;
   removePreview?: (ids: number[]) => Promise<RemovePreview>;
+  cleanupRoots?: () => Promise<CleanupRootsResponse>;
+  cleanupScan?: (
+    roots: string[] | null,
+    minAgeMinutes?: number,
+  ) => Promise<CleanupScan>;
+  cleanupScanResult?: (scanId?: string) => Promise<CleanupScan>;
+  cleanupApply?: (
+    scanId: string,
+    itemIds: number[],
+    action: "quarantine" | "delete",
+    confirm: boolean,
+  ) => Promise<CleanupApplyOutcome>;
+  cleanupQuarantine?: () => Promise<{ batches: QuarantineBatch[] }>;
+  cleanupRestore?: (
+    batch: string,
+    items?: number[],
+  ) => Promise<{ results: CleanupItemResult[] }>;
+  cleanupPurge?: (
+    batch: string,
+  ) => Promise<{ items: number; bytes: number }>;
   recheck?: (index: number) => Promise<void>;
   getTorrentRules?: (index: number) => Promise<TorrentRulesView>;
   setTorrentRules?: (

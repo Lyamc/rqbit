@@ -215,6 +215,8 @@ enum Row {
     Auth,
     /// Reload preferences.json / restart the process.
     AdminOps,
+    /// Default app for magnet links / .torrent files (this computer or browser).
+    Handlers,
 }
 
 struct Loaded {
@@ -271,6 +273,9 @@ pub struct PrefsPanel {
     message: Option<String>,
     loaded: Option<Loaded>,
     confirm_restart: bool,
+    /// Default-handler status line and the last register/unregister result.
+    handler_status: Option<String>,
+    handler_msg: Option<String>,
 }
 
 impl EventEmitter<PrefsPanelEvent> for PrefsPanel {}
@@ -591,8 +596,11 @@ impl PrefsPanel {
             message: None,
             loaded: None,
             confirm_restart: false,
+            handler_status: None,
+            handler_msg: None,
         };
         this.reload(cx);
+        this.refresh_handler_status(cx);
         this
     }
 
@@ -1582,6 +1590,8 @@ impl PrefsPanel {
             &mut rows,
         );
         rows.push((Interface, Row::Warnings));
+        h(&mut rows, Interface, "Magnet links and .torrent files");
+        rows.push((Interface, Row::Handlers));
 
         self.loaded = Some(Loaded {
             limits,
@@ -1594,6 +1604,133 @@ impl PrefsPanel {
             auth,
             restart_supported: admin.restart_supported,
         });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn refresh_handler_status(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let s = cx
+                .background_executor()
+                .spawn(async move {
+                    use crate::handlers::register as reg;
+                    reg::Launcher::current()
+                        .map(|l| reg::status(&l).describe())
+                        .unwrap_or_else(|e| format!("Can't find the rqbit executable: {e}"))
+                })
+                .await;
+            this.update(cx, |p, cx| {
+                p.handler_status = Some(s);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    #[cfg(target_family = "wasm")]
+    fn refresh_handler_status(&mut self, _cx: &mut Context<Self>) {
+        self.handler_status = Some(
+            "Your browser can open magnet links with this page: they appear in the Add window, ready to add.".into(),
+        );
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn set_handlers(&mut self, register: bool, cx: &mut Context<Self>) {
+        self.handler_msg = Some(if register { "Registering…" } else { "Removing…" }.into());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let msg = cx
+                .background_executor()
+                .spawn(async move {
+                    use crate::handlers::register as reg;
+                    let l = match reg::Launcher::current() {
+                        Ok(l) => l,
+                        Err(e) => return format!("Can't find the rqbit executable: {e}"),
+                    };
+                    if !register {
+                        reg::unregister(&l);
+                        return "rqbit is no longer registered.".into();
+                    }
+                    match reg::register(&l) {
+                        Err(e) => format!("Couldn't register: {e}"),
+                        Ok(notes) => {
+                            let mut m = notes.join(" ");
+                            if cfg!(windows) && !reg::status(&l).is_default() {
+                                reg::open_default_apps_settings();
+                                m.push_str(" Windows doesn't let apps make themselves the default: in the Settings page that opened, choose rqbit for MAGNET and .torrent.");
+                            }
+                            m.trim().to_owned()
+                        }
+                    }
+                })
+                .await;
+            this.update(cx, |p, cx| {
+                p.handler_msg = Some(msg);
+                p.refresh_handler_status(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    #[cfg(target_family = "wasm")]
+    fn set_handlers(&mut self, _register: bool, cx: &mut Context<Self>) {
+        self.handler_msg = Some(match crate::launch::register_browser_magnet_handler() {
+            Ok(_) => "Asked the browser to open magnet links here; confirm in its prompt (if it shows one).".into(),
+            Err(e) => e,
+        });
+        cx.notify();
+    }
+
+    fn render_handlers(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let native = cfg!(not(target_family = "wasm"));
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme::text_muted())
+                    .child(self.handler_status.clone().unwrap_or_else(|| "Checking…".into())),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(
+                        widgets::button(
+                            "handlers-register",
+                            if native {
+                                "Make rqbit the default for magnet links and .torrent files"
+                            } else {
+                                "Register as magnet handler in this browser"
+                            },
+                            true,
+                        )
+                        .on_click(cx.listener(|p, _, _, cx| p.set_handlers(true, cx))),
+                    )
+                    .when(native, |d| {
+                        d.child(
+                            widgets::button("handlers-unregister", "Unregister", true)
+                                .on_click(cx.listener(|p, _, _, cx| p.set_handlers(false, cx))),
+                        )
+                    }),
+            )
+            .children(
+                self.handler_msg
+                    .clone()
+                    .map(|m| div().text_xs().text_color(theme::text()).child(m)),
+            )
+            .child(div().text_xs().text_color(theme::text_muted()).child(if native {
+                "Applies to this computer (your user only). Command line: rqbit-gpui --register-handlers / --unregister-handlers."
+            } else {
+                "Applies to this browser. Browsers ask you to confirm and may only allow it on https pages."
+            }))
+            .into_any_element()
     }
 
     fn save(&mut self, cx: &mut Context<Self>) {
@@ -1883,6 +2020,7 @@ impl PrefsPanel {
                         })
                         .into_any_element()
                 }
+                Row::Handlers => self.render_handlers(cx),
                 Row::AdminOps => {
                     let enabled = !self.saving;
                     let restart_ok = enabled && l.restart_supported;

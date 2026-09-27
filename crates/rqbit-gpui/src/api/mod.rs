@@ -374,6 +374,61 @@ impl ApiClient {
         self.post("events/counters/reset")
     }
 
+    /// `GET /cleanup/roots`: scan roots, defaults and the latest scan.
+    pub fn cleanup_roots(&self) -> ApiFuture<CleanupRootsResponse> {
+        self.get_json("cleanup/roots")
+    }
+
+    /// `GET /cleanup/scan`: dry run (read-only; changes nothing).
+    pub fn cleanup_scan(&self, roots: &[String], min_age_minutes: Option<u64>) -> ApiFuture<CleanupScan> {
+        self.get_json(&cleanup_scan_path(roots, min_age_minutes))
+    }
+
+    /// `GET /cleanup/scan_result`: a recent scan (default: the latest).
+    pub fn cleanup_scan_result(&self, scan_id: Option<&str>) -> ApiFuture<CleanupScan> {
+        self.get_json(&match scan_id {
+            Some(id) => format!(
+                "cleanup/scan_result?scan_id={}",
+                encode_path_segment(id)
+            ),
+            None => "cleanup/scan_result".to_owned(),
+        })
+    }
+
+    /// `POST /cleanup/apply`: quarantine (default) or delete (needs `confirm`).
+    pub fn cleanup_apply(
+        &self,
+        scan_id: &str,
+        item_ids: &[u32],
+        delete: bool,
+    ) -> ApiFuture<CleanupApplyOutcome> {
+        let body = serde_json::json!({
+            "scan_id": scan_id,
+            "item_ids": item_ids,
+            "action": if delete { "delete" } else { "quarantine" },
+            "confirm": delete,
+        });
+        self.post_json("cleanup/apply", Some(&body))
+    }
+
+    /// `GET /cleanup/quarantine`.
+    pub fn cleanup_quarantine(&self) -> ApiFuture<QuarantineList> {
+        self.get_json("cleanup/quarantine")
+    }
+
+    /// `POST /cleanup/restore`: put a whole quarantine batch back.
+    pub fn cleanup_restore(&self, batch: &str) -> ApiFuture<()> {
+        self.post_json_unit("cleanup/restore", &serde_json::json!({ "batch": batch }))
+    }
+
+    /// `POST /cleanup/purge`: permanently delete a quarantine batch.
+    pub fn cleanup_purge(&self, batch: &str) -> ApiFuture<()> {
+        self.post_json_unit(
+            "cleanup/purge",
+            &serde_json::json!({ "batch": batch, "confirm": true }),
+        )
+    }
+
     /// `GET /public_ip`: the server's public addresses (its own egress).
     pub fn public_ip(&self, refresh: bool) -> ApiFuture<PublicIp> {
         self.get_json(if refresh {
@@ -589,6 +644,23 @@ pub struct AddTorrentOpts {
     pub timeout: Option<Duration>,
 }
 
+/// `cleanup/scan?roots=a,b&min_age_minutes=N` (roots comma-joined, like the web UI).
+fn cleanup_scan_path(roots: &[String], min_age_minutes: Option<u64>) -> String {
+    let mut qs = url::form_urlencoded::Serializer::new(String::new());
+    if !roots.is_empty() {
+        qs.append_pair("roots", &roots.join(","));
+    }
+    if let Some(m) = min_age_minutes {
+        qs.append_pair("min_age_minutes", &m.to_string());
+    }
+    let qs = qs.finish();
+    if qs.is_empty() {
+        "cleanup/scan".to_owned()
+    } else {
+        format!("cleanup/scan?{qs}")
+    }
+}
+
 fn encode_path_segment(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
@@ -667,5 +739,34 @@ mod tests {
                 .to_string()
                 .contains("user:pass")
         );
+    }
+
+    #[test]
+    fn cleanup_scan_query() {
+        assert_eq!(cleanup_scan_path(&[], None), "cleanup/scan");
+        assert_eq!(
+            cleanup_scan_path(&["/a b".into(), "/c".into()], Some(0)),
+            "cleanup/scan?roots=%2Fa+b%2C%2Fc&min_age_minutes=0"
+        );
+    }
+
+    #[test]
+    fn cleanup_types_parse() {
+        let s: CleanupScan = serde_json::from_str(
+            r#"{"scan_id":"x","time":1,"roots":["/d"],"min_age_minutes":60,
+               "items":[{"id":3,"path":"/d/a","root":"/d","kind":"dir","size":5,"mtime":null,"files":2,"reason":"r"}],
+               "skipped":{"recent":1,"symlinks":0,"hidden":2,"errors":[],"truncated":false},
+               "total_bytes":5,"torrents_checked":4,"protected_folders":0,"scheduled":false,"duration_ms":3}"#,
+        )
+        .unwrap();
+        assert_eq!(s.items[0].id, 3);
+        assert_eq!(s.items[0].mtime, None);
+        assert_eq!(s.skipped.hidden, 2);
+        let r: CleanupRootsResponse = serde_json::from_str(
+            r#"{"roots":[{"path":"/d","kind":"download","default_on":true,"exists":true}],"min_age_minutes":60,"scan_hours":null,"allowed_parents":[],"latest_scan":null}"#,
+        )
+        .unwrap();
+        assert!(r.roots[0].default_on);
+        assert!(r.latest_scan.is_none());
     }
 }

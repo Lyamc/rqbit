@@ -21,6 +21,12 @@ pub fn set(key: &str, value: &str) {
 
 #[cfg(not(target_family = "wasm"))]
 fn path() -> Option<std::path::PathBuf> {
+    Some(dir()?.join("state.json"))
+}
+
+/// The per-user `rqbit-gpui` config directory (native).
+#[cfg(not(target_family = "wasm"))]
+pub fn dir() -> Option<std::path::PathBuf> {
     use std::path::PathBuf;
     let env = |k: &str| {
         std::env::var_os(k)
@@ -34,7 +40,7 @@ fn path() -> Option<std::path::PathBuf> {
     } else {
         env("XDG_CONFIG_HOME").or_else(|| env("HOME").map(|h| h.join(".config")))
     }?;
-    Some(base.join("rqbit-gpui").join("state.json"))
+    Some(base.join("rqbit-gpui"))
 }
 
 #[cfg(not(target_family = "wasm"))]

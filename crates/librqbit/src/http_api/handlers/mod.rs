@@ -1,4 +1,5 @@
 mod admin;
+mod cleanup;
 mod fs;
 mod configure;
 mod dht;
@@ -66,6 +67,13 @@ async fn h_api_root(parts: Parts) -> impl IntoResponse {
             "GET /add_jobs/{job_id}": "Status of an add started with ?add_job_id= (stage: resolving_metadata, waiting_for_server, ...)",
             "POST /add_jobs/{job_id}/cancel": "Cancel an add started with ?add_job_id= (no-op + already_added if it was committed)",
             "GET /fs/roots": "List allowed filesystem browse roots",
+            "GET /cleanup/roots": "Orphan cleanup: folders that can be scanned (+ latest scan summary)",
+            "GET /cleanup/scan?roots=&min_age_minutes=": "Orphan cleanup dry run: files/folders no torrent uses (changes nothing)",
+            "GET /cleanup/scan_result?scan_id=": "A recent cleanup scan (default: latest)",
+            "GET /cleanup/quarantine": "Quarantined cleanup batches",
+            "POST /cleanup/apply": "Quarantine or delete reviewed scan items {scan_id, item_ids, action, confirm}",
+            "POST /cleanup/restore": "Restore a quarantine batch {batch, items?}",
+            "POST /cleanup/purge": "Permanently delete a quarantine batch {batch, confirm}",
             "GET /fs/list": "List a directory under browse roots (?path=&recursive=&torrents_only=)",
             "POST /fs/extract": "Extract .torrent / magnets from a zip (or raw .torrent body)",
             "POST /torrents/create": "Create a torrent and start seeding. Body should be a local folder",
@@ -135,13 +143,20 @@ pub fn make_api_router(state: ApiState) -> Router {
         .route("/events/summary", get(events::h_events_summary))
         .route("/admin", get(admin::h_admin_status))
         .route("/fs/roots", get(fs::h_fs_roots))
-        .route("/fs/list", get(fs::h_fs_list));
+        .route("/fs/list", get(fs::h_fs_list))
+        .route("/cleanup/roots", get(cleanup::h_cleanup_roots))
+        .route("/cleanup/scan", get(cleanup::h_cleanup_scan))
+        .route("/cleanup/scan_result", get(cleanup::h_cleanup_scan_result))
+        .route("/cleanup/quarantine", get(cleanup::h_cleanup_quarantine));
 
     if !state.opts.read_only {
         api_router = api_router
             .route("/torrents", post(torrents::h_torrents_post))
             .route("/add_jobs/{job_id}/cancel", post(torrents::h_add_job_cancel))
             .route("/fs/extract", post(fs::h_fs_extract))
+            .route("/cleanup/apply", post(cleanup::h_cleanup_apply))
+            .route("/cleanup/restore", post(cleanup::h_cleanup_restore))
+            .route("/cleanup/purge", post(cleanup::h_cleanup_purge))
             .route(
                 "/torrents/limits",
                 post(configure::h_update_session_ratelimits),

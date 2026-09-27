@@ -28,6 +28,11 @@ import {
   RemovePolicy,
   RemoveOutcome,
   RemovePreview,
+  CleanupRootsResponse,
+  CleanupScan,
+  CleanupApplyOutcome,
+  CleanupItemResult,
+  QuarantineBatch,
   TorrentRulesView,
   RulesOverride,
   DownloadOrderView,
@@ -375,6 +380,45 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
   removePreview: (ids: number[]): Promise<RemovePreview> => {
     return makeRequest("GET", `/torrents/remove_preview?ids=${ids.join(",")}`);
   },
+  cleanupRoots: (): Promise<CleanupRootsResponse> =>
+    makeRequest("GET", "/cleanup/roots"),
+  cleanupScan: (
+    roots: string[] | null,
+    minAgeMinutes?: number,
+  ): Promise<CleanupScan> => {
+    const q = new URLSearchParams();
+    if (roots && roots.length) q.set("roots", roots.join(","));
+    if (minAgeMinutes !== undefined)
+      q.set("min_age_minutes", String(minAgeMinutes));
+    const qs = q.toString();
+    return makeRequest("GET", `/cleanup/scan${qs ? "?" + qs : ""}`);
+  },
+  cleanupScanResult: (scanId?: string): Promise<CleanupScan> =>
+    makeRequest(
+      "GET",
+      `/cleanup/scan_result${scanId ? "?scan_id=" + encodeURIComponent(scanId) : ""}`,
+    ),
+  cleanupApply: (
+    scanId: string,
+    itemIds: number[],
+    action: "quarantine" | "delete",
+    confirm: boolean,
+  ): Promise<CleanupApplyOutcome> =>
+    makeRequest(
+      "POST",
+      "/cleanup/apply",
+      { scan_id: scanId, item_ids: itemIds, action, confirm },
+      true,
+    ),
+  cleanupQuarantine: (): Promise<{ batches: QuarantineBatch[] }> =>
+    makeRequest("GET", "/cleanup/quarantine"),
+  cleanupRestore: (
+    batch: string,
+    items?: number[],
+  ): Promise<{ results: CleanupItemResult[] }> =>
+    makeRequest("POST", "/cleanup/restore", { batch, items }, true),
+  cleanupPurge: (batch: string): Promise<{ items: number; bytes: number }> =>
+    makeRequest("POST", "/cleanup/purge", { batch, confirm: true }, true),
   recheck: (index: number): Promise<void> => {
     return makeRequest("POST", `/torrents/${index}/recheck`);
   },

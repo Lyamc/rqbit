@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import { Fieldset } from "../forms/Fieldset";
 import { FormCheckbox } from "../forms/FormCheckbox";
 import {
@@ -7,6 +7,8 @@ import {
   SessionPreferences,
 } from "../../api-types";
 import { policyDeletesFiles, policyFromPrefs } from "../../helper/removePrefs";
+import { registerMagnetHandler } from "../../helper/addFragment";
+import { Button } from "../buttons/Button";
 
 export interface InterfaceTabProps {
   preferences: SessionPreferences;
@@ -23,6 +25,7 @@ export const InterfaceTab: React.FC<InterfaceTabProps> = ({
   const confirm = preferences.confirm_remove !== false;
   const policy = policyFromPrefs(preferences);
   const deletes = policyDeletesFiles(policy);
+  const [handlerMsg, setHandlerMsg] = useState<{ ok: boolean; message: string } | null>(null);
   return (
     <div className="text-secondary py-2 space-y-4">
       <Fieldset label="Removing torrents">
@@ -98,6 +101,28 @@ export const InterfaceTab: React.FC<InterfaceTabProps> = ({
             <p className="text-sm text-warning mt-1">
               Confirmation is off, but this policy can delete files, so the
               dialog is still shown whenever a removal would delete something.
+            </p>
+          )}
+        </div>
+      </Fieldset>
+      <Fieldset label="Magnet links">
+        <div className="mb-3">
+          <Button onClick={() => setHandlerMsg(registerMagnetHandler())}>
+            Register as magnet handler
+          </Button>
+          <p className="text-sm text-tertiary mt-1">
+            Makes this browser open magnet links with this page: the Add window
+            opens with the link staged, and nothing is added until you click
+            Add. The browser asks you to confirm and only allows it on https
+            pages (or localhost). For .torrent files and magnet links on the
+            desktop, use the GPUI app (Preferences → Interface).
+          </p>
+          {handlerMsg && (
+            <p
+              className={`text-sm mt-1 ${handlerMsg.ok ? "text-secondary" : "text-warning"}`}
+              data-testid="magnet-handler-msg"
+            >
+              {handlerMsg.message}
             </p>
           )}
         </div>

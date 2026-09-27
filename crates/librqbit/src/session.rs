@@ -153,6 +153,8 @@ pub struct Session {
     pub(crate) events: Arc<crate::event_log::EventLog>,
     /// Automatic rules: persisted per-torrent counters and overrides.
     pub(crate) rules: Arc<crate::torrent_rules::RulesStore>,
+    /// Orphan cleanup: recent scans + quarantine index.
+    pub(crate) cleanup: Arc<crate::orphan_cleanup::CleanupState>,
     /// Torrents with a policy removal in progress.
     finishing: parking_lot::Mutex<HashSet<TorrentId>>,
 
@@ -902,6 +904,12 @@ impl Session {
                     .map(|p| p.join("torrent-rules.json"))
                     .unwrap_or_else(|| PathBuf::from("torrent-rules.json")),
             ));
+            let cleanup = Arc::new(crate::orphan_cleanup::CleanupState::new(
+                preferences_path
+                    .parent()
+                    .map(|p| p.join("cleanup-quarantine.json"))
+                    .unwrap_or_else(|| PathBuf::from("cleanup-quarantine.json")),
+            ));
             let limits_path = preferences_path
                 .parent()
                 .map(|p| p.join("limits.json"))
@@ -941,6 +949,7 @@ impl Session {
                 queue,
                 events,
                 rules,
+                cleanup,
                 finishing: Default::default(),
                 admin,
                 pending,
@@ -1060,6 +1069,7 @@ impl Session {
             session.start_queue_manager();
             session.resume_pending_magnets();
             session.start_rules_manager();
+            session.start_cleanup_scheduler();
 
             Ok(session)
         }

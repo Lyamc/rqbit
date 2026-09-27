@@ -768,3 +768,119 @@ pub struct DownloadOrderView {
     pub files: Vec<FileOrderView>,
     pub summary: String,
 }
+
+// ---- Orphaned-download cleanup (`/cleanup/*`) ----
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct CleanupRoot {
+    pub path: String,
+    /// "download" | "completion" | "organize" | "custom".
+    pub kind: String,
+    pub default_on: bool,
+    pub exists: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct CleanupScanSummary {
+    pub scan_id: String,
+    pub time: u64,
+    pub items: usize,
+    pub total_bytes: u64,
+    pub scheduled: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct CleanupRootsResponse {
+    pub roots: Vec<CleanupRoot>,
+    pub min_age_minutes: u64,
+    pub scan_hours: Option<u64>,
+    pub allowed_parents: Vec<String>,
+    pub latest_scan: Option<CleanupScanSummary>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct CleanupItem {
+    pub id: u32,
+    pub path: String,
+    pub root: String,
+    /// "file" | "dir".
+    pub kind: String,
+    pub size: u64,
+    pub mtime: Option<u64>,
+    pub files: u64,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct CleanupSkipped {
+    pub recent: u64,
+    pub symlinks: u64,
+    pub hidden: u64,
+    pub errors: Vec<String>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct CleanupScan {
+    pub scan_id: String,
+    pub time: u64,
+    pub roots: Vec<String>,
+    pub min_age_minutes: u64,
+    pub items: Vec<CleanupItem>,
+    pub skipped: CleanupSkipped,
+    pub total_bytes: u64,
+    pub torrents_checked: usize,
+    pub scheduled: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct CleanupItemResult {
+    pub id: Option<u32>,
+    pub path: String,
+    pub ok: bool,
+    pub error: Option<String>,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct CleanupApplyOutcome {
+    pub action: String,
+    pub ok: usize,
+    pub failed: usize,
+    pub bytes: u64,
+    pub results: Vec<CleanupItemResult>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct QuarantineItem {
+    pub original: String,
+    pub stored: String,
+    pub kind: String,
+    pub size: u64,
+    pub files: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct QuarantineBatch {
+    pub id: String,
+    pub root: String,
+    pub dir: String,
+    pub created: u64,
+    pub items: Vec<QuarantineItem>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct QuarantineList {
+    pub batches: Vec<QuarantineBatch>,
+}

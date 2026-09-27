@@ -364,6 +364,22 @@ impl AddPanel {
         n
     }
 
+    /// Stage links the app was opened with (default-handler launch,
+    /// `#add=` in the browser). Nothing starts until the user clicks Add.
+    pub fn stage_links(&mut self, links: Vec<String>, origin: &'static str, cx: &mut Context<Self>) {
+        let mut n = 0;
+        for l in links {
+            let magnet = sources::is_magnet(&l);
+            if self.stage_url(l, magnet, origin) {
+                n += 1;
+            }
+        }
+        if n > 0 {
+            self.message = Some(format!("{n} link(s) staged: review and click Add."));
+        }
+        cx.notify();
+    }
+
     /// Stage picked / dropped files (.torrent; .txt/.magnet/.md are scanned
     /// for magnets like the web UI does).
     pub fn add_files(

@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { StatusBadge } from "../StatusBadge";
 import {
   TorrentListItem,
@@ -31,6 +32,10 @@ const LV: React.FC<{
 
 export const OverviewTab: React.FC<OverviewTabProps> = ({ torrent }) => {
   const statsResponse = torrent?.stats ?? null;
+  // Pieces we have, counted from the haves bitmap (the live snapshot's
+  // counter only covers this session).
+  const [havePieces, setHavePieces] = useState<number | null>(null);
+  useEffect(() => setHavePieces(null), [torrent?.id]);
 
   if (!torrent || !statsResponse) {
     return <div className="p-3 text-tertiary">Loading...</div>;
@@ -47,7 +52,10 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ torrent }) => {
 
   const totalPieces = torrent.total_pieces ?? 0;
   const downloadedPieces =
-    statsResponse.live?.snapshot.downloaded_and_checked_pieces ?? 0;
+    havePieces ??
+    (statsResponse.finished
+      ? totalPieces
+      : (statsResponse.live?.snapshot.downloaded_and_checked_pieces ?? 0));
   const pieceSize = totalPieces > 0 ? totalBytes / totalPieces : 0;
 
   const totalUploadedBytes = statsResponse.live?.snapshot.uploaded_bytes ?? 0;
@@ -106,6 +114,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ torrent }) => {
             torrentId={torrent.id}
             totalPieces={totalPieces}
             stats={statsResponse}
+            onHaveCount={setHavePieces}
           />
         </div>
       )}

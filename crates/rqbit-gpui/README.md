@@ -48,6 +48,40 @@ Standalone client binary (does not compile the rqbit server, smaller/faster):
 
 `RQBIT_GUI_URL` sets the default URL; `RQBIT_GUI_LOG=info` prints GPUI logs.
 
+## Magnet links and .torrent files (default app)
+
+`rqbit-gpui <magnet|url|file.torrent>...` opens the Add window with those
+staged (nothing is added until you click Add; the window closes itself once
+everything is in). If rqbit-gpui is already running, the arguments are handed
+to that window instead (loopback socket, port + random token in
+`rqbit-gpui/instance.json` in your config directory). Without `--url` it
+connects to the server you used last.
+
+Register it as the handler, for your user only:
+
+- In the app: Preferences > Interface > "Make rqbit the default for magnet
+  links and .torrent files" (also offered once at startup when it isn't the
+  default; "Don't ask again" remembers that).
+- Command line: `rqbit-gpui --register-handlers` / `--unregister-handlers`.
+- Windows: per-user HKCU entries (ProgIDs `rqbit.Magnet` / `rqbit.Torrent`,
+  `Software\rqbit\Capabilities` in `RegisteredApplications`). Windows 10/11
+  don't let apps make themselves the default silently, so Settings > Default
+  apps opens on rqbit afterwards: choose rqbit for MAGNET and .torrent there.
+  If no app handled magnet links / .torrent files before, rqbit takes them
+  directly. Without the app: `packaging/windows/register-handlers.ps1`.
+  Installer: `packaging/windows/rqbit-gpui.iss` (Inno Setup, per-user,
+  opt-in "Open magnet links and .torrent files with rqbit" checkbox,
+  unregisters on uninstall).
+- Linux: writes `~/.local/share/applications/rqbit-gpui.desktop`
+  (`MimeType=x-scheme-handler/magnet;application/x-bittorrent`) and runs
+  `xdg-mime default` (or edits `~/.config/mimeapps.list`).
+- macOS: not yet (needs an app bundle).
+
+Browser builds (web UI and `/gpui/`): Preferences > Interface > "Register as
+magnet handler" calls `navigator.registerProtocolHandler('magnet',
+'<page>#add=%s')`; a clicked magnet link opens the page with the Add window
+prefilled.
+
 ## Browser build (WebAssembly)
 
 The same UI code also compiles to `wasm32-unknown-unknown` and runs in a

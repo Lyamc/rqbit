@@ -8,6 +8,7 @@
 mod add_panel;
 mod context_menu;
 mod details;
+mod cleanup_panel;
 mod events_panel;
 mod files;
 mod list_state;
@@ -36,6 +37,7 @@ use crate::api::{
 use crate::format::{format_bytes, format_speed, format_uptime};
 use add_panel::{AddPanel, AddPanelEvent};
 use details::{DetailsEvent, DetailsPanel};
+use cleanup_panel::{CleanupPanel, CleanupPanelEvent};
 use events_panel::{EventsPanel, EventsPanelEvent};
 use list_state::{FixAction, Nav, Selection, SortColumn, SortDir, StatusFilter};
 use prefs_panel::{PrefsPanel, PrefsPanelEvent};
@@ -97,6 +99,18 @@ struct DeleteDialog {
     loading: bool,
 }
 
+/// `store` key: "never" = don't offer to become the default handler.
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
+const HANDLER_PROMPT_KEY: &str = "handler_prompt";
+
+#[derive(Clone)]
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
+enum HandlerPrompt {
+    Ask,
+    Working,
+    Done(String),
+}
+
 enum ConnState {
     /// The URL typed in the connection field can't be used.
     Invalid(String),
@@ -145,6 +159,10 @@ pub struct RqbitWindow {
     details_hidden: bool,
     prefs_panel: Option<(Entity<PrefsPanel>, Subscription)>,
     events_panel: Option<(Entity<EventsPanel>, Subscription)>,
+    cleanup_panel: Option<(Entity<CleanupPanel>, Subscription)>,
+    /// First-run "make rqbit the default" bar (native).
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
+    handler_prompt: Option<HandlerPrompt>,
     /// Latest `/events/summary?since_seq=<last seen>` (header badge).
     events_summary: Option<api::EventSummary>,
     /// Highest event seq the user has seen (persisted per server).
@@ -207,6 +225,8 @@ impl RqbitWindow {
             details_hidden: false,
             prefs_panel: None,
             events_panel: None,
+            cleanup_panel: None,
+            handler_prompt: None,
             events_summary: None,
             events_seen: None,
             events_task: None,
@@ -218,6 +238,30 @@ impl RqbitWindow {
             _subscriptions: vec![sub, search_sub],
         };
         this.connect(url, cx);
+        // Magnets / .torrent files the app was opened with (or forwarded by a
+        // second launch, or the browser's #add= fragment).
+        #[cfg(target_family = "wasm")]
+        crate::launch::queue_page_fragment();
+        if let Some(mut rx) = crate::launch::take_receiver() {
+            cx.spawn_in(window, async move |this, cx| {
+                use futures::StreamExt;
+                while let Some(items) = rx.next().await {
+                    if this
+                        .update_in(cx, |this, window, cx| {
+                            window.activate_window();
+                            cx.activate(true);
+                            this.open_launch_items(items, cx);
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            })
+            .detach();
+        }
+        #[cfg(not(target_family = "wasm"))]
+        this.check_default_handler(cx);
         // Browser: files chosen in the file input or dropped on the page.
         #[cfg(target_family = "wasm")]
         {
@@ -254,6 +298,7 @@ impl RqbitWindow {
         self.poll_task = None;
         self.client = None;
         self.events_panel = None;
+        self.cleanup_panel = None;
         self.events_summary = None;
         self.events_task = None;
         self.stats_task = None;
@@ -265,6 +310,8 @@ impl RqbitWindow {
         match parse_base_url(&raw) {
             Err(e) => self.conn = ConnState::Invalid(format!("{e:#}")),
             Ok(url) => {
+                #[cfg(not(target_family = "wasm"))]
+                crate::store::set("last_url", raw.trim());
                 let client = ApiClient::new(self.transport.clone(), url);
                 self.client = Some(client.clone());
                 self.conn = ConnState::Connecting;
@@ -972,6 +1019,7 @@ impl RqbitWindow {
         let client = self.client.clone()?;
         self.prefs_panel = None;
         self.events_panel = None;
+        self.cleanup_panel = None;
         let panel = cx.new(|cx| AddPanel::new(client, cx));
         let sub = cx.subscribe(&panel, |this, _, ev: &AddPanelEvent, cx| match ev {
             AddPanelEvent::Close => {
@@ -1070,6 +1118,7 @@ impl RqbitWindow {
         }
         self.add_panel = None;
         self.prefs_panel = None;
+        self.cleanup_panel = None;
         let known = self.known_hashes();
         let panel = cx.new(|cx| EventsPanel::new(client, torrent, known, cx));
         let sub = cx.subscribe(&panel, |this, _, ev: &EventsPanelEvent, cx| match ev {
@@ -1094,6 +1143,174 @@ impl RqbitWindow {
         cx.notify();
     }
 
+    /// Shows launch items (magnets, .torrent files) in the Add panel.
+    fn open_launch_items(&mut self, items: Vec<crate::launch::LaunchItem>, cx: &mut Context<Self>) {
+        use crate::launch::LaunchItem;
+        if items.is_empty() {
+            return;
+        }
+        let Some(panel) = self.open_add(cx) else {
+            return;
+        };
+        let mut links = Vec::new();
+        #[allow(unused_mut)]
+        let mut paths = Vec::new();
+        for i in items {
+            match i {
+                LaunchItem::Link(l) => links.push(l),
+                LaunchItem::File(p) => paths.push(p),
+            }
+        }
+        if !links.is_empty() {
+            panel.update(cx, |p, cx| p.stage_links(links, "open", cx));
+        }
+        #[cfg(not(target_family = "wasm"))]
+        if !paths.is_empty() {
+            cx.spawn(async move |_, cx| {
+                let read = cx
+                    .background_executor()
+                    .spawn(async move { files::read_paths(&paths) })
+                    .await;
+                panel
+                    .update(cx, |p, cx| p.add_read_results(read, "open", cx))
+                    .ok();
+            })
+            .detach();
+        }
+        #[cfg(target_family = "wasm")]
+        let _ = paths;
+    }
+
+    /// First run: offer to become the default for magnet links / .torrent
+    /// files unless it already is or the user said "don't ask again".
+    #[cfg(not(target_family = "wasm"))]
+    fn check_default_handler(&mut self, cx: &mut Context<Self>) {
+        if crate::store::get(HANDLER_PROMPT_KEY).as_deref() == Some("never") || cfg!(target_os = "macos") {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let status = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::handlers::register::Launcher::current()
+                        .ok()
+                        .map(|l| crate::handlers::register::status(&l))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if status.is_some_and(|s| !s.is_default()) {
+                    this.handler_prompt = Some(HandlerPrompt::Ask);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn make_default_handler(&mut self, cx: &mut Context<Self>) {
+        self.handler_prompt = Some(HandlerPrompt::Working);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let r = cx
+                .background_executor()
+                .spawn(async move {
+                    use crate::handlers::register as reg;
+                    let l = reg::Launcher::current().map_err(|e| e.to_string())?;
+                    let notes = reg::register(&l)?;
+                    if cfg!(windows) {
+                        reg::open_default_apps_settings();
+                    }
+                    Ok::<_, String>((notes, reg::status(&l)))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.handler_prompt = Some(HandlerPrompt::Done(match r {
+                    Ok((_, s)) if s.is_default() => s.describe(),
+                    Ok(_) if cfg!(windows) => "rqbit is registered. Windows doesn't let apps make themselves the default: in the Settings page that opened, choose rqbit for MAGNET and .torrent.".into(),
+                    Ok((_, s)) => s.describe(),
+                    Err(e) => format!("Couldn't register: {e}"),
+                }));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn render_handler_prompt(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let p = self.handler_prompt.clone()?;
+        let row = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_1()
+            .text_sm()
+            .border_b_1()
+            .border_color(theme::border())
+            .bg(theme::surface());
+        let row = match p {
+            HandlerPrompt::Ask => row
+                .child(div().flex_1().child(
+                    "rqbit isn't your default app for magnet links and .torrent files.",
+                ))
+                .child(
+                    widgets::primary_button("hp-yes", "Make rqbit the default", true)
+                        .on_click(cx.listener(|this, _, _, cx| this.make_default_handler(cx))),
+                )
+                .child(widgets::button("hp-later", "Not now", true).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.handler_prompt = None;
+                        cx.notify();
+                    },
+                )))
+                .child(widgets::button("hp-never", "Don't ask again", true).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        crate::store::set(HANDLER_PROMPT_KEY, "never");
+                        this.handler_prompt = None;
+                        cx.notify();
+                    }),
+                )),
+            HandlerPrompt::Working => row.child("Registering…"),
+            HandlerPrompt::Done(msg) => row.child(div().flex_1().child(msg)).child(
+                widgets::button("hp-close", "×", true).on_click(cx.listener(|this, _, _, cx| {
+                    this.handler_prompt = None;
+                    cx.notify();
+                })),
+            ),
+        };
+        Some(row.into_any_element())
+    }
+
+    fn open_cleanup(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        if self
+            .add_panel
+            .as_ref()
+            .is_some_and(|(p, _)| p.read(cx).is_running())
+        {
+            return;
+        }
+        self.add_panel = None;
+        self.prefs_panel = None;
+        self.events_panel = None;
+        let panel = cx.new(|cx| CleanupPanel::new(client, cx));
+        let sub = cx.subscribe(&panel, |this, _, ev: &CleanupPanelEvent, cx| match ev {
+            CleanupPanelEvent::Close => {
+                this.cleanup_panel = None;
+                cx.notify();
+            }
+        });
+        self.cleanup_panel = Some((panel, sub));
+        cx.notify();
+    }
+
     fn open_prefs(&mut self, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else {
             return;
@@ -1107,6 +1324,7 @@ impl RqbitWindow {
         }
         self.add_panel = None;
         self.events_panel = None;
+        self.cleanup_panel = None;
         let panel = cx.new(|cx| PrefsPanel::new(client, cx));
         let sub = cx.subscribe(&panel, |this, _, ev: &PrefsPanelEvent, cx| match ev {
             PrefsPanelEvent::Close => {
@@ -1220,6 +1438,13 @@ impl RqbitWindow {
                 ),
             )
             .child(self.render_events_button(cx))
+            .child(
+                widgets::button("open-cleanup", "Cleanup", self.client.is_some())
+                    .tooltip(widgets::text_tooltip("Clean up orphaned downloads".into()))
+                    .when(self.client.is_some(), |b| {
+                        b.on_click(cx.listener(|this, _, _, cx| this.open_cleanup(cx)))
+                    }),
+            )
             .child(
                 widgets::button("open-prefs", "Preferences", self.client.is_some())
                     .when(self.client.is_some(), |b| {
@@ -1985,6 +2210,13 @@ impl Render for RqbitWindow {
             .text_color(theme::text())
             .child(self.render_connection_bar(cx))
             .child(self.render_banners(cx))
+            .children({
+                #[cfg(not(target_family = "wasm"))]
+                let bar = self.render_handler_prompt(cx);
+                #[cfg(target_family = "wasm")]
+                let bar: Option<gpui::AnyElement> = None;
+                bar
+            })
             .child(self.render_toolbar(cx))
             .child(
                 div()
@@ -2044,6 +2276,10 @@ impl Render for RqbitWindow {
             .when_some(
                 self.events_panel.as_ref().map(|(p, _)| p.clone()),
                 |d, p| d.child(widgets::modal("events-overlay", 1000., p)),
+            )
+            .when_some(
+                self.cleanup_panel.as_ref().map(|(p, _)| p.clone()),
+                |d, p| d.child(widgets::modal("cleanup-overlay", 1000., p)),
             )
             .children(self.render_confirm(cx))
             .children(self.render_row_menu(window, cx));

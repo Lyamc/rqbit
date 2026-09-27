@@ -58,6 +58,7 @@ pub mod repair;
 pub mod torrent_queue;
 pub mod torrent_status;
 pub mod add_job;
+pub mod orphan_cleanup;
 pub mod pending_magnets;
 #[cfg(feature = "http-api")]
 pub mod http_api;
