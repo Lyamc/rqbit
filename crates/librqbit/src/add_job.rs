@@ -46,6 +46,9 @@ pub enum AddJobStage {
     },
     Added { torrent_id: usize },
     AlreadyManaged { torrent_id: usize },
+    /// Magnet queued with a torrent id; its metadata is resolving in the background
+    /// (listed as "Resolving metadata"). A successful add.
+    ResolvingInBackground { torrent_id: usize },
     ListOnly,
     Failed { error: String },
     Cancelled { reason: String },
@@ -57,6 +60,7 @@ impl AddJobStage {
             self,
             AddJobStage::Added { .. }
                 | AddJobStage::AlreadyManaged { .. }
+                | AddJobStage::ResolvingInBackground { .. }
                 | AddJobStage::ListOnly
                 | AddJobStage::Failed { .. }
                 | AddJobStage::Cancelled { .. }
@@ -180,10 +184,20 @@ impl AddJob {
         if g.stage.is_terminal() {
             return match &g.stage {
                 AddJobStage::Cancelled { .. } => AddJobCancelOutcome::Cancelled,
-                AddJobStage::AlreadyManaged { torrent_id } => AddJobCancelOutcome::AlreadyAdded {
-                    torrent_id: *torrent_id,
-                },
+                AddJobStage::AlreadyManaged { torrent_id }
+                | AddJobStage::ResolvingInBackground { torrent_id } => {
+                    AddJobCancelOutcome::AlreadyAdded {
+                        torrent_id: *torrent_id,
+                    }
+                }
                 s => AddJobCancelOutcome::Finished { stage: s.clone() },
+            };
+        }
+        // Finished without a terminal stage (a magnet whose metadata didn't arrive:
+        // the caller queues it and reports ResolvingInBackground): too late to cancel.
+        if g.finished_at.is_some() {
+            return AddJobCancelOutcome::Finished {
+                stage: g.stage.clone(),
             };
         }
         g.stage = AddJobStage::Cancelled {
@@ -306,6 +320,10 @@ impl AddJobs {
         self.jobs.lock().get(id).map(|j| j.status())
     }
 
+    pub(crate) fn job(&self, id: &str) -> Option<Arc<AddJob>> {
+        self.jobs.lock().get(id).cloned()
+    }
+
     /// Cancel a job. An unknown id leaves a cancelled tombstone so a request
     /// that arrives later with this id is refused.
     pub fn cancel(&self, id: &str) -> anyhow::Result<AddJobCancelOutcome> {
@@ -358,6 +376,21 @@ mod tests {
         assert!(j.try_commit(1));
         drop(CancelOnDrop(j.clone()));
         assert!(!j.is_cancelled());
+    }
+
+    #[test]
+    fn resolving_in_background_is_a_finished_add() {
+        let j = AddJob::new(None);
+        j.set_stage(AddJobStage::ResolvingMetadata);
+        j.finish(AddJobStage::ResolvingInBackground { torrent_id: 9 });
+        assert!(matches!(
+            j.cancel("x"),
+            AddJobCancelOutcome::AlreadyAdded { torrent_id: 9 }
+        ));
+        assert!(!j.is_cancelled());
+        let v = serde_json::to_value(j.status()).unwrap();
+        assert_eq!(v["stage"], "resolving_in_background");
+        assert_eq!(v["torrent_id"], 9);
     }
 
     #[test]

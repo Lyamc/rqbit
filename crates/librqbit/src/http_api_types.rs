@@ -32,11 +32,16 @@ pub struct TorrentAddQueryParams {
     pub adopt_foreign_incomplete: Option<String>,
     /// Client-chosen id to poll / cancel this add (see /add_jobs).
     pub add_job_id: Option<String>,
-    /// Fail a magnet add if metadata can't be fetched within this many seconds.
+    /// Magnets: length of one metadata resolve attempt (seconds). When it runs out the
+    /// magnet keeps resolving in the background after a backoff; it never fails the add.
     pub magnet_timeout_secs: Option<u64>,
-    /// Magnets: don't wait for metadata; return a torrent id at once and resolve in the
-    /// background (the torrent shows as "Resolving metadata").
+    /// Accepted for compatibility; no effect. Magnets are always queued at once with a
+    /// torrent id and resolved in the background ("Resolving metadata").
     pub defer_metadata: Option<bool>,
+    /// Magnets: wait for the metadata before answering (old behaviour). If it doesn't
+    /// arrive in time the magnet is queued as a resolving placeholder anyway (still a
+    /// 200 with `resolving: true`), never an error.
+    pub wait_for_metadata: Option<bool>,
 }
 
 impl Serialize for OnlyFiles {
@@ -125,6 +130,7 @@ impl TorrentAddQueryParams {
             add_job_id: self.add_job_id,
             magnet_resolve_timeout: self.magnet_timeout_secs.map(Duration::from_secs),
             defer_metadata: self.defer_metadata.unwrap_or(false),
+            wait_for_metadata: self.wait_for_metadata.unwrap_or(false),
             ..Default::default()
         }
     }

@@ -698,62 +698,203 @@ impl Api {
             .context("line_rx wasn't set")?)
     }
 
+    /// `POST /torrents`. Magnets are queued at once (reserved id, metadata resolved in
+    /// the background, see [`crate::pending_magnets`]); nothing waits on peers or DHT
+    /// unless `wait_for_metadata` is set. Only malformed input is an error; a magnet's
+    /// metadata not having arrived yet never is.
     pub async fn api_add_torrent(
         &self,
         add: AddTorrent<'_>,
         opts: Option<AddTorrentOptions>,
     ) -> Result<ApiAddTorrentResponse> {
-        if let AddTorrent::Url(url) = &add
-            && let Some(o) = opts.as_ref()
-            && o.defer_metadata
-            && !o.list_only
-            && crate::pending_magnets::is_magnet_like(url.trim())
-        {
-            use crate::pending_magnets::DeferredAdd;
-            let url = url.trim().to_string();
-            let opts = opts.unwrap();
-            match self
-                .session
-                .add_magnet_deferred(&url, opts)
-                .await
-                .context("error adding torrent")
-                .with_status(StatusCode::BAD_REQUEST)?
-            {
-                d @ (DeferredAdd::Resolving(_) | DeferredAdd::AlreadyResolving(_)) => {
-                    let (pm, already_managed) = match d {
-                        DeferredAdd::Resolving(pm) => (pm, false),
-                        DeferredAdd::AlreadyResolving(pm) => (pm, true),
-                        DeferredAdd::AlreadyManaged(_) => unreachable!(),
-                    };
-                    let mut details = pending_details(&pm, None);
-                    details.files = Some(vec![]);
-                    return Ok(ApiAddTorrentResponse {
-                        id: Some(pm.id),
-                        output_folder: details.output_folder.clone(),
-                        details,
+        self.api_add_torrent_with_deadline(add, opts, None).await
+    }
+
+    /// Like [`Self::api_add_torrent`]; `deadline` is the HTTP request timeout. A magnet
+    /// add that waits (`wait_for_metadata`, or a `list_only` preview) stops waiting just
+    /// before it: an add is then queued as a resolving placeholder, a preview answers
+    /// "metadata not available yet" (`resolving: true`, no id). Neither is an error.
+    pub async fn api_add_torrent_with_deadline(
+        &self,
+        add: AddTorrent<'_>,
+        opts: Option<AddTorrentOptions>,
+        deadline: Option<std::time::Duration>,
+    ) -> Result<ApiAddTorrentResponse> {
+        use crate::pending_magnets::{is_magnet_like, is_metadata_wait};
+        let mut opts = opts.unwrap_or_default();
+        let magnet_url = match &add {
+            AddTorrent::Url(url) if is_magnet_like(url.trim()) => Some(url.trim().to_string()),
+            _ => None,
+        };
+        let Some(url) = magnet_url else {
+            return self.api_add_torrent_blocking(add, opts).await;
+        };
+        let magnet = validate_magnet(&url)?;
+
+        if !opts.list_only && !opts.wait_for_metadata {
+            let job = match opts.add_job_id.take() {
+                Some(id) => Some(
+                    self.session
+                        .add_jobs
+                        .register(id)
+                        .with_status(StatusCode::BAD_REQUEST)?,
+                ),
+                None => None,
+            };
+            return self.api_queue_magnet(&url, opts, job).await;
+        }
+
+        // Waiting for metadata: explicit wait_for_metadata, or a list_only preview.
+        let list_only = opts.list_only;
+        let placeholder = (!list_only).then(|| placeholder_opts(&opts));
+        if let Some(d) = deadline {
+            let cap = d
+                .saturating_sub(std::time::Duration::from_secs(2))
+                .max(std::time::Duration::from_secs(1));
+            opts.magnet_resolve_timeout =
+                Some(opts.magnet_resolve_timeout.map_or(cap, |t| t.min(cap)));
+        }
+        let job_id = opts.add_job_id.clone();
+        let fut = self.session.add_torrent(AddTorrent::Url(url.clone().into()), Some(opts));
+        let res = match deadline {
+            Some(d) => match tokio::time::timeout(d, fut).await {
+                Ok(r) => r,
+                Err(_) => Err(crate::pending_magnets::MetadataNotReady(format!(
+                    "no metadata within the {}s request timeout",
+                    d.as_secs()
+                ))
+                .into()),
+            },
+            None => fut.await,
+        };
+        match res {
+            Err(e) if is_metadata_wait(&e) => match placeholder {
+                Some(popts) => {
+                    tracing::info!(
+                        info_hash = ?magnet.as_id20(),
+                        "no metadata yet ({e:#}); queued to keep resolving in the background"
+                    );
+                    let job = job_id.and_then(|id| self.session.add_jobs.job(&id));
+                    self.api_queue_magnet(&url, popts, job).await
+                }
+                None => {
+                    // list_only preview: there is nothing to list without metadata.
+                    let info_hash = magnet.as_id20().map(|h| h.as_string()).unwrap_or_default();
+                    Ok(ApiAddTorrentResponse {
+                        id: None,
+                        info_hash: info_hash.clone(),
+                        details: TorrentDetailsResponse {
+                            id: None,
+                            info_hash,
+                            name: magnet.name.clone(),
+                            output_folder: String::new(),
+                            total_pieces: 0,
+                            torznab_category: None,
+                            files: Some(vec![]),
+                            stats: None,
+                        },
+                        output_folder: String::new(),
                         seen_peers: None,
                         resolving: true,
-                        already_managed,
+                        already_managed: false,
+                        state: AddState::ResolvingMetadata,
+                    })
+                }
+            },
+            res => self.add_response(res),
+        }
+    }
+
+    /// Queue a (validated) magnet as a resolving placeholder and answer at once.
+    async fn api_queue_magnet(
+        &self,
+        url: &str,
+        opts: AddTorrentOptions,
+        job: Option<Arc<crate::add_job::AddJob>>,
+    ) -> Result<ApiAddTorrentResponse> {
+        use crate::add_job::AddJobStage;
+        use crate::pending_magnets::DeferredAdd;
+        let res = self
+            .session
+            .add_magnet_deferred(url, opts)
+            .await
+            .context("error adding torrent")
+            .with_status(StatusCode::BAD_REQUEST);
+        let d = match res {
+            Ok(d) => d,
+            Err(e) => {
+                if let Some(j) = &job {
+                    j.finish(AddJobStage::Failed {
+                        error: format!("{e}"),
                     });
                 }
-                DeferredAdd::AlreadyManaged(id) => {
-                    let handle = self.mgr_handle(TorrentIdOrHash::Id(id))?;
-                    let details = self.api_torrent_details(TorrentIdOrHash::Id(id))?;
-                    return Ok(ApiAddTorrentResponse {
-                        id: Some(id),
-                        details,
-                        seen_peers: None,
-                        output_folder: handle.output_folder().to_string_lossy().into_owned(),
-                        resolving: false,
-                        already_managed: true,
-                    });
+                return Err(e);
+            }
+        };
+        match d {
+            d @ (DeferredAdd::Resolving(_) | DeferredAdd::AlreadyResolving(_)) => {
+                let (pm, already_managed) = match d {
+                    DeferredAdd::Resolving(pm) => (pm, false),
+                    DeferredAdd::AlreadyResolving(pm) => (pm, true),
+                    DeferredAdd::AlreadyManaged(_) => unreachable!(),
+                };
+                if let Some(j) = &job {
+                    j.finish(AddJobStage::ResolvingInBackground { torrent_id: pm.id });
                 }
+                let mut details = pending_details(&pm, None);
+                details.files = Some(vec![]);
+                Ok(ApiAddTorrentResponse {
+                    id: Some(pm.id),
+                    info_hash: pm.info_hash.clone(),
+                    output_folder: details.output_folder.clone(),
+                    details,
+                    seen_peers: None,
+                    resolving: true,
+                    already_managed,
+                    state: AddState::ResolvingMetadata,
+                })
+            }
+            DeferredAdd::AlreadyManaged(id) => {
+                if let Some(j) = &job {
+                    j.finish(AddJobStage::AlreadyManaged { torrent_id: id });
+                }
+                let handle = self.mgr_handle(TorrentIdOrHash::Id(id))?;
+                let details = self.api_torrent_details(TorrentIdOrHash::Id(id))?;
+                Ok(ApiAddTorrentResponse {
+                    id: Some(id),
+                    info_hash: details.info_hash.clone(),
+                    details,
+                    seen_peers: None,
+                    output_folder: handle.output_folder().to_string_lossy().into_owned(),
+                    resolving: false,
+                    already_managed: true,
+                    state: AddState::AlreadyManaged,
+                })
             }
         }
-        let response = match self
-            .session
-            .add_torrent(add, opts)
-            .await
+    }
+
+    /// .torrent bytes / http(s) URLs (full metadata): the normal add.
+    async fn api_add_torrent_blocking(
+        &self,
+        add: AddTorrent<'_>,
+        opts: AddTorrentOptions,
+    ) -> Result<ApiAddTorrentResponse> {
+        let res = self.session.add_torrent(add, Some(opts)).await;
+        self.add_response(res)
+    }
+
+    fn add_response(
+        &self,
+        res: anyhow::Result<AddTorrentResponse>,
+    ) -> Result<ApiAddTorrentResponse> {
+        let res = match res {
+            Err(e) if e.downcast_ref::<crate::session::InvalidAddInput>().is_some() => {
+                return Err(ApiError::invalid_input(e));
+            }
+            r => r,
+        };
+        let response = match res
             .context("error adding torrent")
             .with_status(StatusCode::BAD_REQUEST)?
         {
@@ -774,10 +915,12 @@ impl Api {
                 .context("error making torrent details")?;
                 ApiAddTorrentResponse {
                     id: Some(id),
+                    info_hash: details.info_hash.clone(),
                     details,
                     seen_peers: None,
                     resolving: false,
                     already_managed: false,
+                    state: AddState::AlreadyManaged,
                     output_folder: handle
                         .output_folder()
                         .to_string_lossy()
@@ -793,10 +936,12 @@ impl Api {
                 ..
             }) => ApiAddTorrentResponse {
                 id: None,
+                info_hash: info_hash.as_string(),
                 output_folder: output_folder.to_string_lossy().into_owned(),
                 seen_peers: Some(seen_peers),
                 resolving: false,
                 already_managed: false,
+                state: AddState::ListOnly,
                 details: make_torrent_details(
                     None,
                     &info_hash,
@@ -826,10 +971,12 @@ impl Api {
                 .context("error making torrent details")?;
                 ApiAddTorrentResponse {
                     id: Some(id),
+                    info_hash: details.info_hash.clone(),
                     details,
                     seen_peers: None,
                     resolving: false,
                     already_managed: false,
+                    state: AddState::Added,
                     output_folder: handle
                         .output_folder()
                         .to_string_lossy()
@@ -951,6 +1098,58 @@ pub struct ApiAddTorrentResponse {
     /// Deferred magnet add whose info hash was already in rqbit (or resolving).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub already_managed: bool,
+    /// Info hash (hex), same as `details.info_hash`.
+    #[serde(default)]
+    pub info_hash: String,
+    /// What happened: `resolving_metadata` (queued, metadata still being fetched; the
+    /// torrent is listed with id `id`, or for a `list_only` preview `id` is null),
+    /// `added`, `already_managed` or `list_only`.
+    #[serde(default)]
+    pub state: AddState,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AddState {
+    ResolvingMetadata,
+    #[default]
+    Added,
+    AlreadyManaged,
+    ListOnly,
+}
+
+/// The magnet checks `POST /torrents` answers 400 for: scheme, `xt=urn:btih` /
+/// `urn:btmh`, info hash length / encoding. rqbit needs a BTv1 hash, so a BTv2-only
+/// (btmh) magnet is refused too.
+fn validate_magnet(url: &str) -> Result<librqbit_core::magnet::Magnet> {
+    let bad = |e: anyhow::Error| ApiError::invalid_input(e);
+    let magnet = librqbit_core::magnet::Magnet::parse(url)
+        .context("provided path is not a valid magnet URL")
+        .map_err(bad)?;
+    if magnet.as_id20().is_none() {
+        return Err(bad(anyhow::anyhow!(
+            "magnet link has only a BTv2 (urn:btmh) info hash; rqbit needs a BTv1 (urn:btih) one"
+        )));
+    }
+    Ok(magnet)
+}
+
+/// Options a resolving placeholder keeps (see `PendingMagnet`).
+fn placeholder_opts(o: &AddTorrentOptions) -> AddTorrentOptions {
+    AddTorrentOptions {
+        overwrite: o.overwrite,
+        output_folder: o.output_folder.clone(),
+        sub_folder: o.sub_folder.clone(),
+        only_files: o.only_files.clone(),
+        only_files_regex: o.only_files_regex.clone(),
+        paused: o.paused,
+        initial_peers: o.initial_peers.clone(),
+        trackers: o.trackers.clone(),
+        torznab_category: o.torznab_category,
+        adopt_foreign_incomplete: o.adopt_foreign_incomplete.clone(),
+        magnet_resolve_timeout: o.magnet_resolve_timeout,
+        ..Default::default()
+    }
 }
 
 fn pending_details(

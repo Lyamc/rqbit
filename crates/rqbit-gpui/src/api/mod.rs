@@ -639,6 +639,7 @@ pub struct AddTorrentOpts {
     pub output_folder: Option<String>,
     pub magnet_timeout_secs: Option<u64>,
     /// Magnets: return at once; the server resolves metadata in the background.
+    /// Current servers always do this; kept for older servers.
     pub defer_metadata: bool,
     pub add_job_id: Option<String>,
     pub timeout: Option<Duration>,
