@@ -9,6 +9,12 @@
 //! paused in between), shown as "Resolving metadata (no peers yet)". A placeholder is
 //! only marked failed for a real error once the metadata is there (e.g. the output
 //! folder can't be used), and even then it stays listed until the user removes it.
+//!
+//! Paused placeholders (added with `paused=true`, or paused by the user while resolving)
+//! still fetch the metadata: it is tiny, and without it the files can't be listed or
+//! chosen. The DHT is only queried, not announced to (announcing is what advertises
+//! us as a peer for the torrent), and no piece data is downloaded: once the metadata
+//! arrives the torrent is added paused and stays paused until started.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -117,6 +123,8 @@ fn fmt_dur(secs: u64) -> String {
 #[serde(rename_all = "snake_case")]
 pub enum PendingState {
     Resolving,
+    /// Legacy (older builds stopped resolving on pause): loaded as `Resolving` with
+    /// `paused: true`.
     Paused,
     /// A real error after the metadata arrived (never for metadata timing).
     Failed,
@@ -210,7 +218,8 @@ impl PendingMagnet {
 
     fn stats_with(&self, now_unix: i64, stalled_after: Duration) -> TorrentStats {
         let (state, detail, error) = match self.state {
-            PendingState::Resolving => {
+            PendingState::Resolving | PendingState::Paused => {
+                let paused = self.paused || self.state == PendingState::Paused;
                 let total = (now_unix - self.added_unix).max(0) as u64;
                 let stalled = self.attempts > 0 || total >= stalled_after.as_secs();
                 let mut label = if stalled {
@@ -220,26 +229,30 @@ impl PendingMagnet {
                 } else {
                     "Resolving metadata".to_string()
                 };
+                if paused {
+                    // Still fetching the (tiny) metadata; no data until started.
+                    label = format!("Paused · {}", label.replacen("Resolving", "resolving", 1));
+                }
                 if let Some(next) = self.next_retry_unix.filter(|n| *n > now_unix) {
                     label.push_str(&format!(
                         " · next try in {}",
                         fmt_dur((next - now_unix) as u64)
                     ));
                 }
-                (
-                    TorrentStatsState::Initializing { paused: false },
-                    StatusDetail::simple(StatusKind::ResolvingMetadata, label),
-                    None,
-                )
+                if paused {
+                    (
+                        TorrentStatsState::Paused,
+                        StatusDetail::simple(StatusKind::Paused, label),
+                        None,
+                    )
+                } else {
+                    (
+                        TorrentStatsState::Initializing { paused: false },
+                        StatusDetail::simple(StatusKind::ResolvingMetadata, label),
+                        None,
+                    )
+                }
             }
-            PendingState::Paused => (
-                TorrentStatsState::Paused,
-                StatusDetail::simple(
-                    StatusKind::Paused,
-                    "Paused (metadata not resolved yet)".into(),
-                ),
-                None,
-            ),
             PendingState::Failed => {
                 let e = self.error.clone().unwrap_or_else(|| "unknown error".into());
                 (
@@ -306,6 +319,12 @@ impl PendingMagnets {
                 info!(id = m.id, "placeholder was marked failed for a metadata timeout; resolving again");
                 m.state = PendingState::Resolving;
                 m.last_wait = m.error.take();
+            }
+            // Older builds stopped resolving on pause; paused placeholders now keep
+            // fetching the metadata and stay paused.
+            if m.state == PendingState::Paused {
+                m.state = PendingState::Resolving;
+                m.paused = true;
             }
             m
         });
@@ -594,7 +613,7 @@ impl Session {
     }
 
     fn finish_pending_resolve(
-        &self,
+        self: &Arc<Self>,
         id: usize,
         pm: &PendingMagnet,
         still: bool,
@@ -602,7 +621,20 @@ impl Session {
     ) {
         match res {
             Ok(AddTorrentResponse::Added(tid, h)) => {
+                // Paused / started while this attempt ran: follow the latest choice.
+                let want_paused = self.pending.get(id).map(|m| m.paused);
                 self.pending.remove(id);
+                if let Some(want) = want_paused
+                    && want != h.is_paused()
+                {
+                    let (s, h2) = (self.clone(), h.clone());
+                    tokio::spawn(async move {
+                        let r = if want { s.pause(&h2).await } else { s.unpause(&h2).await };
+                        if let Err(e) = r {
+                            warn!(id = tid, "error applying pause state after metadata: {e:#}");
+                        }
+                    });
+                }
                 if !still {
                     debug!(id, "pending magnet resolved after it was removed/paused");
                 }
@@ -677,17 +709,16 @@ impl Session {
         }
     }
 
-    /// Pause a pending magnet (stops resolving). Returns false if `id` isn't pending.
+    /// Pause a pending magnet. It keeps fetching the metadata (tiny; needed to list
+    /// the files) and is then added paused. Returns false if `id` isn't pending.
     pub fn pending_pause(&self, id: usize) -> bool {
-        if !self.pending.contains_id(id) {
-            return false;
-        }
-        self.pending.abort_task(id);
-        self.pending.update(id, |m| {
-            m.state = PendingState::Paused;
-            m.paused = true;
-        });
-        true
+        self.pending.update(id, |m| m.paused = true)
+    }
+
+    /// Clear the paused flag without restarting the resolve (Add dialog finished):
+    /// the torrent starts as soon as its metadata arrives.
+    pub fn pending_unpause_quiet(&self, id: usize) -> bool {
+        self.pending.update(id, |m| m.paused = false)
     }
 
     /// Resume / retry a pending magnet. Returns false if `id` isn't pending.
@@ -862,6 +893,16 @@ mod tests {
         assert!(s.error.unwrap().contains("disk full"));
         let s = pm(1, PendingState::Paused).stats_with(0, STALLED_AFTER);
         assert!(matches!(s.state, TorrentStatsState::Paused));
+        // Added paused: still resolving the metadata, shown as paused.
+        let mut m = pm(1, PendingState::Resolving);
+        m.paused = true;
+        let s = m.stats_with(90, STALLED_AFTER);
+        assert!(matches!(s.state, TorrentStatsState::Paused));
+        assert_eq!(
+            s.status_detail.as_ref().unwrap().label,
+            "Paused · resolving metadata · 1m"
+        );
+        assert!(s.error.is_none());
     }
 
     #[test]
@@ -914,5 +955,17 @@ mod tests {
         assert_eq!(m1.state, PendingState::Resolving);
         assert!(m1.error.is_none());
         assert_eq!(s2.get(2).unwrap().state, PendingState::Failed);
+    }
+
+    #[test]
+    fn legacy_paused_placeholders_keep_resolving_paused() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("pending-magnets.json");
+        let s = PendingMagnets::load(p.clone());
+        s.map.lock().insert(3, pm(3, PendingState::Paused));
+        s.save();
+        let m = PendingMagnets::load(p).get(3).unwrap();
+        assert_eq!(m.state, PendingState::Resolving);
+        assert!(m.paused);
     }
 }

@@ -15,6 +15,7 @@ import { UrlLinesEditor } from "../add/UrlLinesEditor";
 import { extractTorrentSources } from "../../helper/parseTorrentSources";
 import { shouldAutoClose } from "../../helper/autoClose";
 import { addOutcome, RESOLVING_NOTE } from "../../helper/addOutcome";
+import { AddDialogSession } from "../../helper/addDialog";
 import {
   TransferCandidate,
   TransferCandidateChild,
@@ -98,7 +99,12 @@ type ItemOpts = {
   magnet_timeout_secs?: number;
   defer_metadata?: boolean;
   add_job_id?: string;
+  paused?: boolean;
+  add_dialog_id?: string;
 };
+
+const HELD_NOTE =
+  "Added paused — starts when you close this window (adjust files or priorities first if you like).";
 
 /** Book-keeping for one in-flight add request. */
 type InFlightAdd = {
@@ -194,14 +200,39 @@ export const AddModal: React.FC<Props> = ({
   const cancelRef = useRef({ cancelled: false });
   const [allAdded, setAllAdded] = useState(false);
   const autoCloseRef = useRef<number | undefined>(undefined);
-  useEffect(
-    () => () => {
+  // "Add paused" (Advanced). undefined = not known yet: the server applies its
+  // "When a torrent is added" preference.
+  const [addPaused, setAddPaused] = useState<boolean | undefined>(undefined);
+  useEffect(() => {
+    let live = true;
+    API.getPreferences?.()
+      .then((p) => {
+        if (live)
+          setAddPaused((cur) =>
+            cur === undefined ? p?.when_added === "paused" : cur,
+          );
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [API]);
+  // "Start after I finish the Add dialog": torrents the server held for this
+  // window are started when it goes away, however that happens.
+  const dialogRef = useRef<AddDialogSession | null>(null);
+  if (dialogRef.current === null) dialogRef.current = new AddDialogSession(API);
+  useEffect(() => {
+    const dialog = dialogRef.current!;
+    const onPageHide = () => dialog.finish(true);
+    window.addEventListener("pagehide", onPageHide);
+    return () => {
+      window.removeEventListener("pagehide", onPageHide);
+      dialog.finish();
       if (autoCloseRef.current !== undefined) {
         window.clearTimeout(autoCloseRef.current);
       }
-    },
-    [],
-  );
+    };
+  }, []);
   // In-flight add requests (by staging item id), so Stop / close / × can
   // cancel them on the server.
   const inFlightRef = useRef(new Map<string, InFlightAdd>());
@@ -249,6 +280,7 @@ export const AddModal: React.FC<Props> = ({
     outputFolder.trim() ? "custom output folder" : null,
     !overwrite ? "no overwrite" : null,
     concurrency !== DEFAULT_CONCURRENCY ? `${concurrency} at once` : null,
+    addPaused ? "add paused" : null,
   ].filter((x): x is string => !!x);
   const resolvingCount = inFlight.filter(
     (i) => i.serverStage === "resolving_metadata",
@@ -371,6 +403,7 @@ export const AddModal: React.FC<Props> = ({
       cancelRef.current.cancelled = true;
       cancelAll();
     }
+    dialogRef.current?.finish();
     resetForm();
     onClose();
   };
@@ -839,6 +872,8 @@ export const AddModal: React.FC<Props> = ({
             outcome: null,
           };
           itemOpts.add_job_id = job.jobId;
+          itemOpts.paused = addPaused;
+          itemOpts.add_dialog_id = dialogRef.current?.id;
           inFlightRef.current.set(item.id, job);
           let timedOut = false;
           const timer = window.setTimeout(() => {
@@ -887,6 +922,16 @@ export const AddModal: React.FC<Props> = ({
               setItem(item.id, {
                 addedTorrentId: res?.id ?? undefined,
                 note: RESOLVING_NOTE,
+              });
+            }
+            if (res?.held) {
+              dialogRef.current?.noteAdded(res);
+              setItem(item.id, {
+                addedTorrentId: res.id ?? undefined,
+                note:
+                  outcome === "resolving"
+                    ? `${RESOLVING_NOTE} ${HELD_NOTE}`
+                    : HELD_NOTE,
               });
             }
             if (job.outcome === "already_added") {
@@ -1248,6 +1293,16 @@ export const AddModal: React.FC<Props> = ({
                   checked={overwrite}
                   disabled={running}
                   onChange={() => setOverwrite(!overwrite)}
+                />
+              </div>
+
+              <div>
+                <FormCheckbox
+                  name="add_paused"
+                  label="Add paused"
+                  checked={!!addPaused}
+                  disabled={running}
+                  onChange={() => setAddPaused(!addPaused)}
                 />
               </div>
 

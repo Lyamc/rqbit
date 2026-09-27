@@ -110,6 +110,7 @@ struct ChoiceField {
     initial: &'static str,
 }
 
+const WHEN_ADDED: &[(&str, &str)] = &[("start", "Start immediately"), ("paused", "Add paused")];
 const COMPLETE_ACTIONS: &[(&str, &str)] = &[("keep", "Keep files"), ("delete", "Delete files")];
 const INCOMPLETE_ACTIONS: &[(&str, &str)] = &[
     ("keep", "Keep files"),
@@ -1563,6 +1564,23 @@ impl PrefsPanel {
         };
 
         // Interface (server-persisted UI preferences shared with the web UI).
+        h(&mut rows, Interface, "Adding torrents");
+        choicef(
+            Interface,
+            "when_added",
+            "When a torrent is added",
+            "Default for every add (GPUI, web UI, API, watch folder) that doesn't say itself. Magnets still fetch their metadata while paused.",
+            WHEN_ADDED,
+            "start",
+            &mut rows,
+        );
+        boolf(
+            Interface,
+            "start_after_add_dialog",
+            "Start after I finish the Add dialog",
+            "Torrents added from an Add panel stay paused while it is open, so you can adjust files, priorities or the folder, and all start when you close it. Not with \u{201c}Add paused\u{201d}; API and watch-folder adds are unaffected.",
+            &mut rows,
+        );
         h(&mut rows, Interface, "Removing torrents");
         boolf(
             Interface,

@@ -220,6 +220,9 @@ pub struct AddTorrentResponse {
     /// `resolving_metadata`, `added`, `already_managed` or `list_only` (newer servers).
     #[serde(default)]
     pub state: Option<String>,
+    /// Added paused for this Add window; started when the window closes.
+    #[serde(default)]
+    pub held: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

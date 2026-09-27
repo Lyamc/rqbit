@@ -144,6 +144,8 @@ pub struct Session {
 
     /// In-flight add requests that clients can poll / cancel.
     pub add_jobs: AddJobs,
+    /// Torrents held paused by open Add dialogs ("Start after I finish the Add dialog").
+    pub add_dialogs: crate::add_dialog::AddDialogs,
 
     /// Session-level preferences (persisted as preferences.json).
     pub preferences: SessionPreferencesStore,
@@ -901,6 +903,12 @@ impl Session {
                     .map(|p| p.join("pending-magnets.json"))
                     .unwrap_or_else(|| PathBuf::from("pending-magnets.json")),
             );
+            let add_dialogs = crate::add_dialog::AddDialogs::load(
+                preferences_path
+                    .parent()
+                    .map(|p| p.join("add-dialog-holds.json"))
+                    .unwrap_or_else(|| PathBuf::from("add-dialog-holds.json")),
+            );
             let queue = Arc::new(crate::torrent_queue::TorrentQueue::load(
                 preferences_path
                     .parent()
@@ -968,6 +976,7 @@ impl Session {
                 udp_tracker_client,
                 ratelimits: Limits::new(ratelimits_config),
                 add_jobs: AddJobs::default(),
+                add_dialogs,
                 preferences,
                 queue,
                 events,
@@ -1091,6 +1100,7 @@ impl Session {
             session.start_speed_estimator_updater();
             session.start_queue_manager();
             session.resume_pending_magnets();
+            session.start_add_dialog_reaper();
             session.start_rules_manager();
             session.start_cleanup_scheduler();
 

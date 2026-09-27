@@ -52,6 +52,8 @@ const defaultPreferences = (): SessionPreferences => ({
   peer_limit: null,
   confirm_remove: true,
   remove_policy: { complete: "keep", incomplete: "keep" },
+  when_added: "start",
+  start_after_add_dialog: false,
   rules: DEFAULT_RULES(),
   queue_seed_rotation_secs: null,
   download_order: { ...DEFAULT_DOWNLOAD_ORDER },

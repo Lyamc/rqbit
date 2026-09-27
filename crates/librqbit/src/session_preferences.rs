@@ -170,6 +170,29 @@ pub struct SessionPreferences {
     /// a completion Move / organize folder, or `RQBIT_FS_BROWSE_ROOTS`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cleanup_extra_roots: Vec<String>,
+
+    /// "When a torrent is added": start it at once (default) or add it paused. Used
+    /// when the add request doesn't pass `paused` (API, watch folder, UIs); an explicit
+    /// `paused=true|false` wins.
+    #[serde(default)]
+    pub when_added: WhenAdded,
+
+    /// "Start after I finish the Add dialog". Torrents added from an Add dialog (web
+    /// UI Add window, GPUI Add window, magnet/.torrent handler opening it) go in paused
+    /// while the dialog is open, so files, folder and download order can be adjusted
+    /// first, and are started when the dialog is closed / finished (or, as a fallback,
+    /// when it stops sending heartbeats). Not applied to torrents added paused on
+    /// purpose, nor to API / anorak / watch-folder adds. Off by default.
+    #[serde(default)]
+    pub start_after_add_dialog: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WhenAdded {
+    #[default]
+    Start,
+    Paused,
 }
 
 fn default_true() -> bool {
@@ -221,6 +244,8 @@ impl Default for SessionPreferences {
             cleanup_scan_hours: None,
             cleanup_min_age_minutes: None,
             cleanup_extra_roots: Vec::new(),
+            when_added: WhenAdded::Start,
+            start_after_add_dialog: false,
         }
     }
 }
@@ -344,6 +369,15 @@ impl SessionPreferencesStore {
 
     pub fn get(&self) -> SessionPreferences {
         self.prefs.read().clone()
+    }
+
+    /// Default for adds that don't pass `paused` ("When a torrent is added").
+    pub fn add_paused_default(&self) -> bool {
+        self.prefs.read().when_added == WhenAdded::Paused
+    }
+
+    pub fn start_after_add_dialog(&self) -> bool {
+        self.prefs.read().start_after_add_dialog
     }
 
     pub fn soft_recover_on_io_error(&self) -> bool {

@@ -28,6 +28,37 @@ export const InterfaceTab: React.FC<InterfaceTabProps> = ({
   const [handlerMsg, setHandlerMsg] = useState<{ ok: boolean; message: string } | null>(null);
   return (
     <div className="text-secondary py-2 space-y-4">
+      <Fieldset label="Adding torrents">
+        <div className="mb-3">
+          <label htmlFor="when_added" className="block text-sm text-text mb-1">
+            When a torrent is added
+          </label>
+          <select
+            id="when_added"
+            className={selectClass}
+            value={preferences.when_added ?? "start"}
+            onChange={(e) =>
+              onChange({ when_added: e.target.value as "start" | "paused" })
+            }
+          >
+            <option value="start">Start immediately</option>
+            <option value="paused">Add paused</option>
+          </select>
+          <p className="text-xs text-tertiary mt-1">
+            Default for every add (web, GPUI, API, watch folder) that doesn't
+            say itself. Magnets still fetch their metadata while paused.
+          </p>
+        </div>
+        <FormCheckbox
+          checked={preferences.start_after_add_dialog === true}
+          name="start_after_add_dialog"
+          label="Start after I finish the Add dialog"
+          help="Torrents added from an Add window stay paused while it is open, so you can adjust files, priorities or the folder, and all start when you close it. Not with “Add paused”; API and watch-folder adds are unaffected."
+          onChange={(e) =>
+            onChange({ start_after_add_dialog: e.target.checked })
+          }
+        />
+      </Fieldset>
       <Fieldset label="Removing torrents">
         <FormCheckbox
           checked={confirm}

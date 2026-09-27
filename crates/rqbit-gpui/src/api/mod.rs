@@ -554,6 +554,12 @@ impl ApiClient {
             if let Some(id) = &opts.add_job_id {
                 q.append_pair("add_job_id", id);
             }
+            if let Some(p) = opts.paused {
+                q.append_pair("paused", if p { "true" } else { "false" });
+            }
+            if let Some(id) = &opts.add_dialog_id {
+                q.append_pair("add_dialog_id", id);
+            }
             match &source {
                 AddSource::Url(_) => {
                     q.append_pair("is_url", "true");
@@ -584,6 +590,19 @@ impl ApiClient {
             &format!("add_jobs/{}/cancel", encode_path_segment(job_id)),
             None,
         )
+    }
+
+    /// `POST /add_dialog/{id}/heartbeat`: the Add window is still open.
+    pub fn add_dialog_heartbeat(&self, dialog_id: &str) -> ApiFuture<()> {
+        self.post(&format!(
+            "add_dialog/{}/heartbeat",
+            encode_path_segment(dialog_id)
+        ))
+    }
+
+    /// `POST /add_dialog/{id}/finish`: the Add window closed; start what it held.
+    pub fn add_dialog_finish(&self, dialog_id: &str) -> ApiFuture<()> {
+        self.post(&format!("add_dialog/{}/finish", encode_path_segment(dialog_id)))
     }
 
     /// `GET /torrents/limits`.
@@ -643,6 +662,11 @@ pub struct AddTorrentOpts {
     pub defer_metadata: bool,
     pub add_job_id: Option<String>,
     pub timeout: Option<Duration>,
+    /// `Some(true)` add paused, `Some(false)` start; `None` = the server's
+    /// "When a torrent is added" preference.
+    pub paused: Option<bool>,
+    /// The Add window's id ("Start after I finish the Add dialog").
+    pub add_dialog_id: Option<String>,
 }
 
 /// `cleanup/scan?roots=a,b&min_age_minutes=N` (roots comma-joined, like the web UI).

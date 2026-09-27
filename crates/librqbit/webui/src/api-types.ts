@@ -52,6 +52,9 @@ export interface AddTorrentResponse {
   already_managed?: boolean;
   info_hash?: string;
   state?: "resolving_metadata" | "added" | "already_managed" | "list_only";
+  /** Added paused by this Add dialog ("Start after I finish the Add dialog"):
+   *  started when the dialog finishes. */
+  held?: boolean;
 }
 
 export interface ListTorrentsResponse {
@@ -283,6 +286,12 @@ export interface SessionPreferences {
   cleanup_scan_hours?: number | null;
   cleanup_min_age_minutes?: number | null;
   cleanup_extra_roots?: string[];
+  /** "When a torrent is added": start at once (default) or add paused. Applies
+   *  when an add doesn't say `paused`. */
+  when_added?: "start" | "paused";
+  /** Add dialogs: add paused while the dialog is open, start everything when it
+   *  is closed/finished. Off by default. */
+  start_after_add_dialog?: boolean;
 }
 
 export type RemoveAction = "keep_files" | "delete_files";
@@ -742,6 +751,8 @@ export interface AddTorrentOptions {
   /** Magnets: wait for metadata before answering (old behaviour); if it doesn't
    *  arrive in time the magnet is queued anyway (`resolving: true`), never an error. */
   wait_for_metadata?: boolean;
+  /** Set by Add dialogs (see `start_after_add_dialog`). */
+  add_dialog_id?: string;
 }
 
 export type Value = string | number | boolean;
@@ -894,6 +905,10 @@ export interface RqbitAPI {
   getAddJob?: (jobId: string) => Promise<AddJobStatus>;
   /** Cancel an add started with `add_job_id`. */
   cancelAddJob?: (jobId: string) => Promise<AddJobCancelOutcome>;
+  /** Add dialog still open (keeps its held torrents paused). */
+  addDialogHeartbeat?: (dialogId: string) => Promise<unknown>;
+  /** Add dialog closed: start its held torrents (`beacon` on tab close). */
+  addDialogFinish?: (dialogId: string, opts?: { beacon?: boolean }) => unknown;
   fsRoots: () => Promise<FsRootsResponse>;
   fsList: (
     path: string,
