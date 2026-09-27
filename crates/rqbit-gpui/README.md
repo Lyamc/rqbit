@@ -9,17 +9,18 @@ Off by default. Nothing changes in the normal server build unless the `gpui`
 feature is enabled: the crate is an optional dependency of `rqbit` and is not in
 the workspace `default-members`.
 
-## What it does (first slice)
+## What it does
 
-- Torrent list polled from `GET /torrents?with_stats=true` every second:
-  Name, Status (server-computed detailed status + error), Size, Progress,
-  ↓ Download, ↑ Upload (web UI order), Ratio (session upload ÷ bytes on disk).
-- Per row: Start, Pause, Remove (`POST /torrents/{id}/forget`, files are kept;
-  a confirmation dialog is shown first).
-- Connection field (Enter or "Connect"). Accepts `host:port`,
-  `http(s)://host:port[/prefix]`, and `http://user:pass@host:port` for basic auth.
-- Clear error banner when the server is unreachable (retries every 3 s), and
-  for failed actions.
+- Torrent list polled from `GET /torrents?with_stats=true` every second, with
+  the web UI's compact columns (ID, queue #, Name, Status from the server's
+  `status_detail`, Size, Progress, speeds, Ratio, ...), status filter, search,
+  sorting, multi-selection (Shift/Ctrl click and arrows) and right-click menus.
+- Details pane for the selected torrent: Overview, Files, Peers, Events.
+- Add panel (files, URLs, browse server), Events view, Preferences (same
+  endpoints as the web UI's Configure dialog) and Orphan Cleanup.
+- Remove with the remove policy dialog; connection field (`host:port`,
+  `http(s)://host:port[/prefix]`, `http://user:pass@host:port`), and an error
+  banner with automatic retries when the server is unreachable.
 
 ## Build and run
 
