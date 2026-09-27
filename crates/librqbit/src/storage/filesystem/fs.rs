@@ -221,6 +221,32 @@ impl TorrentStorage for FilesystemStorage {
         Ok(())
     }
 
+    fn replace_file(
+        &self,
+        shared: &ManagedTorrentShared,
+        metadata: &TorrentMetadata,
+        file_id: usize,
+        f: &mut dyn FnMut() -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        let of = self.opened_files.get(file_id).context("no such file")?;
+        if of.is_dummy() {
+            anyhow::bail!("cannot replace padding file");
+        }
+        let full = self
+            .output_folder()
+            .join(Self::relative_path(shared, metadata, file_id));
+        of.close_fd()?;
+        let result = f();
+        // Reopen whatever is at the path now: the replacement, or the untouched original.
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&full)
+            .with_context(|| format!("error reopening {full:?}"))?;
+        of.reopen(full, file)?;
+        result
+    }
+
     fn relocate_output(
         &self,
         shared: &ManagedTorrentShared,

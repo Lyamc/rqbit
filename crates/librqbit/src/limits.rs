@@ -4,7 +4,9 @@ use governor::Quota;
 use serde::Deserialize;
 use serde::Serialize;
 use std::num::NonZeroU32;
+use std::path::Path;
 use std::sync::Arc;
+use tracing::{info, warn};
 
 #[derive(Default, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LimitsConfig {
@@ -96,4 +98,37 @@ impl Limits {
             download_bps: self.get_download_bps(),
         }
     }
+}
+
+
+pub async fn load_persisted_limits(path: &Path) -> Option<LimitsConfig> {
+    match tokio::fs::read(path).await {
+        Ok(bytes) => match serde_json::from_slice::<LimitsConfig>(&bytes) {
+            Ok(c) => {
+                info!(?path, ?c, "loaded persisted rate limits");
+                Some(c)
+            }
+            Err(e) => {
+                warn!(error=?e, ?path, "failed to parse limits.json");
+                None
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            warn!(error=?e, ?path, "failed to read limits.json");
+            None
+        }
+    }
+}
+
+pub async fn save_persisted_limits(path: &Path, config: &LimitsConfig) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let data = serde_json::to_vec_pretty(config)?;
+    tokio::fs::write(&tmp, &data).await?;
+    tokio::fs::rename(&tmp, path).await?;
+    info!(?path, ?config, "saved rate limits");
+    Ok(())
 }

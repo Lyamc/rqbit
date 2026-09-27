@@ -32,6 +32,8 @@ pub struct SerializedTorrent {
     is_paused: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     file_renames: Option<std::collections::HashMap<usize, PathBuf>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    torznab_category: Option<u32>,
 }
 
 impl SerializedTorrent {
@@ -62,6 +64,7 @@ impl SerializedTorrent {
             only_files: self.only_files,
             overwrite: true,
             file_renames: self.file_renames,
+            torznab_category: self.torznab_category,
             ..Default::default()
         };
 

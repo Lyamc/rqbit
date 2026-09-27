@@ -758,6 +758,25 @@ async fn async_main(mut opts: Opts, cancel: CancellationToken) -> anyhow::Result
                 http_api_opts.read_only = false;
                 sopts.fastresume = start_opts.fastresume;
 
+                let admin_path = {
+                    let folder = start_opts
+                        .persistence_location
+                        .as_ref()
+                        .map(PathBuf::from)
+                        .or_else(|| {
+                            SessionPersistenceConfig::default_json_persistence_folder().ok()
+                        })
+                        .unwrap_or_else(|| PathBuf::from("."));
+                    folder.join("admin.json")
+                };
+                let admin_cfg = load_admin_config_sync(&admin_path);
+                apply_admin_to_session_opts(&mut sopts, &admin_cfg, opts.listen_ip);
+                if env_unset("RQBIT_FASTRESUME") {
+                    if let Some(v) = admin_cfg.fastresume {
+                        sopts.fastresume = v;
+                    }
+                }
+
                 let session =
                     Session::new_with_opts(PathBuf::from(&start_opts.output_folder), sopts)
                         .await
@@ -767,12 +786,24 @@ async fn async_main(mut opts: Opts, cancel: CancellationToken) -> anyhow::Result
                 if let Some(watch_folder) = start_opts.watch_folder.as_ref() {
                     session.watch_folder(Path::new(watch_folder));
                 }
+                if http_api_opts.basic_auth.is_none() {
+                    if let Some(up) = admin_cfg.basic_auth_userpass.as_deref() {
+                        if let Some((u, p)) = up.split_once(':') {
+                            info!(path=?admin_path, "using basic auth from admin.json");
+                            http_api_opts.basic_auth = Some((u.to_owned(), p.to_owned()));
+                        }
+                    }
+                }
+                let listen_addr = resolve_http_listen_addr(
+                    opts.http_api_listen_addr,
+                    &admin_cfg,
+                    (Ipv4Addr::LOCALHOST, 3030).into(),
+                );
 
                 let http_api_fut = start_http_api(
                     cancel,
                     session.clone(),
-                    opts.http_api_listen_addr
-                        .unwrap_or((Ipv4Addr::LOCALHOST, 3030).into()),
+                    listen_addr,
                     http_api_opts,
                     &opts,
                     log_config,
@@ -992,6 +1023,218 @@ async fn async_main(mut opts: Opts, cancel: CancellationToken) -> anyhow::Result
     }
 }
 
+
+fn env_unset(name: &str) -> bool {
+    std::env::var_os(name).is_none()
+}
+
+/// Overlay admin.json session/network options onto SessionOptions when the
+/// corresponding environment variable is unset (env wins, matching HTTP listen).
+fn apply_admin_to_session_opts(
+    sopts: &mut SessionOptions,
+    admin: &librqbit::AdminConfig,
+    listen_ip: std::net::IpAddr,
+) {
+    if env_unset("RQBIT_LISTEN_PORT") {
+        if let Some(p) = admin.listen_port {
+            if let Some(l) = sopts.listen.as_mut() {
+                l.listen_addr.set_port(p);
+            }
+        }
+    }
+    if env_unset("RQBIT_ANNOUNCE_PORT") {
+        if let Some(p) = admin.announce_port {
+            if let Some(l) = sopts.listen.as_mut() {
+                l.announce_port = Some(p);
+            }
+        }
+    }
+    if env_unset("RQBIT_DHT_DISABLE") {
+        if let Some(true) = admin.disable_dht {
+            sopts.dht = None;
+        } else if let Some(false) = admin.disable_dht {
+            if sopts.dht.is_none() {
+                sopts.dht = Some(DhtSessionConfig::default());
+            }
+        }
+    }
+    if env_unset("RQBIT_DHT_PERSISTENCE_DISABLE") {
+        if let Some(v) = admin.disable_dht_persistence {
+            if let Some(dht) = sopts.dht.as_mut() {
+                dht.persistence = if v {
+                    None
+                } else {
+                    Some(DhtPersistenceConfig::default())
+                };
+            }
+        }
+    }
+    if env_unset("RQBIT_LSD_DISABLE") {
+        if let Some(v) = admin.disable_lsd {
+            sopts.disable_local_service_discovery = v;
+        }
+    }
+    if env_unset("RQBIT_TRACKERS_DISABLE") {
+        if let Some(v) = admin.disable_trackers {
+            sopts.disable_trackers = v;
+        }
+    }
+
+    let current_tcp = sopts
+        .listen
+        .as_ref()
+        .map(|l| l.mode.tcp_enabled())
+        .unwrap_or(false);
+    let current_utp = sopts
+        .listen
+        .as_ref()
+        .map(|l| l.mode.utp_enabled())
+        .unwrap_or(false);
+
+    let disable_tcp = if env_unset("RQBIT_TCP_LISTEN_DISABLE") {
+        admin.disable_tcp_listen.unwrap_or(!current_tcp)
+    } else {
+        !current_tcp
+    };
+    let enable_utp = if env_unset("RQBIT_EXPERIMENTAL_UTP_LISTEN_ENABLE") {
+        admin.enable_utp_listen.unwrap_or(current_utp)
+    } else {
+        current_utp
+    };
+
+    if env_unset("RQBIT_EXPERIMENTAL_UTP_LISTEN_ENABLE") || env_unset("RQBIT_TCP_LISTEN_DISABLE") {
+        let mode = match (!disable_tcp, enable_utp) {
+            (true, false) => Some(ListenerMode::TcpOnly),
+            (false, true) => Some(ListenerMode::UtpOnly),
+            (true, true) => Some(ListenerMode::TcpAndUtp),
+            (false, false) => None,
+        };
+        match (mode, sopts.listen.as_mut()) {
+            (Some(m), Some(l)) => {
+                l.mode = m;
+            }
+            (Some(m), None) => {
+                let port = admin.listen_port.unwrap_or(0);
+                sopts.listen = Some(ListenerOptions {
+                    mode: m,
+                    listen_addr: (listen_ip, port).into(),
+                    enable_upnp_port_forwarding: admin
+                        .disable_upnp_port_forward
+                        .map(|v| !v)
+                        .unwrap_or(true),
+                    announce_port: admin.announce_port,
+                    ipv4_only: admin.ipv4_only.unwrap_or(false),
+                    ..Default::default()
+                });
+            }
+            (None, _) => {
+                if admin.disable_tcp_listen == Some(true) && admin.enable_utp_listen != Some(true) {
+                    sopts.listen = None;
+                }
+            }
+        }
+    }
+
+    if env_unset("RQBIT_TCP_CONNECT_DISABLE") {
+        if let Some(v) = admin.disable_tcp_connect {
+            if let Some(c) = sopts.connect.as_mut() {
+                c.enable_tcp = !v;
+            }
+        }
+    }
+    if env_unset("RQBIT_UPNP_PORT_FORWARD_DISABLE") {
+        if let Some(v) = admin.disable_upnp_port_forward {
+            if let Some(l) = sopts.listen.as_mut() {
+                l.enable_upnp_port_forwarding = !v;
+            }
+        }
+    }
+    if env_unset("RQBIT_SOCKS_PROXY_URL") {
+        if let Some(url) = admin.socks_proxy_url.clone() {
+            if let Some(c) = sopts.connect.as_mut() {
+                c.proxy_url = Some(url);
+            }
+        }
+    }
+    if env_unset("RQBIT_IPV4_ONLY") {
+        if let Some(v) = admin.ipv4_only {
+            sopts.ipv4_only = v;
+            if let Some(l) = sopts.listen.as_mut() {
+                l.ipv4_only = v;
+            }
+        }
+    }
+    if env_unset("RQBIT_BIND_DEVICE") {
+        if let Some(dev) = admin.bind_device.clone() {
+            sopts.bind_device_name = Some(dev);
+        }
+    }
+    if env_unset("RQBIT_PEER_LIMIT") {
+        if let Some(n) = admin.peer_limit {
+            sopts.peer_limit = Some(n);
+        }
+    }
+    if env_unset("RQBIT_CONCURRENT_INIT_LIMIT") {
+        if let Some(n) = admin.concurrent_init_limit {
+            sopts.concurrent_init_limit = Some(n);
+        }
+    }
+    if env_unset("RQBIT_PEER_CONNECT_TIMEOUT") {
+        if let Some(secs) = admin.peer_connect_timeout_secs {
+            let d = std::time::Duration::from_secs(secs);
+            if let Some(c) = sopts.connect.as_mut() {
+                if let Some(p) = c.peer_opts.as_mut() {
+                    p.connect_timeout = Some(d);
+                }
+            }
+        }
+    }
+    if env_unset("RQBIT_PEER_READ_WRITE_TIMEOUT") {
+        if let Some(secs) = admin.peer_read_write_timeout_secs {
+            let d = std::time::Duration::from_secs(secs);
+            if let Some(c) = sopts.connect.as_mut() {
+                if let Some(p) = c.peer_opts.as_mut() {
+                    p.read_write_timeout = Some(d);
+                }
+            }
+        }
+    }
+    if env_unset("RQBIT_BLOCKLIST_URL") {
+        if let Some(u) = admin.blocklist_url.clone() {
+            sopts.blocklist_url = Some(u);
+        }
+    }
+    if env_unset("RQBIT_ALLOWLIST_URL") {
+        if let Some(u) = admin.allowlist_url.clone() {
+            sopts.allowlist_url = Some(u);
+        }
+    }
+}
+
+fn load_admin_config_sync(path: &std::path::Path) -> librqbit::AdminConfig {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+        Err(_) => Default::default(),
+    }
+}
+
+fn resolve_http_listen_addr(
+    cli: Option<std::net::SocketAddr>,
+    admin: &librqbit::AdminConfig,
+    default_addr: std::net::SocketAddr,
+) -> std::net::SocketAddr {
+    if let Some(a) = cli {
+        return a;
+    }
+    if let Some(s) = admin.http_api_listen_addr.as_deref() {
+        if let Ok(a) = s.parse() {
+            return a;
+        }
+        tracing::warn!(addr = s, "admin.json http_api_listen_addr is invalid; using default");
+    }
+    default_addr
+}
+
 async fn start_http_api(
     cancel: CancellationToken,
     session: Arc<Session>,
@@ -1000,11 +1243,23 @@ async fn start_http_api(
     opts: &Opts,
     log_config: InitLoggingResult,
 ) -> anyhow::Result<impl Future<Output = anyhow::Result<()>> + use<> + 'static> {
+    let (restart_tx, mut restart_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
     let api = Api::new(
         session.clone(),
         Some(log_config.rust_log_reload_tx),
         Some(log_config.line_broadcast),
-    );
+    )
+    .with_restart_tx(restart_tx);
+
+    tokio::spawn(async move {
+        if restart_rx.recv().await.is_some() {
+            tracing::warn!(
+                "admin requested process restart; exiting with code 75 for systemd Restart=on-failure"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            std::process::exit(75);
+        }
+    });
 
     #[cfg(target_os = "linux")]
     let systemd_listener = api_socket_from_systemd().unwrap_or_else(|e| {

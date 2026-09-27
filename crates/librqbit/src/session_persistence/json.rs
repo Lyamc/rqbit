@@ -152,6 +152,7 @@ impl JsonSessionPersistenceStore {
                 let m = torrent.file_renames();
                 if m.is_empty() { None } else { Some(m) }
             },
+            torznab_category: torrent.torznab_category(),
         };
 
         let torrent_bytes = torrent

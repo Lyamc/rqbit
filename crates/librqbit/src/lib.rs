@@ -51,6 +51,12 @@ mod dht_utils;
 mod error;
 pub mod file_info;
 mod file_ops;
+mod adopt;
+pub mod event_log;
+pub mod repair;
+pub mod torrent_queue;
+pub mod torrent_status;
+pub mod add_job;
 #[cfg(feature = "http-api")]
 pub mod http_api;
 #[cfg(feature = "http-api-client")]
@@ -66,6 +72,8 @@ mod peer_info_reader;
 mod piece_tracker;
 mod read_buf;
 mod session;
+mod media_classify;
+mod session_admin;
 mod session_preferences;
 mod session_persistence;
 pub mod session_stats;
@@ -96,6 +104,7 @@ pub use session::{
     AddTorrent, AddTorrentOptions, AddTorrentResponse, DhtSessionConfig, ListOnlyResponse,
     SUPPORTED_SCHEMES, Session, SessionOptions, SessionPersistenceConfig,
 };
+pub use session_admin::{AdminConfig, AdminConfigPublic, AdminConfigStore, AdminConfigUpdate};
 pub use session_preferences::{SessionPreferences, SessionPreferencesStore};
 pub use stream_connect::ConnectionOptions;
 pub use torrent_state::{

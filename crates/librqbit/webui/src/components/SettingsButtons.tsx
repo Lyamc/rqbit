@@ -4,6 +4,7 @@ import { IconButton } from "./buttons/IconButton";
 import { ViewModeToggle } from "./ViewModeToggle";
 import { DarkMode } from "../helper/darkMode";
 import { ConfigModal } from "./config/ConfigModal";
+import { EventsButton } from "./events/EventsButton";
 
 interface SettingsButtonsProps {
   onLogsClick: () => void;
@@ -42,6 +43,7 @@ export const SettingsButtons: React.FC<SettingsButtonsProps> = ({
           />
         </>
       )}
+      <EventsButton />
       <IconButton onClick={onLogsClick} title="View logs">
         <BsBodyText />
       </IconButton>

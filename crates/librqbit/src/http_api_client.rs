@@ -100,6 +100,7 @@ impl HttpApiClient {
                 sub_folder: opts.sub_folder,
                 list_only: Some(opts.list_only),
                 initial_peers: opts.initial_peers.map(InitialPeers),
+                torznab_category: opts.torznab_category,
                 ..Default::default()
             };
             let qs = serde_urlencoded::to_string(&params).unwrap();

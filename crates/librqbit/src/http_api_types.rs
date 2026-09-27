@@ -22,7 +22,18 @@ pub struct TorrentAddQueryParams {
     pub initial_peers: Option<InitialPeers>,
     // Will force interpreting the content as a URL.
     pub is_url: Option<bool>,
+    /// Read a .torrent from this server filesystem path (must be under browse roots).
+    pub from_server_path: Option<String>,
     pub list_only: Option<bool>,
+    /// Optional Newznab/Torznab category id (e.g. 2000=Movies, 5070=Anime).
+    pub torznab_category: Option<u32>,
+    /// Adopt another client's data in output_folder before the initial check
+    /// (transfer from other client). Supported: "auto" ("qbit" = alias).
+    pub adopt_foreign_incomplete: Option<String>,
+    /// Client-chosen id to poll / cancel this add (see /add_jobs).
+    pub add_job_id: Option<String>,
+    /// Fail a magnet add if metadata can't be fetched within this many seconds.
+    pub magnet_timeout_secs: Option<u64>,
 }
 
 impl Serialize for OnlyFiles {
@@ -106,6 +117,10 @@ impl TorrentAddQueryParams {
                 read_write_timeout: self.peer_read_write_timeout.map(Duration::from_secs),
                 ..Default::default()
             }),
+            torznab_category: self.torznab_category,
+            adopt_foreign_incomplete: self.adopt_foreign_incomplete,
+            add_job_id: self.add_job_id,
+            magnet_resolve_timeout: self.magnet_timeout_secs.map(Duration::from_secs),
             ..Default::default()
         }
     }
