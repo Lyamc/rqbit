@@ -24,6 +24,19 @@ import {
   EventPage,
   EventSummary,
   RepairCounters,
+  PublicIpInfo,
+  RemovePolicy,
+  RemoveOutcome,
+  RemovePreview,
+  CleanupRootsResponse,
+  CleanupScan,
+  CleanupApplyOutcome,
+  CleanupItemResult,
+  QuarantineBatch,
+  TorrentRulesView,
+  RulesOverride,
+  DownloadOrderView,
+  DownloadOrderPatch,
 } from "./api-types";
 
 // Define API URL and base path
@@ -173,6 +186,9 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
     if (opts?.magnet_timeout_secs) {
       url += `&magnet_timeout_secs=${opts.magnet_timeout_secs}`;
     }
+    if (opts?.defer_metadata) {
+      url += "&defer_metadata=true";
+    }
     if (opts?.add_job_id) {
       url += `&add_job_id=${encodeURIComponent(opts.add_job_id)}`;
     }
@@ -310,6 +326,22 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
     );
   },
 
+  getPublicIp: (refresh?: boolean): Promise<PublicIpInfo> => {
+    return makeRequest("GET", `/public_ip${refresh ? "?refresh=true" : ""}`);
+  },
+
+  getConnectionTarget: (): string | null => {
+    try {
+      const u = new URL(apiUrl || "/", window.location.href);
+      if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+      const port = u.port || (u.protocol === "https:" ? "443" : "80");
+      // u.hostname keeps the brackets of IPv6 literals.
+      return `${u.hostname}:${port}`;
+    } catch {
+      return null;
+    }
+  },
+
   resetEventCounters: (): Promise<RepairCounters> => {
     return makeRequest("POST", "/events/counters/reset");
   },
@@ -332,6 +364,81 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
 
   delete: (index: number): Promise<void> => {
     return makeRequest("POST", `/torrents/${index}/delete`);
+  },
+  remove: (
+    index: number,
+    policy: RemovePolicy | null,
+    opts?: { wait?: boolean },
+  ): Promise<RemoveOutcome> => {
+    return makeRequest(
+      "POST",
+      `/torrents/${index}/remove${opts?.wait ? "?wait=true" : ""}`,
+      { policy: policy ?? "default" },
+      true,
+    );
+  },
+  removePreview: (ids: number[]): Promise<RemovePreview> => {
+    return makeRequest("GET", `/torrents/remove_preview?ids=${ids.join(",")}`);
+  },
+  cleanupRoots: (): Promise<CleanupRootsResponse> =>
+    makeRequest("GET", "/cleanup/roots"),
+  cleanupScan: (
+    roots: string[] | null,
+    minAgeMinutes?: number,
+  ): Promise<CleanupScan> => {
+    const q = new URLSearchParams();
+    if (roots && roots.length) q.set("roots", roots.join(","));
+    if (minAgeMinutes !== undefined)
+      q.set("min_age_minutes", String(minAgeMinutes));
+    const qs = q.toString();
+    return makeRequest("GET", `/cleanup/scan${qs ? "?" + qs : ""}`);
+  },
+  cleanupScanResult: (scanId?: string): Promise<CleanupScan> =>
+    makeRequest(
+      "GET",
+      `/cleanup/scan_result${scanId ? "?scan_id=" + encodeURIComponent(scanId) : ""}`,
+    ),
+  cleanupApply: (
+    scanId: string,
+    itemIds: number[],
+    action: "quarantine" | "delete",
+    confirm: boolean,
+  ): Promise<CleanupApplyOutcome> =>
+    makeRequest(
+      "POST",
+      "/cleanup/apply",
+      { scan_id: scanId, item_ids: itemIds, action, confirm },
+      true,
+    ),
+  cleanupQuarantine: (): Promise<{ batches: QuarantineBatch[] }> =>
+    makeRequest("GET", "/cleanup/quarantine"),
+  cleanupRestore: (
+    batch: string,
+    items?: number[],
+  ): Promise<{ results: CleanupItemResult[] }> =>
+    makeRequest("POST", "/cleanup/restore", { batch, items }, true),
+  cleanupPurge: (batch: string): Promise<{ items: number; bytes: number }> =>
+    makeRequest("POST", "/cleanup/purge", { batch, confirm: true }, true),
+  recheck: (index: number): Promise<void> => {
+    return makeRequest("POST", `/torrents/${index}/recheck`);
+  },
+  getTorrentRules: (index: number): Promise<TorrentRulesView> => {
+    return makeRequest("GET", `/torrents/${index}/rules`);
+  },
+  setTorrentRules: (
+    index: number,
+    override: RulesOverride | null,
+  ): Promise<TorrentRulesView> => {
+    return makeRequest("POST", `/torrents/${index}/rules`, { override }, true);
+  },
+  getDownloadOrder: (index: number): Promise<DownloadOrderView> => {
+    return makeRequest("GET", `/torrents/${index}/download_order`);
+  },
+  setDownloadOrder: (
+    index: number,
+    patch: DownloadOrderPatch,
+  ): Promise<DownloadOrderView> => {
+    return makeRequest("POST", `/torrents/${index}/download_order`, patch, true);
   },
   getVersion: async (): Promise<string> => {
     const r = await makeRequest("GET", "/");

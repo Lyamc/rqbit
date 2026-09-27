@@ -1,4 +1,5 @@
 mod admin;
+mod cleanup;
 mod fs;
 mod configure;
 mod dht;
@@ -47,9 +48,11 @@ async fn h_api_root(parts: Parts) -> impl IntoResponse {
             "GET /torrents": "List torrents",
             "GET /torrents/playlist": "Generate M3U8 playlist for all files in all torrents",
             "GET /stats": "Global session stats",
+            "GET /public_ip": "Public IPv4/IPv6 as seen from the server's network (?refresh=true re-checks, cached 30s)",
             "GET /metrics": "Prometheus metrics",
             "GET /stream_logs": "Continuously stream logs",
             "GET /web/": "Web UI",
+            "GET /gpui/": "GPUI client compiled to WebAssembly (if installed)",
             "GET /torrents/playlist": "Playlist for supported players",
             "GET /torrents/{id_or_infohash}": "Torrent details",
             "GET /torrents/{id_or_infohash}/metadata": "Download the corresponding torrent file",
@@ -64,6 +67,13 @@ async fn h_api_root(parts: Parts) -> impl IntoResponse {
             "GET /add_jobs/{job_id}": "Status of an add started with ?add_job_id= (stage: resolving_metadata, waiting_for_server, ...)",
             "POST /add_jobs/{job_id}/cancel": "Cancel an add started with ?add_job_id= (no-op + already_added if it was committed)",
             "GET /fs/roots": "List allowed filesystem browse roots",
+            "GET /cleanup/roots": "Orphan cleanup: folders that can be scanned (+ latest scan summary)",
+            "GET /cleanup/scan?roots=&min_age_minutes=": "Orphan cleanup dry run: files/folders no torrent uses (changes nothing)",
+            "GET /cleanup/scan_result?scan_id=": "A recent cleanup scan (default: latest)",
+            "GET /cleanup/quarantine": "Quarantined cleanup batches",
+            "POST /cleanup/apply": "Quarantine or delete reviewed scan items {scan_id, item_ids, action, confirm}",
+            "POST /cleanup/restore": "Restore a quarantine batch {batch, items?}",
+            "POST /cleanup/purge": "Permanently delete a quarantine batch {batch, confirm}",
             "GET /fs/list": "List a directory under browse roots (?path=&recursive=&torrents_only=)",
             "POST /fs/extract": "Extract .torrent / magnets from a zip (or raw .torrent body)",
             "POST /torrents/create": "Create a torrent and start seeding. Body should be a local folder",
@@ -71,6 +81,12 @@ async fn h_api_root(parts: Parts) -> impl IntoResponse {
             "POST /torrents/{id_or_infohash}/pause": "Pause torrent",
             "POST /torrents/{id_or_infohash}/start": "Resume torrent",
             "POST /torrents/{id_or_infohash}/forget": "Forget about the torrent, keep the files",
+            "POST /torrents/{id_or_infohash}/remove": "Remove using a remove policy. Body: {\"policy\": \"default\" | {\"complete\": \"keep\"|\"delete\", \"incomplete\": \"keep\"|\"delete\"|\"finish\"}}. ?wait=true blocks until finish-what's-done is done",
+            "GET /torrents/remove_preview?ids=1,2": "Complete/incomplete counts and file split for the remove dialog",
+            "GET /torrents/{id_or_infohash}/download_order": "Download order (global, torrent, effective, per file)",
+            "POST /torrents/{id_or_infohash}/download_order": "Patch download order. Body: {sequential_files?, file_order? (name|torrent|smallest_first|largest_first), sequential?, first_last_first?, files?: [{ids, sequential?, first_last_first?}], reset?}; null = inherit",
+            "GET /torrents/{id_or_infohash}/rules": "Automatic rules (global, override, effective), counters and status",
+            "POST /torrents/{id_or_infohash}/rules": "Set the per-torrent rules override. Body: {\"override\": {stalled?, seeding?, speed_window?} | null}",
             "POST /torrents/{id_or_infohash}/delete": "Forget about the torrent, remove the files",
             "POST /torrents/{id_or_infohash}/add_peers": "Add peers (newline-delimited)",
             "POST /torrents/{id_or_infohash}/update_only_files": "Change the selection of files to download. You need to POST json of the following form {\"only_files\": [0, 1, 2]}",
@@ -91,6 +107,7 @@ pub fn make_api_router(state: ApiState) -> Router {
         .route("/dht/stats", get(dht::h_dht_stats))
         .route("/dht/table", get(dht::h_dht_table))
         .route("/stats", get(torrents::h_session_stats))
+        .route("/public_ip", get(other::h_public_ip))
         .route("/torrents", get(torrents::h_torrents_list))
         .route("/torrents/{id}", get(torrents::h_torrent_details))
         .route("/torrents/{id}/haves", get(torrents::h_torrent_haves))
@@ -118,18 +135,28 @@ pub fn make_api_router(state: ApiState) -> Router {
             "/torrents/preferences",
             get(configure::h_get_session_preferences),
         )
+        .route("/torrents/remove_preview", get(torrents::h_remove_preview))
+        .route("/torrents/{id}/rules", get(torrents::h_torrent_rules))
+        .route("/torrents/{id}/download_order", get(torrents::h_download_order))
         .route("/add_jobs/{job_id}", get(torrents::h_add_job_status))
         .route("/events", get(events::h_events))
         .route("/events/summary", get(events::h_events_summary))
         .route("/admin", get(admin::h_admin_status))
         .route("/fs/roots", get(fs::h_fs_roots))
-        .route("/fs/list", get(fs::h_fs_list));
+        .route("/fs/list", get(fs::h_fs_list))
+        .route("/cleanup/roots", get(cleanup::h_cleanup_roots))
+        .route("/cleanup/scan", get(cleanup::h_cleanup_scan))
+        .route("/cleanup/scan_result", get(cleanup::h_cleanup_scan_result))
+        .route("/cleanup/quarantine", get(cleanup::h_cleanup_quarantine));
 
     if !state.opts.read_only {
         api_router = api_router
             .route("/torrents", post(torrents::h_torrents_post))
             .route("/add_jobs/{job_id}/cancel", post(torrents::h_add_job_cancel))
             .route("/fs/extract", post(fs::h_fs_extract))
+            .route("/cleanup/apply", post(cleanup::h_cleanup_apply))
+            .route("/cleanup/restore", post(cleanup::h_cleanup_restore))
+            .route("/cleanup/purge", post(cleanup::h_cleanup_purge))
             .route(
                 "/torrents/limits",
                 post(configure::h_update_session_ratelimits),
@@ -181,6 +208,15 @@ pub fn make_api_router(state: ApiState) -> Router {
             .route(
                 "/torrents/{id}/delete",
                 post(torrents::h_torrent_action_delete),
+            )
+            .route(
+                "/torrents/{id}/remove",
+                post(torrents::h_torrent_action_remove),
+            )
+            .route("/torrents/{id}/rules", post(torrents::h_set_torrent_rules))
+            .route(
+                "/torrents/{id}/download_order",
+                post(torrents::h_set_download_order),
             )
             .route(
                 "/torrents/{id}/update_only_files",

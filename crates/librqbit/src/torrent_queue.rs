@@ -46,13 +46,26 @@ pub struct QueueCandidate {
 
 /// Which candidates may run. `cands` must be in queue order.
 pub fn admit(cands: &[QueueCandidate], l: &QueueLimits) -> HashSet<TorrentId> {
+    admit_with(cands, l, None)
+}
+
+/// Like [`admit`], but when `seed_pick` is given (seeding-slot rotation) seeding candidates
+/// run iff they are in it, instead of by queue order. The total limit still applies.
+pub fn admit_with(
+    cands: &[QueueCandidate],
+    l: &QueueLimits,
+    seed_pick: Option<&HashSet<TorrentId>>,
+) -> HashSet<TorrentId> {
     let under = |n: u32, lim: Option<u32>| lim.map(|m| n < m).unwrap_or(true);
     let (mut dl, mut up, mut total) = (0u32, 0u32, 0u32);
     let mut out = HashSet::new();
     for c in cands {
-        let exempt = l.ignore_slow && c.active && c.slow;
+        let exempt = l.ignore_slow && c.active && c.slow && !(c.seeding && seed_pick.is_some());
         let fits = if c.seeding {
-            under(up, l.max_uploads)
+            match seed_pick {
+                Some(pick) => pick.contains(&c.id),
+                None => under(up, l.max_uploads),
+            }
         } else {
             under(dl, l.max_downloads)
         } && under(total, l.max_active);
@@ -71,6 +84,150 @@ pub fn admit(cands: &[QueueCandidate], l: &QueueLimits) -> HashSet<TorrentId> {
         }
     }
     out
+}
+
+/// One seeding candidate as seen by the slot rotation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SeedCand {
+    pub id: TorrentId,
+    /// Currently seeding (holds a slot).
+    pub active: bool,
+    /// Uploading to someone right now (interested leechers).
+    pub uploading: bool,
+}
+
+/// Per-torrent rotation bookkeeping (in memory; a restart starts a fresh round).
+#[derive(Default, Debug, Clone)]
+pub struct RotationState {
+    /// When the torrent got its current slot.
+    pub slot_since: HashMap<TorrentId, Instant>,
+    /// When the torrent started waiting for a slot.
+    pub waiting_since: HashMap<TorrentId, Instant>,
+    /// Last time the torrent was seen uploading while holding its slot.
+    pub last_upload: HashMap<TorrentId, Instant>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RotationResult {
+    /// Seeding torrents that may hold a slot now.
+    pub pick: HashSet<TorrentId>,
+    /// Torrents that lost their slot this pass (slot used up or idle).
+    pub rotated_out: Vec<TorrentId>,
+    pub rotated_in: Vec<TorrentId>,
+    /// Estimated seconds until a slot frees up, for each waiting torrent.
+    pub eta_secs: HashMap<TorrentId, u64>,
+}
+
+/// Fair round robin over seeding slots.
+///
+/// - At most `slots` seeders run. When everyone fits, everyone runs.
+/// - A seeder keeps its slot for `slot_len`; after that it yields to whoever waited longest.
+/// - A seeder that has had nothing to upload for `idle_grace` yields early (no leechers:
+///   don't waste the slot). A seeder with active leechers is never cut early.
+/// - Waiting torrents are admitted longest-waiting first.
+pub fn rotate_seeds(
+    cands: &[SeedCand],
+    slots: usize,
+    slot_len: Duration,
+    idle_grace: Duration,
+    st: &mut RotationState,
+    now: Instant,
+) -> RotationResult {
+    let ids: HashSet<TorrentId> = cands.iter().map(|c| c.id).collect();
+    st.slot_since.retain(|id, _| ids.contains(id));
+    st.waiting_since.retain(|id, _| ids.contains(id));
+    st.last_upload.retain(|id, _| ids.contains(id));
+    let mut res = RotationResult::default();
+
+    for c in cands {
+        if c.active {
+            st.waiting_since.remove(&c.id);
+            let since = *st.slot_since.entry(c.id).or_insert(now);
+            if c.uploading {
+                st.last_upload.insert(c.id, now);
+            } else {
+                st.last_upload.entry(c.id).or_insert(since);
+            }
+        } else {
+            st.slot_since.remove(&c.id);
+            st.last_upload.remove(&c.id);
+            st.waiting_since.entry(c.id).or_insert(now);
+        }
+    }
+
+    if cands.len() <= slots {
+        res.pick = ids;
+        return res;
+    }
+
+    let mut waiting: Vec<TorrentId> = cands.iter().filter(|c| !c.active).map(|c| c.id).collect();
+    waiting.sort_by_key(|id| (st.waiting_since[id], *id));
+
+    // Current holders, oldest slot first.
+    let mut holders: Vec<&SeedCand> = cands.iter().filter(|c| c.active).collect();
+    holders.sort_by_key(|c| (st.slot_since[&c.id], c.id));
+
+    let mut keep: Vec<TorrentId> = Vec::new();
+    let mut releasable: Vec<TorrentId> = Vec::new();
+    for c in &holders {
+        let held_for = now.duration_since(st.slot_since[&c.id]);
+        let idle_for = now.duration_since(st.last_upload[&c.id]);
+        let expired = held_for >= slot_len;
+        let idle = idle_for >= idle_grace && !c.uploading;
+        if expired || idle {
+            releasable.push(c.id);
+        } else {
+            keep.push(c.id);
+        }
+    }
+    // More holders than slots (limit lowered): drop the newest non-releasable ones too.
+    while keep.len() > slots {
+        releasable.push(keep.pop().unwrap());
+    }
+
+    let mut free = slots - keep.len();
+    let mut pick: Vec<TorrentId> = keep.clone();
+    let mut wait_iter = waiting.iter().copied().peekable();
+    // Releasable holders only give up their slot to someone who is actually waiting.
+    for r in releasable {
+        if free == 0 {
+            res.rotated_out.push(r);
+            continue;
+        }
+        if let Some(w) = wait_iter.next() {
+            pick.push(w);
+            res.rotated_in.push(w);
+            res.rotated_out.push(r);
+        } else {
+            pick.push(r);
+        }
+        free -= 1;
+    }
+    while free > 0 {
+        let Some(w) = wait_iter.next() else { break };
+        pick.push(w);
+        res.rotated_in.push(w);
+        free -= 1;
+    }
+
+    // ETA for the ones still waiting: slots free up as current slots expire.
+    let mut remaining: Vec<u64> = pick
+        .iter()
+        .map(|id| {
+            let since = st.slot_since.get(id).copied().unwrap_or(now);
+            slot_len.saturating_sub(now.duration_since(since)).as_secs()
+        })
+        .collect();
+    remaining.sort_unstable();
+    if !remaining.is_empty() {
+        for (rank, id) in wait_iter.enumerate() {
+            let round = (rank / remaining.len()) as u64;
+            res.eta_secs
+                .insert(id, remaining[rank % remaining.len()] + round * slot_len.as_secs());
+        }
+    }
+    res.pick = pick.into_iter().collect();
+    res
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,6 +283,10 @@ pub struct TorrentQueue {
     order: Mutex<Vec<Id20>>,
     admitted: Mutex<HashSet<TorrentId>>,
     slow_since: Mutex<HashMap<TorrentId, Instant>>,
+    pub(crate) rotation: Mutex<RotationState>,
+    seed_eta: Mutex<HashMap<TorrentId, u64>>,
+    /// Aggregated rotation counts not yet written to the event log.
+    pub(crate) rotation_log: Mutex<(u64, u64, Option<Instant>)>,
     pub(crate) kick: tokio::sync::Notify,
 }
 
@@ -220,6 +381,15 @@ impl TorrentQueue {
             g.remove(&id);
             false
         }
+    }
+
+    /// Seconds until a seeding slot frees up (rotation on, torrent waiting).
+    pub fn seed_eta_secs(&self, id: TorrentId) -> Option<u64> {
+        self.seed_eta.lock().get(&id).copied()
+    }
+
+    pub(crate) fn set_seed_eta(&self, m: HashMap<TorrentId, u64>) {
+        *self.seed_eta.lock() = m;
     }
 
     pub(crate) fn forget_speed(&self, id: TorrentId) {
@@ -364,5 +534,58 @@ mod tests {
         assert!(!q.observe_speed(1, 100, 0, t0 + Duration::from_secs(30)));
         assert!(q.observe_speed(1, 100, 0, t0 + SLOW_AFTER));
         assert!(!q.observe_speed(1, 10_000, 0, t0 + SLOW_AFTER + Duration::from_secs(1)));
+    }
+
+    fn sc(id: usize, active: bool, uploading: bool) -> SeedCand {
+        SeedCand { id, active, uploading }
+    }
+
+    #[test]
+    fn rotation_round_robin() {
+        let slot = Duration::from_secs(60);
+        let grace = Duration::from_secs(20);
+        let mut st = RotationState::default();
+        let t0 = Instant::now();
+        // 4 seeders, 2 slots, nobody active yet: first two by wait order (all equal -> id).
+        let r = rotate_seeds(&[sc(1, false, false), sc(2, false, false), sc(3, false, false), sc(4, false, false)], 2, slot, grace, &mut st, t0);
+        assert_eq!(sorted(r.pick.clone()), vec![1, 2]);
+        // Now 1,2 hold slots and upload; 3,4 wait. Within the slot nothing changes.
+        let cands = [sc(1, true, true), sc(2, true, true), sc(3, false, false), sc(4, false, false)];
+        let r = rotate_seeds(&cands, 2, slot, grace, &mut st, t0 + Duration::from_secs(10));
+        assert_eq!(sorted(r.pick.clone()), vec![1, 2]);
+        assert_eq!(r.eta_secs.get(&3), Some(&60));
+        assert_eq!(r.eta_secs.get(&4), Some(&60));
+        // Slot used up: the longest waiting (3, 4) take over even though 1, 2 upload.
+        let r = rotate_seeds(&cands, 2, slot, grace, &mut st, t0 + Duration::from_secs(71));
+        assert_eq!(sorted(r.pick.clone()), vec![3, 4]);
+        assert_eq!(sorted(r.rotated_out.iter().copied().collect()), vec![1, 2]);
+        // Next round: 3 idle (no leechers) yields early after the grace; 1 waited longest.
+        let t1 = t0 + Duration::from_secs(72);
+        let cands = [sc(1, false, false), sc(2, false, false), sc(3, true, false), sc(4, true, true)];
+        let r = rotate_seeds(&cands, 2, slot, grace, &mut st, t1);
+        assert_eq!(sorted(r.pick.clone()), vec![3, 4]);
+        let r = rotate_seeds(&cands, 2, slot, grace, &mut st, t1 + Duration::from_secs(21));
+        assert_eq!(sorted(r.pick.clone()), vec![1, 4]);
+    }
+
+    #[test]
+    fn rotation_everyone_fits_and_no_waiters_keep_slot() {
+        let slot = Duration::from_secs(60);
+        let mut st = RotationState::default();
+        let t0 = Instant::now();
+        let r = rotate_seeds(&[sc(1, true, true), sc(2, false, false)], 2, slot, slot, &mut st, t0);
+        assert_eq!(sorted(r.pick), vec![1, 2]);
+        // Expired holder with nobody waiting keeps the slot.
+        let r = rotate_seeds(&[sc(1, true, true), sc(2, true, false), sc(3, true, false)], 3, slot, slot, &mut st, t0 + Duration::from_secs(120));
+        assert_eq!(r.pick.len(), 3);
+        assert!(r.rotated_out.is_empty());
+    }
+
+    #[test]
+    fn admit_with_seed_pick() {
+        let l = QueueLimits { max_uploads: Some(1), max_active: Some(3), ..Default::default() };
+        let cands = vec![c(1, true, true, false), c(2, true, false, false), c(3, false, false, false)];
+        let pick: HashSet<usize> = [2].into_iter().collect();
+        assert_eq!(sorted(admit_with(&cands, &l, Some(&pick))), vec![2, 3]);
     }
 }

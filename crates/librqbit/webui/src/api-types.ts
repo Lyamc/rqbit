@@ -44,6 +44,8 @@ export interface AddTorrentResponse {
   details: TorrentDetails;
   output_folder: string;
   seen_peers?: Array<string>;
+  /** Magnet accepted with `defer_metadata`: resolving metadata in the background. */
+  resolving?: boolean;
 }
 
 export interface ListTorrentsResponse {
@@ -260,6 +262,252 @@ export interface SessionPreferences {
   completion_actions?: CompletionAction[];
   /** Live default max peers per newly added torrent. */
   peer_limit?: number | null;
+  /** UI: ask before removing torrents (default true). Deleting files always asks. */
+  confirm_remove?: boolean;
+  /** Legacy single remove action (read-only; migrated to remove_policy by the server). */
+  default_remove_action?: RemoveAction;
+  /** What Remove does with files, for complete and incomplete torrents. */
+  remove_policy?: RemovePolicy;
+  /** Automatic rules (stalled, seeding limits, full-speed window). All off by default. */
+  rules?: TorrentRules;
+  /** Rotate seeding slots every N seconds (needs queueing + max active uploads). */
+  queue_seed_rotation_secs?: number | null;
+  /** Default download order (piece picker). */
+  download_order?: DownloadOrderDefaults;
+  cleanup_scan_hours?: number | null;
+  cleanup_min_age_minutes?: number | null;
+  cleanup_extra_roots?: string[];
+}
+
+export type RemoveAction = "keep_files" | "delete_files";
+
+export type CompleteRemoveAction = "keep" | "delete";
+export type IncompleteRemoveAction = "keep" | "delete" | "finish";
+export interface RemovePolicy {
+  complete: CompleteRemoveAction;
+  incomplete: IncompleteRemoveAction;
+}
+
+export interface RemoveOutcome {
+  id: number;
+  name: string;
+  was_complete: boolean;
+  policy: RemovePolicy;
+  result: string;
+  deleted_files: string[];
+  deleted_bytes: number;
+  kept_files: number;
+  actions_run: string[];
+  final_folder?: string;
+}
+
+// ---- Orphan cleanup
+export interface CleanupRoot {
+  path: string;
+  kind: "download" | "move" | "organize" | "custom";
+  default_on: boolean;
+  exists: boolean;
+}
+export interface CleanupScanSummary {
+  scan_id: string;
+  time: number;
+  items: number;
+  total_bytes: number;
+  scheduled: boolean;
+}
+export interface CleanupRootsResponse {
+  roots: CleanupRoot[];
+  min_age_minutes: number;
+  scan_hours: number | null;
+  allowed_parents: string[];
+  latest_scan: CleanupScanSummary | null;
+}
+export interface CleanupItem {
+  id: number;
+  path: string;
+  root: string;
+  kind: "file" | "dir";
+  size: number;
+  mtime: number | null;
+  files: number;
+  reason: string;
+}
+export interface CleanupScan {
+  scan_id: string;
+  time: number;
+  roots: string[];
+  min_age_minutes: number;
+  items: CleanupItem[];
+  skipped: {
+    recent: number;
+    symlinks: number;
+    hidden: number;
+    errors: string[];
+    truncated: boolean;
+  };
+  total_bytes: number;
+  torrents_checked: number;
+  protected_folders: number;
+  scheduled: boolean;
+  duration_ms: number;
+}
+export interface CleanupItemResult {
+  id: number | null;
+  path: string;
+  ok: boolean;
+  error?: string;
+  moved_to?: string;
+  size: number;
+}
+export interface CleanupApplyOutcome {
+  action: "quarantine" | "delete";
+  ok: number;
+  failed: number;
+  bytes: number;
+  batches?: string[];
+  results: CleanupItemResult[];
+}
+export interface QuarantineBatch {
+  id: string;
+  root: string;
+  dir: string;
+  created: number;
+  items: {
+    original: string;
+    stored: string;
+    kind: string;
+    size: number;
+    files: number;
+  }[];
+}
+
+export interface RemovePreviewItem {
+  id: number;
+  name: string;
+  complete: boolean;
+  files_complete: number;
+  files_partial: number;
+  bytes_complete: number;
+  bytes_partial: number;
+}
+
+export interface RemovePreview {
+  policy: RemovePolicy;
+  confirm_remove: boolean;
+  completion_actions: string[];
+  items: RemovePreviewItem[];
+  complete: number;
+  incomplete: number;
+  incomplete_nothing_done: number;
+}
+
+export type RuleAction =
+  | "pause"
+  | "flag"
+  | "remove_keep"
+  | "remove_policy"
+  | "remove_delete"
+  | "remove_finish";
+
+export interface StalledRule {
+  enabled: boolean;
+  after_secs: number;
+  action: RuleAction;
+}
+
+export interface SeedingLimits {
+  enabled: boolean;
+  max_seed_secs?: number | null;
+  max_uploaded_bytes?: number | null;
+  max_ratio?: number | null;
+  action: RuleAction;
+}
+
+export interface SpeedWindow {
+  enabled: boolean;
+  full_speed_secs?: number | null;
+  full_speed_bytes?: number | null;
+  then: "cap" | "stop";
+  cap_kib_per_sec: number;
+}
+
+export interface TorrentRules {
+  stalled: StalledRule;
+  seeding: SeedingLimits;
+  speed_window: SpeedWindow;
+}
+
+export interface RulesOverride {
+  stalled?: StalledRule | null;
+  seeding?: SeedingLimits | null;
+  speed_window?: SpeedWindow | null;
+}
+
+export interface TorrentCounters {
+  seeding_secs: number;
+  uploaded_total: number;
+  idle_secs: number;
+  completed_unix?: number;
+}
+
+export interface TorrentRulesView {
+  global: TorrentRules;
+  override: RulesOverride | null;
+  effective: TorrentRules;
+  counters: TorrentCounters;
+  ratio: number;
+  status: string[];
+  warnings: string[];
+}
+
+export type FileOrder = "name" | "torrent" | "smallest_first" | "largest_first";
+
+export interface DownloadOrderDefaults {
+  sequential_files: boolean;
+  file_order: FileOrder;
+  sequential: boolean;
+  first_last_first: boolean;
+}
+
+export interface FileOrderSettings {
+  sequential?: boolean;
+  first_last_first?: boolean;
+}
+
+export interface TorrentDownloadOrder {
+  sequential_files?: boolean;
+  file_order?: FileOrder;
+  sequential?: boolean;
+  first_last_first?: boolean;
+  files?: Record<string, FileOrderSettings>;
+}
+
+export interface DownloadOrderView {
+  global: DownloadOrderDefaults;
+  torrent: TorrentDownloadOrder;
+  effective: DownloadOrderDefaults;
+  files: {
+    id: number;
+    name: string;
+    sequential: boolean;
+    first_last_first: boolean;
+    override: FileOrderSettings;
+  }[];
+  summary: string;
+}
+
+/** Absent = unchanged, null = inherit. */
+export interface DownloadOrderPatch {
+  sequential_files?: boolean | null;
+  file_order?: FileOrder | null;
+  sequential?: boolean | null;
+  first_last_first?: boolean | null;
+  files?: {
+    ids: number[];
+    sequential?: boolean | null;
+    first_last_first?: boolean | null;
+  }[];
+  reset?: boolean;
 }
 
 // Interface for the Torrent Stats API response
@@ -481,6 +729,9 @@ export interface AddTorrentOptions {
   add_job_id?: string;
   /** Server gives up resolving magnet metadata after this many seconds. */
   magnet_timeout_secs?: number | null;
+  /** Magnets: return at once with a torrent id; the server resolves metadata in
+   *  the background and lists the torrent as "Resolving metadata". */
+  defer_metadata?: boolean;
 }
 
 export type Value = string | number | boolean;
@@ -658,6 +909,13 @@ export interface RqbitAPI {
   /** Event log (repairs, recovery failures, I/O errors). */
   getEvents?: (q: EventQuery) => Promise<EventPage>;
   getEventsSummary?: (sinceSeq?: number) => Promise<EventSummary>;
+  /** Server's public IPv4/IPv6 as seen from its own network (e.g. VPN exit). */
+  getPublicIp?: (refresh?: boolean) => Promise<PublicIpInfo>;
+  /**
+   * host:port the browser talks to (default port made explicit). Browsers
+   * don't expose the resolved IP or the local port, so that's all we show.
+   */
+  getConnectionTarget?: () => string | null;
   resetEventCounters?: () => Promise<RepairCounters>;
   /** Scan the torrent's files for unreadable ranges and repair them (background job). */
   repairFiles?: (
@@ -666,6 +924,44 @@ export interface RqbitAPI {
   ) => Promise<RepairStartResponse>;
   forget: (index: number) => Promise<void>;
   delete: (index: number) => Promise<void>;
+  /** Remove with a policy (null = saved default). */
+  remove?: (
+    index: number,
+    policy: RemovePolicy | null,
+    opts?: { wait?: boolean },
+  ) => Promise<RemoveOutcome>;
+  removePreview?: (ids: number[]) => Promise<RemovePreview>;
+  cleanupRoots?: () => Promise<CleanupRootsResponse>;
+  cleanupScan?: (
+    roots: string[] | null,
+    minAgeMinutes?: number,
+  ) => Promise<CleanupScan>;
+  cleanupScanResult?: (scanId?: string) => Promise<CleanupScan>;
+  cleanupApply?: (
+    scanId: string,
+    itemIds: number[],
+    action: "quarantine" | "delete",
+    confirm: boolean,
+  ) => Promise<CleanupApplyOutcome>;
+  cleanupQuarantine?: () => Promise<{ batches: QuarantineBatch[] }>;
+  cleanupRestore?: (
+    batch: string,
+    items?: number[],
+  ) => Promise<{ results: CleanupItemResult[] }>;
+  cleanupPurge?: (
+    batch: string,
+  ) => Promise<{ items: number; bytes: number }>;
+  recheck?: (index: number) => Promise<void>;
+  getTorrentRules?: (index: number) => Promise<TorrentRulesView>;
+  setTorrentRules?: (
+    index: number,
+    override: RulesOverride | null,
+  ) => Promise<TorrentRulesView>;
+  getDownloadOrder?: (index: number) => Promise<DownloadOrderView>;
+  setDownloadOrder?: (
+    index: number,
+    patch: DownloadOrderPatch,
+  ) => Promise<DownloadOrderView>;
   stats: () => Promise<SessionStats>;
   getLimits: () => Promise<LimitsConfig>;
   setLimits: (limits: LimitsConfig) => Promise<void>;
@@ -735,4 +1031,20 @@ export interface EventSummary {
   log_bytes: number;
   log_cap_bytes: number;
   log_segments: number;
+}
+
+export interface PublicIpFamily {
+  ip: string | null;
+  source: string | null;
+  error: string | null;
+}
+
+export interface PublicIpInfo {
+  enabled: boolean;
+  ipv4: PublicIpFamily;
+  ipv6: PublicIpFamily;
+  checked_at: string | null;
+  age_secs: number | null;
+  check_interval_secs: number;
+  checking: boolean;
 }

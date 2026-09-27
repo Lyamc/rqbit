@@ -1,6 +1,7 @@
 import React from "react";
 import { Fieldset } from "../forms/Fieldset";
 import { FormInput } from "../forms/FormInput";
+import { UnitInput } from "../forms/UnitInput";
 import { FormCheckbox } from "../forms/FormCheckbox";
 import {
   AdminConfigPublic,
@@ -93,6 +94,49 @@ export const BitTorrentTab: React.FC<BitTorrentTabProps> = ({
             onPrefsChange({ queue_ignore_slow_torrents: e.target.checked })
           }
         />
+        <FormCheckbox
+          checked={!!preferences.queue_seed_rotation_secs}
+          name="queue_seed_rotation"
+          label="Rotate seeding slots"
+          disabled={!preferences.queueing_enabled}
+          help="Off by default. Needs 'Max active uploads' (that is the number of seeding slots). Finished torrents take turns: after a slot's time is up, the torrent that has waited longest gets the next slot (fair round robin). A torrent with no leechers yields its slot early when someone is waiting; one with active leechers keeps it until another torrent is waiting. Waiting torrents show 'Queued for seeding · next slot in Xm'."
+          onChange={(e) =>
+            onPrefsChange({
+              queue_seed_rotation_secs: e.target.checked
+                ? (preferences.queue_seed_rotation_secs ?? 900) || 900
+                : null,
+            })
+          }
+        />
+        {!!preferences.queue_seed_rotation_secs && (
+          <UnitInput
+            kind="duration"
+            name="queue_seed_rotation_secs"
+            label="Slot duration"
+            value={preferences.queue_seed_rotation_secs}
+            allowEmpty={false}
+            disabled={!preferences.queueing_enabled}
+            help="How long a seeding torrent keeps its slot while others wait (default 15m). A bare number is minutes."
+            onChange={(v) =>
+              v != null &&
+              onPrefsChange({ queue_seed_rotation_secs: Math.max(30, v) })
+            }
+          />
+        )}
+        {!!preferences.queue_seed_rotation_secs &&
+          !preferences.queue_max_active_uploads && (
+            <p className="text-sm text-warning">
+              Rotation does nothing until 'Max active uploads' is set.
+            </p>
+          )}
+        <p className="text-sm text-tertiary">
+          How the limits fit together: 'Max active downloads' and 'Max active
+          uploads' cap each group, 'Max active torrents' caps both together, and
+          rotation only decides <i>which</i> finished torrents use the seeding
+          slots. Automatic rules (Automation tab) still apply: a torrent that
+          reaches its seeding limit leaves the rotation, and the full-speed
+          window counts only while the torrent is actually seeding.
+        </p>
       </Fieldset>
 
       <Fieldset label="Peers (live)">
@@ -227,9 +271,6 @@ export const BitTorrentTab: React.FC<BitTorrentTabProps> = ({
       <Fieldset label="Not available in rqbit yet">
         <ul className="text-sm list-disc pl-5 space-y-1 text-tertiary">
           <li>Protocol encryption (MSE/PE)</li>
-          <li>Seeding ratio or seed-time limits</li>
-          <li>Download queue / max active downloads</li>
-          <li>Sequential download as a session default</li>
           <li>Disk preallocation mode toggle</li>
           <li>Disable PeX (peer exchange is used automatically for public torrents)</li>
         </ul>

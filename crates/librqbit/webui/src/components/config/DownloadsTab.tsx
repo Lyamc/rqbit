@@ -2,7 +2,25 @@ import React from "react";
 import { Fieldset } from "../forms/Fieldset";
 import { FormCheckbox } from "../forms/FormCheckbox";
 import { FormInput } from "../forms/FormInput";
-import { SessionPreferences } from "../../api-types";
+import {
+  DownloadOrderDefaults,
+  FileOrder,
+  SessionPreferences,
+} from "../../api-types";
+
+export const DEFAULT_DOWNLOAD_ORDER: DownloadOrderDefaults = {
+  sequential_files: true,
+  file_order: "name",
+  sequential: true,
+  first_last_first: true,
+};
+
+export const FILE_ORDER_LABELS: Record<FileOrder, string> = {
+  name: "By name (default)",
+  torrent: "Torrent order",
+  smallest_first: "Smallest first",
+  largest_first: "Largest first",
+};
 
 export interface DownloadsTabProps {
   preferences: SessionPreferences;
@@ -13,6 +31,9 @@ export const DownloadsTab: React.FC<DownloadsTabProps> = ({
   preferences,
   onChange,
 }) => {
+  const order = preferences.download_order ?? DEFAULT_DOWNLOAD_ORDER;
+  const setOrder = (patch: Partial<DownloadOrderDefaults>) =>
+    onChange({ download_order: { ...order, ...patch } });
   return (
     <div className="text-secondary py-2 space-y-4">
       <Fieldset label="Reliability">
@@ -81,6 +102,54 @@ export const DownloadsTab: React.FC<DownloadsTabProps> = ({
             if (!isNaN(v) && v >= 1 && v <= 1024)
               onChange({ event_log_max_mb: Math.floor(v) });
           }}
+        />
+      </Fieldset>
+
+      <Fieldset label="Download order (defaults)">
+        <p className="text-sm text-tertiary mb-2">
+          Order in which pieces are requested. Each torrent can override these
+          (right-click a torrent or files → Download order), and single files
+          can override the torrent. Applied immediately to running torrents.
+        </p>
+        <FormCheckbox
+          checked={order.sequential_files}
+          name="do_sequential_files"
+          label="Sequential file download"
+          help="Finish files one after another in the file order below. Off: work on all selected files at once."
+          onChange={(e) => setOrder({ sequential_files: e.target.checked })}
+        />
+        <div className="flex flex-col gap-1 mb-2">
+          <label htmlFor="do_file_order" className="text-sm">
+            File order
+          </label>
+          <select
+            id="do_file_order"
+            className="w-full bg-surface border border-divider rounded px-2 py-1.5 text-sm"
+            value={order.file_order}
+            onChange={(e) =>
+              setOrder({ file_order: e.target.value as FileOrder })
+            }
+          >
+            {(Object.keys(FILE_ORDER_LABELS) as FileOrder[]).map((k) => (
+              <option key={k} value={k}>
+                {FILE_ORDER_LABELS[k]}
+              </option>
+            ))}
+          </select>
+        </div>
+        <FormCheckbox
+          checked={order.sequential}
+          name="do_sequential"
+          label="Sequential download (within each file)"
+          help="Request a file's pieces in order. Off: spread requests across the file."
+          onChange={(e) => setOrder({ sequential: e.target.checked })}
+        />
+        <FormCheckbox
+          checked={order.first_last_first}
+          name="do_first_last"
+          label="Download first and last pieces first"
+          help="Fetch each file's first and last pieces early (media headers / previews)."
+          onChange={(e) => setOrder({ first_last_first: e.target.checked })}
         />
       </Fieldset>
 

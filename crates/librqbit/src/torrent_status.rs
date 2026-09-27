@@ -62,10 +62,18 @@ pub struct StatusDetail {
     pub queue_position: Option<usize>,
 }
 
+impl StatusDetail {
+    pub fn simple(kind: StatusKind, label: String) -> Self {
+        Self { kind, label, progress: None, next_retry_in_secs: None, queue_position: None }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActiveOp {
     Moving,
     Renaming,
+    /// "Finish what's done" removal in progress (completion actions running).
+    FinishingRemoval,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -115,6 +123,11 @@ pub struct StatusInputs<'a> {
     pub active_op: Option<ActiveOp>,
     pub repair: Option<RepairView>,
     pub needs_attention: bool,
+    /// Needs attention for a reason other than I/O recovery (failed finish-and-remove,
+    /// stalled rule set to "flag").
+    pub attention_note: Option<&'a str>,
+    /// Queued for seeding with slot rotation: estimated seconds until a slot frees up.
+    pub queue_eta_secs: Option<u64>,
     pub retry: Option<RetryView>,
     pub live: Option<LiveView>,
     pub error: Option<&'a str>,
@@ -126,6 +139,7 @@ pub struct RuntimeFlags {
     queue_held: AtomicBool,
     active_op: Mutex<Option<ActiveOp>>,
     activity: Mutex<Option<(u64, Instant)>>,
+    attention: Mutex<Option<String>>,
 }
 
 pub struct OpGuard<'a>(&'a RuntimeFlags);
@@ -153,6 +167,15 @@ impl RuntimeFlags {
 
     pub fn active_op(&self) -> Option<ActiveOp> {
         *self.active_op.lock()
+    }
+
+    /// Why the torrent needs attention (not I/O recovery related), if anything.
+    pub fn attention(&self) -> Option<String> {
+        self.attention.lock().clone()
+    }
+
+    pub(crate) fn set_attention(&self, note: Option<String>) {
+        *self.attention.lock() = note;
     }
 
     /// Record the live torrent's fetched-bytes counter; returns seconds since it last
@@ -189,8 +212,14 @@ pub fn format_secs(secs: u64) -> String {
     }
 }
 
+/// Floored, never rounded; 100% only when complete (p >= 1).
 fn pct(p: f64) -> String {
-    format!("{}%", (p.clamp(0.0, 1.0) * 100.0).floor() as u64)
+    if p >= 1.0 {
+        return "100%".to_owned();
+    }
+    // Epsilon: 0.29 * 100.0 is 28.999999999999996.
+    let v = ((p.max(0.0) * 100.0) + 1e-9).floor() as u64;
+    format!("{}%", v.min(99))
 }
 
 pub fn derive_status(i: &StatusInputs<'_>) -> StatusDetail {
@@ -218,6 +247,10 @@ pub fn derive_status(i: &StatusInputs<'_>) -> StatusDetail {
         return match op {
             ActiveOp::Moving => mk(StatusKind::Moving, "Moving files".into()),
             ActiveOp::Renaming => mk(StatusKind::Renaming, "Renaming".into()),
+            ActiveOp::FinishingRemoval => mk(
+                StatusKind::Moving,
+                "Finishing before removal (running completion actions)".into(),
+            ),
         };
     }
     if let Some(r) = i.repair {
@@ -233,6 +266,9 @@ pub fn derive_status(i: &StatusInputs<'_>) -> StatusDetail {
             StatusKind::NeedsAttention,
             "Needs attention (automatic recovery gave up)".into(),
         );
+    }
+    if let Some(note) = i.attention_note {
+        return mk(StatusKind::NeedsAttention, format!("Needs attention: {note}"));
     }
     if !i.metadata_resolved {
         return mk(StatusKind::ResolvingMetadata, "Resolving metadata".into());
@@ -266,7 +302,11 @@ pub fn derive_status(i: &StatusInputs<'_>) -> StatusDetail {
         EngineState::Paused => {
             if i.queue_held {
                 if i.finished {
-                    mk(StatusKind::QueuedForSeeding, queued_label("seeding"))
+                    let mut label = queued_label("seeding");
+                    if let Some(eta) = i.queue_eta_secs {
+                        label += &format!(" · next slot in {}", format_secs(eta));
+                    }
+                    mk(StatusKind::QueuedForSeeding, label)
                 } else {
                     mk(StatusKind::QueuedForDownloading, queued_label("downloading"))
                 }
@@ -322,6 +362,15 @@ pub fn derive_status(i: &StatusInputs<'_>) -> StatusDetail {
 mod tests {
     use super::*;
 
+    #[test]
+    fn status_percent_is_floored() {
+        assert_eq!(super::pct(0.999), "99%");
+        assert_eq!(super::pct(0.9999999), "99%");
+        assert_eq!(super::pct(0.29), "29%");
+        assert_eq!(super::pct(1.0), "100%");
+        assert_eq!(super::pct(0.0), "0%");
+    }
+
     fn base() -> StatusInputs<'static> {
         StatusInputs {
             engine: EngineState::Live,
@@ -333,6 +382,8 @@ mod tests {
             active_op: None,
             repair: None,
             needs_attention: false,
+            attention_note: None,
+            queue_eta_secs: None,
             retry: None,
             live: Some(LiveView {
                 download_bps: 500_000,
@@ -470,5 +521,22 @@ mod tests {
         assert_eq!(format_secs(61), "2m");
         assert_eq!(format_secs(3600), "1h");
         assert_eq!(format_secs(5400), "1h 30m");
+    }
+
+    #[test]
+    fn attention_note_and_rotation_eta() {
+        let mut i = base();
+        i.attention_note = Some("finish-and-remove failed: boom");
+        let s = derive_status(&i);
+        assert_eq!(s.kind, StatusKind::NeedsAttention);
+        assert!(s.label.contains("boom"));
+        let mut i = base();
+        i.engine = EngineState::Paused;
+        i.queue_held = true;
+        i.finished = true;
+        i.queue_eta_secs = Some(600);
+        let s = derive_status(&i);
+        assert_eq!(s.kind, StatusKind::QueuedForSeeding);
+        assert!(s.label.ends_with("next slot in 10m"), "{}", s.label);
     }
 }

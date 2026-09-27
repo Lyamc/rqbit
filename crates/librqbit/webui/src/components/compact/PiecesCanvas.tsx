@@ -7,6 +7,8 @@ interface PiecesCanvasProps {
   torrentId: number;
   totalPieces: number;
   stats: TorrentStats | null;
+  /** Called with the number of pieces we have (from the same bitmap). */
+  onHaveCount?: (n: number) => void;
 }
 
 const CANVAS_HEIGHT = 12;
@@ -15,6 +17,7 @@ export const PiecesCanvas: React.FC<PiecesCanvasProps> = ({
   torrentId,
   totalPieces,
   stats,
+  onHaveCount,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -29,6 +32,17 @@ export const PiecesCanvas: React.FC<PiecesCanvasProps> = ({
       try {
         const buffer = await API.getTorrentHaves(torrentId);
         setBitmap(buffer);
+        if (onHaveCount) {
+          let n = 0;
+          for (const b of buffer) {
+            let v = b;
+            while (v) {
+              n += v & 1;
+              v >>= 1;
+            }
+          }
+          onHaveCount(Math.min(n, totalPieces));
+        }
       } catch (e) {
         console.error("Failed to fetch haves:", e);
       }

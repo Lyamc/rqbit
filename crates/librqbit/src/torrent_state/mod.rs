@@ -859,6 +859,7 @@ impl ManagedTorrent {
             pieces_waiting: r.pieces_waiting,
             next_retry_in_secs: r.next_retry_in_secs,
         });
+        let attention = self.shared.runtime.attention();
         resp.status_detail = Some(ts::derive_status(&ts::StatusInputs {
             engine,
             metadata_resolved: metadata.is_some(),
@@ -869,6 +870,10 @@ impl ManagedTorrent {
             active_op: self.shared.runtime.active_op(),
             repair,
             needs_attention: damage.map(|d| d.needs_attention).unwrap_or(false),
+            attention_note: attention.as_deref(),
+            queue_eta_secs: session
+                .as_ref()
+                .and_then(|s| s.queue.seed_eta_secs(self.shared.id)),
             retry,
             live: live_view,
             error: resp.error.as_deref(),

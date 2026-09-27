@@ -126,8 +126,13 @@ impl TorrentStats {
                 if self.total == 0 {
                     return write!(f, "N/A");
                 }
-                let pct = self.progress as f64 / self.total as f64 * 100f64;
-                write!(f, "{pct:.2}%")
+                // Floored at 2 decimals; 100.00% only when complete.
+                let units = if self.progress >= self.total {
+                    10_000
+                } else {
+                    (self.progress as u128 * 10_000 / self.total as u128).min(9_999)
+                };
+                write!(f, "{}.{:02}%", units / 100, units % 100)
             }
         }
         Percents {

@@ -1,3 +1,5 @@
+import { formatPercentValue } from "../helper/progress";
+
 const variantClassNames = {
   warn: "bg-warning-bg text-white",
   info: "bg-primary-bg text-white",
@@ -11,7 +13,7 @@ export const ProgressBar: React.FC<{
   variant?: "warn" | "info" | "success" | "error";
   classNames?: string;
 }> = ({ now, variant, label, classNames }) => {
-  const progressLabel = label ?? `${now.toFixed(2)}%`;
+  const progressLabel = label ?? `${formatPercentValue(now, 2)}%`;
 
   const variantClassName =
     variantClassNames[variant ?? "info"] ?? variantClassNames["info"];

@@ -24,6 +24,7 @@
 //!
 
 #![warn(clippy::cast_possible_truncation)]
+#![recursion_limit = "256"]
 
 macro_rules! aframe {
     ($e:expr) => {{
@@ -57,6 +58,8 @@ pub mod repair;
 pub mod torrent_queue;
 pub mod torrent_status;
 pub mod add_job;
+pub mod orphan_cleanup;
+pub mod pending_magnets;
 #[cfg(feature = "http-api")]
 pub mod http_api;
 #[cfg(feature = "http-api-client")]
@@ -75,6 +78,9 @@ mod session;
 mod media_classify;
 mod session_admin;
 mod session_preferences;
+pub mod remove_policy;
+pub mod torrent_rules;
+pub mod download_order;
 mod session_persistence;
 pub mod session_stats;
 pub mod spawn_utils;
