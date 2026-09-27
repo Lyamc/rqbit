@@ -64,6 +64,8 @@ async fn watch_adder(
                     url.trim(),
                     AddTorrentOptions {
                         overwrite: true,
+                        // "When a torrent is added" preference.
+                        paused: session.preferences.add_paused_default(),
                         ..Default::default()
                     },
                 )
@@ -79,6 +81,7 @@ async fn watch_adder(
                 add_torrent,
                 Some(AddTorrentOptions {
                     overwrite: true,
+                    paused: session.preferences.add_paused_default(),
                     ..Default::default()
                 }),
             )

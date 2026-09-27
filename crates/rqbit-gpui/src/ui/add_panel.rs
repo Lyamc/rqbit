@@ -23,6 +23,13 @@
 //!
 //! - "Browse server…": pick .torrent files on the server (`/fs/list`),
 //!   added with `from_server_path`.
+//! - "Add paused" (Advanced), preset from the server's "When a torrent is added".
+//! - "Start after I finish the Add dialog": every add carries this panel's
+//!   `add_dialog_id`; torrents the server holds paused for it get a heartbeat
+//!   every 15 s and are started (`/add_dialog/{id}/finish`) when the panel goes
+//!   away — Close/×, Escape, auto-close, or replaced by another panel (Drop). If
+//!   the app quits or the tab is closed, the server starts them once the
+//!   heartbeats stop.
 //!
 //! Not ported (web UI only for now): Transfer from other client, and
 //! server-side .zip extraction.
@@ -32,7 +39,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use gpui::{
-    Context, Entity, EventEmitter, SharedString, Subscription, Window, div, prelude::*, px,
+    BackgroundExecutor, Context, Entity, EventEmitter, SharedString, Subscription, Window, div,
+    prelude::*, px,
 };
 
 use super::files::PickedFile;
@@ -55,6 +63,40 @@ const AUTO_CLOSE_AFTER: Duration = Duration::from_millis(1500);
 /// Other adds can wait a long time for a disk slot behind hash checks.
 const OTHER_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const JOB_POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// "Start after I finish the Add dialog": keep-alive while the panel is open.
+const DIALOG_HEARTBEAT: Duration = Duration::from_secs(15);
+const HELD_NOTE: &str =
+    "Added paused — starts when you close this panel (adjust files or priorities first if you like).";
+
+/// This panel's `add_dialog_id` and whether the server holds torrents for it.
+#[derive(Debug)]
+struct DialogHold {
+    id: String,
+    held: bool,
+}
+
+impl DialogHold {
+    fn new() -> Self {
+        Self {
+            id: new_job_id().replacen("add-", "dlg-", 1),
+            held: false,
+        }
+    }
+
+    /// An add answered `held`: true the first time (start the heartbeat).
+    fn note_held(&mut self) -> bool {
+        !std::mem::replace(&mut self.held, true)
+    }
+
+    /// The panel goes away: the dialog id to finish, if anything is held. Later
+    /// adds use a fresh id.
+    fn release(&mut self) -> Option<String> {
+        if !std::mem::take(&mut self.held) {
+            return None;
+        }
+        Some(std::mem::replace(&mut self.id, Self::new().id))
+    }
+}
 
 pub enum AddPanelEvent {
     Close,
@@ -156,6 +198,18 @@ pub struct AddPanel {
     /// invalidate a pending auto-close when the queue changes).
     all_added: bool,
     auto_close_gen: u64,
+    /// "Add paused" (Advanced). `None` until the server's preference arrives:
+    /// the server then applies "When a torrent is added" itself.
+    add_paused: Option<bool>,
+    dialog: DialogHold,
+    executor: BackgroundExecutor,
+}
+
+impl Drop for AddPanel {
+    fn drop(&mut self) {
+        // Replaced by another panel, window closed, …: still start what we held.
+        self.release_dialog();
+    }
 }
 
 impl EventEmitter<AddPanelEvent> for AddPanel {}
@@ -235,7 +289,25 @@ fn timeout_error(magnet: bool, timeout: Duration) -> String {
 
 impl AddPanel {
     pub fn new(client: ApiClient, cx: &mut Context<Self>) -> Self {
+        let prefs = client.get_preferences();
+        cx.spawn(async move |this, cx| {
+            let Ok(p) = cx.background_executor().spawn(prefs).await else {
+                return;
+            };
+            let paused = p.get("when_added").and_then(|v| v.as_str()) == Some("paused");
+            this.update(cx, |p, cx| {
+                if p.add_paused.is_none() {
+                    p.add_paused = Some(paused);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
         Self {
+            executor: cx.background_executor().clone(),
+            add_paused: None,
+            dialog: DialogHold::new(),
             client,
             urls: cx.new(|cx| {
                 TextInput::multiline("magnet:?xt=urn:btih:…  or  https://…/file.torrent", 5, cx)
@@ -645,6 +717,8 @@ impl AddPanel {
             add_job_id: Some(job_id.clone()),
             // Our own timer cancels first; this only bounds a dead connection.
             timeout: Some(timeout + Duration::from_secs(60)),
+            paused: self.add_paused,
+            add_dialog_id: Some(self.dialog.id.clone()),
         };
         let src = match source {
             ItemSource::Url { text, .. } => AddSource::Url(text),
@@ -789,6 +863,7 @@ impl AddPanel {
         cx: &mut Context<Self>,
     ) {
         let mut added = false;
+        let mut held = false;
         if let Some(item) = self.item_mut(key)
             && item.job.as_ref().is_some_and(|j| j.job_id == job_id)
         {
@@ -815,11 +890,21 @@ impl AddPanel {
                         ItemStatus::AlreadyInRqbit(r.id.or(fs.and_then(|s| s.torrent_id)))
                     } else if is_resolving(&r, fs) {
                         added = true;
+                        held = r.held;
                         item.added_id = r.id.or(item.added_id);
-                        item.note = Some(RESOLVING_NOTE.into());
+                        item.note = Some(if r.held {
+                            format!("{RESOLVING_NOTE} {HELD_NOTE}")
+                        } else {
+                            RESOLVING_NOTE.into()
+                        });
                         ItemStatus::AddedResolving(r.id)
                     } else {
                         added = true;
+                        held = r.held;
+                        if r.held {
+                            item.added_id = r.id.or(item.added_id);
+                            item.note = Some(HELD_NOTE.into());
+                        }
                         ItemStatus::Added(r.id)
                     }
                 }
@@ -833,7 +918,38 @@ impl AddPanel {
         if added {
             self.batch_added += 1;
         }
+        if held && self.dialog.note_held() {
+            self.spawn_dialog_heartbeat(cx);
+        }
         cx.notify();
+    }
+
+    /// Keeps the server holding this panel's torrents while it is open.
+    fn spawn_dialog_heartbeat(&mut self, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(DIALOG_HEARTBEAT).await;
+                let Ok(Some(id)) = this.update(cx, |p, _| p.dialog.held.then(|| p.dialog.id.clone()))
+                else {
+                    return; // panel gone or released
+                };
+                let _ = cx
+                    .background_executor()
+                    .spawn(client.add_dialog_heartbeat(&id))
+                    .await;
+            }
+        })
+        .detach();
+    }
+
+    /// Start everything the server held for this panel (fire and forget).
+    fn release_dialog(&mut self) {
+        if let Some(id) = self.dialog.release() {
+            self.executor
+                .spawn(self.client.add_dialog_finish(&id))
+                .detach();
+        }
     }
 
     fn stop_queue(&mut self, cx: &mut Context<Self>) {
@@ -870,6 +986,7 @@ impl AddPanel {
                 }
             }
         }
+        self.release_dialog();
         cx.emit(AddPanelEvent::Close);
     }
 
@@ -1175,6 +1292,7 @@ impl Render for AddPanel {
             (!self.overwrite).then(|| "no overwrite".to_owned()),
             (self.concurrency != DEFAULT_CONCURRENCY)
                 .then(|| format!("{} at once", self.concurrency)),
+            (self.add_paused == Some(true)).then(|| "add paused".to_owned()),
         ]
         .into_iter()
         .flatten()
@@ -1351,6 +1469,15 @@ impl Render for AddPanel {
                                 }),
                         )
                         .child(
+                            widgets::checkbox("add-paused", "Add paused", self.add_paused == Some(true), !running)
+                                .when(!running, |b| {
+                                    b.on_click(cx.listener(|this, _, _, cx| {
+                                        this.add_paused = Some(this.add_paused != Some(true));
+                                        cx.notify();
+                                    }))
+                                }),
+                        )
+                        .child(
                             div()
                                 .flex()
                                 .flex_row()
@@ -1499,6 +1626,28 @@ mod tests {
         assert!(!all_went_in([Added(Some(1)), Cancelled].iter()));
         assert!(!all_went_in([Added(Some(1)), Ready].iter()));
         assert!(!all_went_in(std::iter::empty()));
+    }
+
+    #[test]
+    fn dialog_hold_releases_once() {
+        let mut d = DialogHold::new();
+        assert!(d.id.starts_with("dlg-gpui-"));
+        assert!(
+            d.id.len() <= 128
+                && d.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
+        assert_eq!(d.release(), None, "nothing held: no finish");
+        let first = d.id.clone();
+        assert!(d.note_held(), "first held add starts the heartbeat");
+        assert!(!d.note_held(), "only once");
+        assert_eq!(d.release().as_deref(), Some(first.as_str()));
+        assert_ne!(d.id, first, "fresh id afterwards");
+        assert_eq!(d.release(), None, "Drop after close: no second finish");
+        let r: AddTorrentResponse = serde_json::from_str(
+            r#"{"id":3,"details":{"info_hash":"ab"},"output_folder":"","held":true}"#,
+        )
+        .unwrap();
+        assert!(r.held);
     }
 
     #[test]

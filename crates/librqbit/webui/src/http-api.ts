@@ -192,6 +192,12 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
     if (opts?.add_job_id) {
       url += `&add_job_id=${encodeURIComponent(opts.add_job_id)}`;
     }
+    if (opts?.paused != null) {
+      url += `&paused=${opts.paused}`;
+    }
+    if (opts?.add_dialog_id) {
+      url += `&add_dialog_id=${encodeURIComponent(opts.add_dialog_id)}`;
+    }
     if (typeof data === "string") {
       url += "&is_url=true";
     }
@@ -217,7 +223,37 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
     if (opts?.add_job_id) {
       url += `&add_job_id=${encodeURIComponent(opts.add_job_id)}`;
     }
+    if (opts?.paused != null) {
+      url += `&paused=${opts.paused}`;
+    }
+    if (opts?.add_dialog_id) {
+      url += `&add_dialog_id=${encodeURIComponent(opts.add_dialog_id)}`;
+    }
     return makeRequest("POST", url, "", false, init);
+  },
+
+  addDialogHeartbeat: (dialogId: string): Promise<unknown> => {
+    return makeRequest(
+      "POST",
+      `/add_dialog/${encodeURIComponent(dialogId)}/heartbeat`,
+    );
+  },
+
+  addDialogFinish: (dialogId: string, opts?: { beacon?: boolean }) => {
+    const path = `/add_dialog/${encodeURIComponent(dialogId)}/finish`;
+    if (opts?.beacon) {
+      // Tab/window closing: a normal request may be cut off.
+      try {
+        if (navigator.sendBeacon?.(apiUrl + path)) return;
+      } catch {
+        // fall through
+      }
+      void fetch(apiUrl + path, { method: "POST", keepalive: true }).catch(
+        () => {},
+      );
+      return;
+    }
+    return makeRequest("POST", path);
   },
 
   getAddJob: (jobId: string): Promise<AddJobStatus> => {

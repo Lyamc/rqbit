@@ -42,6 +42,12 @@ pub struct TorrentAddQueryParams {
     /// arrive in time the magnet is queued as a resolving placeholder anyway (still a
     /// 200 with `resolving: true`), never an error.
     pub wait_for_metadata: Option<bool>,
+    /// Add paused (`true`) or started (`false`). Unset: the "When a torrent is added"
+    /// preference. Magnets still fetch their metadata while paused (no data).
+    pub paused: Option<bool>,
+    /// Sent by Add dialogs: with "Start after I finish the Add dialog" on, the torrent
+    /// is held paused until `POST /add_dialog/{id}/finish` (see [`crate::add_dialog`]).
+    pub add_dialog_id: Option<String>,
 }
 
 impl Serialize for OnlyFiles {
@@ -131,6 +137,7 @@ impl TorrentAddQueryParams {
             magnet_resolve_timeout: self.magnet_timeout_secs.map(Duration::from_secs),
             defer_metadata: self.defer_metadata.unwrap_or(false),
             wait_for_metadata: self.wait_for_metadata.unwrap_or(false),
+            paused: self.paused.unwrap_or(false),
             ..Default::default()
         }
     }

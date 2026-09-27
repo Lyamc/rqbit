@@ -798,6 +798,7 @@ impl Api {
                         resolving: true,
                         already_managed: false,
                         state: AddState::ResolvingMetadata,
+                        held: false,
                     })
                 }
             },
@@ -852,6 +853,7 @@ impl Api {
                     resolving: true,
                     already_managed,
                     state: AddState::ResolvingMetadata,
+                    held: false,
                 })
             }
             DeferredAdd::AlreadyManaged(id) => {
@@ -869,6 +871,7 @@ impl Api {
                     resolving: false,
                     already_managed: true,
                     state: AddState::AlreadyManaged,
+                    held: false,
                 })
             }
         }
@@ -921,6 +924,7 @@ impl Api {
                     resolving: false,
                     already_managed: false,
                     state: AddState::AlreadyManaged,
+                    held: false,
                     output_folder: handle
                         .output_folder()
                         .to_string_lossy()
@@ -942,6 +946,7 @@ impl Api {
                 resolving: false,
                 already_managed: false,
                 state: AddState::ListOnly,
+                held: false,
                 details: make_torrent_details(
                     None,
                     &info_hash,
@@ -977,6 +982,7 @@ impl Api {
                     resolving: false,
                     already_managed: false,
                     state: AddState::Added,
+                    held: false,
                     output_folder: handle
                         .output_folder()
                         .to_string_lossy()
@@ -1106,6 +1112,10 @@ pub struct ApiAddTorrentResponse {
     /// `added`, `already_managed` or `list_only`.
     #[serde(default)]
     pub state: AddState,
+    /// Added paused by an Add dialog ("Start after I finish the Add dialog"); started
+    /// when the dialog finishes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]

@@ -40,13 +40,29 @@ pub async fn h_torrents_post(
 ) -> Result<impl IntoResponse> {
     let is_url = params.is_url;
     let from_server_path = params.from_server_path.clone();
-    let opts = params.into_add_torrent_options();
+    // Paused: explicit parameter, else the "When a torrent is added" preference. An
+    // Add dialog's torrents are held paused until it finishes, if that's enabled and
+    // they weren't added paused on purpose.
+    let prefs = &state.api.session().preferences;
+    let want_paused = params.paused.unwrap_or_else(|| prefs.add_paused_default());
+    let dialog = match params.add_dialog_id.clone() {
+        Some(d) => {
+            crate::add_dialog::validate_dialog_id(&d).map_err(ApiError::invalid_input)?;
+            Some(d)
+        }
+        None => None,
+    };
+    let hold = dialog.filter(|_| {
+        !want_paused && prefs.start_after_add_dialog() && !params.list_only.unwrap_or(false)
+    });
+    let mut opts = params.into_add_torrent_options();
+    opts.paused = want_paused || hold.is_some();
 
     // Add from a validated server filesystem path (browse UI).
     if let Some(path) = from_server_path {
         let data = super::fs::read_torrent_under_roots(&state, &path)?;
         let add = AddTorrent::TorrentFileBytes(data.into());
-        return add_with_timeout(&state, add, opts, timeout).await;
+        return add_with_timeout(&state, add, opts, timeout, hold).await;
     }
 
     let max_size = state.opts.max_upload_body_size.unwrap_or(10 * 1024 * 1024);
@@ -82,7 +98,7 @@ pub async fn h_torrents_post(
         }
         _ => AddTorrent::TorrentFileBytes(data.into()),
     };
-    add_with_timeout(&state, add, opts, timeout).await
+    add_with_timeout(&state, add, opts, timeout, hold).await
 }
 
 /// Magnets never wait here (queued at once, or `wait_for_metadata` falls back to the
@@ -94,6 +110,7 @@ async fn add_with_timeout(
     add: AddTorrent<'_>,
     opts: crate::AddTorrentOptions,
     timeout: std::time::Duration,
+    hold_for_dialog: Option<String>,
 ) -> Result<axum::response::Response> {
     let fut = state
         .api
@@ -111,6 +128,17 @@ async fn add_with_timeout(
                 ),
             ))
         })??;
+    let mut r = r;
+    if let (Some(dialog), Some(id)) = (hold_for_dialog, r.id)
+        && !r.already_managed
+        && matches!(
+            r.state,
+            crate::api::AddState::Added | crate::api::AddState::ResolvingMetadata
+        )
+    {
+        state.api.session().add_dialogs.hold(&dialog, id);
+        r.held = true;
+    }
     let status = if r.resolving && r.id.is_none() {
         StatusCode::ACCEPTED
     } else {
@@ -143,6 +171,29 @@ pub async fn h_add_job_cancel(
         .cancel(&job_id)
         .with_status(StatusCode::BAD_REQUEST)?;
     Ok(axum::Json(outcome))
+}
+
+pub async fn h_add_dialog_heartbeat(
+    State(state): State<ApiState>,
+    Path(dialog_id): Path<String>,
+) -> Result<impl IntoResponse> {
+    crate::add_dialog::validate_dialog_id(&dialog_id).map_err(ApiError::invalid_input)?;
+    let held = state.api.session().add_dialogs.heartbeat(&dialog_id);
+    Ok(axum::Json(serde_json::json!({ "held": held })))
+}
+
+/// Also the target of the UI's `navigator.sendBeacon` on tab/window close.
+pub async fn h_add_dialog_finish(
+    State(state): State<ApiState>,
+    Path(dialog_id): Path<String>,
+) -> Result<impl IntoResponse> {
+    crate::add_dialog::validate_dialog_id(&dialog_id).map_err(ApiError::invalid_input)?;
+    let r = state
+        .api
+        .session()
+        .release_add_dialog(&dialog_id, "Add dialog closed")
+        .await;
+    Ok(axum::Json(r))
 }
 
 pub async fn h_torrent_details(

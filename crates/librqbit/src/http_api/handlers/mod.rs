@@ -66,6 +66,8 @@ async fn h_api_root(parts: Parts) -> impl IntoResponse {
             "POST /torrents": "Add a torrent here. magnet: or http:// or a local file.",
             "GET /add_jobs/{job_id}": "Status of an add started with ?add_job_id= (stage: resolving_metadata, waiting_for_server, ...)",
             "POST /add_jobs/{job_id}/cancel": "Cancel an add started with ?add_job_id= (no-op + already_added if it was committed)",
+            "POST /add_dialog/{dialog_id}/heartbeat": "Add dialog still open (torrents added with ?add_dialog_id= stay held paused)",
+            "POST /add_dialog/{dialog_id}/finish": "Add dialog closed: start the torrents it held",
             "GET /fs/roots": "List allowed filesystem browse roots",
             "GET /cleanup/roots": "Orphan cleanup: folders that can be scanned (+ latest scan summary)",
             "GET /cleanup/scan?roots=&min_age_minutes=": "Orphan cleanup dry run: files/folders no torrent uses (changes nothing)",
@@ -153,6 +155,14 @@ pub fn make_api_router(state: ApiState) -> Router {
         api_router = api_router
             .route("/torrents", post(torrents::h_torrents_post))
             .route("/add_jobs/{job_id}/cancel", post(torrents::h_add_job_cancel))
+            .route(
+                "/add_dialog/{dialog_id}/heartbeat",
+                post(torrents::h_add_dialog_heartbeat),
+            )
+            .route(
+                "/add_dialog/{dialog_id}/finish",
+                post(torrents::h_add_dialog_finish),
+            )
             .route("/fs/extract", post(fs::h_fs_extract))
             .route("/cleanup/apply", post(cleanup::h_cleanup_apply))
             .route("/cleanup/restore", post(cleanup::h_cleanup_restore))
