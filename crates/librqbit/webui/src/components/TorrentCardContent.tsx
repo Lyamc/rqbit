@@ -8,6 +8,7 @@ import { getCompletionETA } from "../helper/getCompletionETA";
 import { StatusIcon } from "./StatusIcon";
 import { DamagedFilesNotice } from "./DamagedFilesNotice";
 import { StatusBadge } from "./StatusBadge";
+import { floorPercent } from "../helper/progress";
 
 export const TorrentCardContent: React.FC<{
   torrent: TorrentListItem;
@@ -21,13 +22,9 @@ export const TorrentCardContent: React.FC<{
   const finished = statsResponse?.finished || false;
   const noMetadata =
     (torrent.total_pieces ?? 0) === 0 && !finished && totalBytes === 0;
-  const progressPercentage = error
-    ? 100
-    : noMetadata
-      ? 0
-      : totalBytes == 0
-        ? 100
-        : (progressBytes / totalBytes) * 100;
+  const progressPercentage = noMetadata
+    ? 0
+    : floorPercent(progressBytes, totalBytes, 2);
 
   const formatPeersString = () => {
     let peer_stats = statsResponse?.live?.snapshot.peer_stats;

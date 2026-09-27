@@ -422,6 +422,45 @@ impl ApiClient {
         self.post("admin/restart")
     }
 
+    /// `POST /torrents/{id}/remove` with an explicit policy (None = saved default).
+    pub fn remove(&self, id: usize, policy: Option<RemovePolicy>) -> ApiFuture<RemoveOutcome> {
+        let body = serde_json::json!({
+            "policy": policy.map(|p| p.to_json()).unwrap_or_else(|| "default".into())
+        });
+        self.post_json(&format!("torrents/{id}/remove"), Some(&body))
+    }
+
+    /// `GET /torrents/remove_preview?ids=…`: complete/incomplete counts for the dialog.
+    pub fn remove_preview(&self, ids: &[usize]) -> ApiFuture<RemovePreview> {
+        let ids: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
+        self.get_json(&format!("torrents/remove_preview?ids={}", ids.join(",")))
+    }
+
+    pub fn get_rules(&self, id: usize) -> ApiFuture<TorrentRulesView> {
+        self.get_json(&format!("torrents/{id}/rules"))
+    }
+
+    /// `override`: `null` = back to the global rules.
+    pub fn set_rules(&self, id: usize, override_: serde_json::Value) -> ApiFuture<TorrentRulesView> {
+        self.post_json(
+            &format!("torrents/{id}/rules"),
+            Some(&serde_json::json!({ "override": override_ })),
+        )
+    }
+
+    pub fn get_download_order(&self, id: usize) -> ApiFuture<DownloadOrderView> {
+        self.get_json(&format!("torrents/{id}/download_order"))
+    }
+
+    /// Patch: absent = unchanged, null = inherit (see the server docs).
+    pub fn set_download_order(
+        &self,
+        id: usize,
+        patch: &serde_json::Value,
+    ) -> ApiFuture<DownloadOrderView> {
+        self.post_json(&format!("torrents/{id}/download_order"), Some(patch))
+    }
+
     /// Removes the torrent and deletes its downloaded files.
     pub fn delete(&self, id: usize) -> ApiFuture<()> {
         self.post(&format!("torrents/{id}/delete"))

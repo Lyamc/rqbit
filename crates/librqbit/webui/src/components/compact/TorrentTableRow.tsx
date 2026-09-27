@@ -9,6 +9,7 @@ import {
   TORRENT_TABLE_CELL_PAD,
   TORRENT_TABLE_GRID,
 } from "./torrentTableLayout";
+import { floorPercent } from "../../helper/progress";
 
 interface TorrentTableRowProps {
   torrent: TorrentListItem;
@@ -17,6 +18,7 @@ interface TorrentTableRowProps {
   isFocused?: boolean;
   onRowClick: (id: number, e: React.MouseEvent) => void;
   onCheckboxChange: (id: number) => void;
+  onContextMenu?: (id: number, e: React.MouseEvent) => void;
 }
 
 const TorrentTableRowUnmemoized: React.FC<TorrentTableRowProps> = ({
@@ -25,6 +27,7 @@ const TorrentTableRowUnmemoized: React.FC<TorrentTableRowProps> = ({
   isFocused = false,
   onRowClick,
   onCheckboxChange,
+  onContextMenu,
 }) => {
   const stats = torrent.stats;
   const state = stats?.state ?? "";
@@ -38,13 +41,11 @@ const TorrentTableRowUnmemoized: React.FC<TorrentTableRowProps> = ({
   // Magnet still resolving metadata: size and progress aren't known yet.
   const noMetadata =
     (torrent.total_pieces ?? 0) === 0 && !finished && totalBytes === 0;
-  const progressPercentage = error
-    ? 100
-    : noMetadata
-      ? 0
-      : totalBytes === 0
-        ? 100
-        : Math.round((progressBytes / totalBytes) * 100);
+  // Floored: 99.9% shows 99%, 100% only when every byte is there. Errors
+  // show real progress too (the status badge says what's wrong).
+  const progressPercentage = noMetadata
+    ? 0
+    : floorPercent(progressBytes, totalBytes);
 
   const downloadSpeed = stats?.live?.download_speed?.human_readable ?? "-";
   const uploadSpeed = stats?.live?.upload_speed?.human_readable ?? "-";
@@ -59,6 +60,8 @@ const TorrentTableRowUnmemoized: React.FC<TorrentTableRowProps> = ({
   const name = torrent.name ?? "";
 
   const handleRowClick = (e: React.MouseEvent) => {
+    // Right button: handled by onContextMenu (keeps a multi-selection).
+    if (e.button === 2) return;
     onRowClick(torrent.id, e);
   };
 
@@ -75,6 +78,11 @@ const TorrentTableRowUnmemoized: React.FC<TorrentTableRowProps> = ({
     <div
       role="row"
       onMouseDown={handleRowClick}
+      onContextMenu={(e) => {
+        if (!onContextMenu) return;
+        e.preventDefault();
+        onContextMenu(torrent.id, e);
+      }}
       aria-selected={isSelected}
       className={`${TORRENT_TABLE_GRID} cursor-pointer border-b border-divider text-sm h-8 ${
         isSelected ? "bg-primary/10" : "hover:bg-surface-raised"

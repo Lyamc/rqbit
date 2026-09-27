@@ -73,6 +73,12 @@ async fn h_api_root(parts: Parts) -> impl IntoResponse {
             "POST /torrents/{id_or_infohash}/pause": "Pause torrent",
             "POST /torrents/{id_or_infohash}/start": "Resume torrent",
             "POST /torrents/{id_or_infohash}/forget": "Forget about the torrent, keep the files",
+            "POST /torrents/{id_or_infohash}/remove": "Remove using a remove policy. Body: {\"policy\": \"default\" | {\"complete\": \"keep\"|\"delete\", \"incomplete\": \"keep\"|\"delete\"|\"finish\"}}. ?wait=true blocks until finish-what's-done is done",
+            "GET /torrents/remove_preview?ids=1,2": "Complete/incomplete counts and file split for the remove dialog",
+            "GET /torrents/{id_or_infohash}/download_order": "Download order (global, torrent, effective, per file)",
+            "POST /torrents/{id_or_infohash}/download_order": "Patch download order. Body: {sequential_files?, file_order? (name|torrent|smallest_first|largest_first), sequential?, first_last_first?, files?: [{ids, sequential?, first_last_first?}], reset?}; null = inherit",
+            "GET /torrents/{id_or_infohash}/rules": "Automatic rules (global, override, effective), counters and status",
+            "POST /torrents/{id_or_infohash}/rules": "Set the per-torrent rules override. Body: {\"override\": {stalled?, seeding?, speed_window?} | null}",
             "POST /torrents/{id_or_infohash}/delete": "Forget about the torrent, remove the files",
             "POST /torrents/{id_or_infohash}/add_peers": "Add peers (newline-delimited)",
             "POST /torrents/{id_or_infohash}/update_only_files": "Change the selection of files to download. You need to POST json of the following form {\"only_files\": [0, 1, 2]}",
@@ -121,6 +127,9 @@ pub fn make_api_router(state: ApiState) -> Router {
             "/torrents/preferences",
             get(configure::h_get_session_preferences),
         )
+        .route("/torrents/remove_preview", get(torrents::h_remove_preview))
+        .route("/torrents/{id}/rules", get(torrents::h_torrent_rules))
+        .route("/torrents/{id}/download_order", get(torrents::h_download_order))
         .route("/add_jobs/{job_id}", get(torrents::h_add_job_status))
         .route("/events", get(events::h_events))
         .route("/events/summary", get(events::h_events_summary))
@@ -184,6 +193,15 @@ pub fn make_api_router(state: ApiState) -> Router {
             .route(
                 "/torrents/{id}/delete",
                 post(torrents::h_torrent_action_delete),
+            )
+            .route(
+                "/torrents/{id}/remove",
+                post(torrents::h_torrent_action_remove),
+            )
+            .route("/torrents/{id}/rules", post(torrents::h_set_torrent_rules))
+            .route(
+                "/torrents/{id}/download_order",
+                post(torrents::h_set_download_order),
             )
             .route(
                 "/torrents/{id}/update_only_files",

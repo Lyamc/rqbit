@@ -129,6 +129,8 @@ pub(crate) struct TorrentStateLocked {
 
     // The sorted file list in which order to download them.
     file_priorities: FilePriorities,
+    /// Picker order from the download-order settings.
+    piece_order: Vec<usize>,
 
     // If this is None, then it was already used
     fatal_errors_tx: Option<tokio::sync::oneshot::Sender<anyhow::Error>>,
@@ -181,7 +183,7 @@ pub enum AddIncomingPeerResult {
 pub struct TorrentStateLive {
     peers: PeerStates,
     pub(crate) shared: Arc<ManagedTorrentShared>,
-    metadata: Arc<TorrentMetadata>,
+    pub(crate) metadata: Arc<TorrentMetadata>,
     _locked: RwLock<TorrentStateLocked>,
 
     pub(crate) files: FileStorage,
@@ -269,6 +271,10 @@ impl TorrentStateLive {
             _locked: RwLock::new(TorrentStateLocked {
                 pieces: Some(PieceTracker::new(paused.chunk_tracker)),
                 file_priorities,
+                piece_order: session.download_piece_order(
+                    &paused.shared.info_hash.as_string(),
+                    &paused.metadata.file_infos,
+                ),
                 fatal_errors_tx: Some(fatal_errors_tx),
                 unflushed_bitv_bytes: 0,
             }),
@@ -985,6 +991,21 @@ impl TorrentStateLive {
         self.peers.with_peer_mut(handle, "set_peer_live", |p| {
             p.connecting_to_live(h.peer_id, &self.peers, connection_kind);
         });
+    }
+
+    /// Replace the picker order (download order settings changed).
+    pub fn set_piece_order(&self, order: Vec<usize>) {
+        self.lock_write("set_piece_order").piece_order = order;
+    }
+
+    /// Per-torrent upload cap (bytes/s), e.g. set by the full-speed seeding window rule.
+    pub fn set_upload_limit_bps(&self, bps: Option<u32>) {
+        self.ratelimits
+            .set_upload_bps(bps.and_then(std::num::NonZeroU32::new));
+    }
+
+    pub fn upload_limit_bps(&self) -> Option<u32> {
+        self.ratelimits.get_upload_bps().map(|v| v.get())
     }
 
     pub fn get_uploaded_bytes(&self) -> u64 {
@@ -1732,6 +1753,7 @@ impl PeerHandler {
                 let TorrentStateLocked {
                     pieces,
                     file_priorities,
+                    piece_order,
                     ..
                 } = &mut **g;
                 let pieces = pieces.as_mut().ok_or(Error::ChunkTrackerEmpty)?;
@@ -1741,6 +1763,7 @@ impl PeerHandler {
                     priority_pieces: self.state.streams.iter_next_pieces(&self.state.lengths),
                     file_priorities,
                     file_infos: &self.state.metadata.file_infos,
+                    piece_order: Some(piece_order.as_slice()),
                     peer_has_piece: |p| bf.get(p.get() as usize).map(|v| *v) == Some(true),
                     can_steal: |p| {
                         self.state.per_piece_locks[p.get_usize()]

@@ -11,6 +11,7 @@ import { PlaylistLink } from "../buttons/PlaylistButton";
 import { PiecesCanvas } from "./PiecesCanvas";
 import { DamagedFilesNotice } from "../DamagedFilesNotice";
 import { TorrentEventsSection } from "../events/TorrentEventsSection";
+import { floorPercent, formatProgress } from "../../helper/progress";
 
 interface OverviewTabProps {
   torrent: TorrentListItem | null;
@@ -51,11 +52,8 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ torrent }) => {
 
   const totalUploadedBytes = statsResponse.live?.snapshot.uploaded_bytes ?? 0;
 
-  const progressPct = error
-    ? 100
-    : totalBytes === 0
-      ? 100
-      : (progressBytes / totalBytes) * 100;
+  // Floored at one decimal: 99.99% shows 99.9%, never 100.0% early.
+  const progressPct = floorPercent(progressBytes, totalBytes, 1);
 
   const downSpeed = statsResponse.live?.download_speed?.human_readable ?? "-";
   const upSpeed = statsResponse.live?.upload_speed?.human_readable ?? "-";
@@ -115,7 +113,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ torrent }) => {
       {/* Main stats line */}
       <div className="flex flex-wrap gap-x-4 gap-y-1">
         <span>
-          <LV label="Progress" value={`${progressPct.toFixed(1)}%`} />
+          <LV label="Progress" value={`${formatProgress(progressBytes, totalBytes, 1)}%`} />
           <span className="text-tertiary">
             {" "}
             ({formatBytes(progressBytes)}/{formatBytes(totalBytes)})

@@ -546,6 +546,26 @@ impl Api {
     }
 
 
+    fn log_legacy_removal(&self, idx: TorrentIdOrHash, delete_files: bool) -> Option<impl FnOnce()> {
+        let h = self.session.get(idx)?;
+        let tref = h.shared().torrent_ref(h.name());
+        let events = self.session.events.clone();
+        Some(move || {
+            events.emit(
+                crate::event_log::NewEvent::new(
+                    crate::event_log::kind::TORRENT_REMOVED,
+                    crate::event_log::Severity::Info,
+                    if delete_files {
+                        "Removed torrent and deleted its files (POST /delete)"
+                    } else {
+                        "Removed torrent, files kept (POST /forget)"
+                    },
+                )
+                .torrent(tref),
+            );
+        })
+    }
+
     pub async fn api_torrent_action_forget(
         &self,
         idx: TorrentIdOrHash,
@@ -554,10 +574,14 @@ impl Api {
             self.session.pending_forget(id, "forget").await;
             return Ok(Default::default());
         }
+        let log = self.log_legacy_removal(idx, false);
         self.session
             .delete(idx, false)
             .await
             .context("error forgetting torrent")?;
+        if let Some(log) = log {
+            log();
+        }
         Ok(Default::default())
     }
 
@@ -569,11 +593,93 @@ impl Api {
             self.session.pending_forget(id, "delete").await;
             return Ok(Default::default());
         }
+        let log = self.log_legacy_removal(idx, true);
         self.session
             .delete(idx, true)
             .await
             .context("error deleting torrent with files")?;
+        if let Some(log) = log {
+            log();
+        }
         Ok(Default::default())
+    }
+
+    /// Remove following a remove policy (explicit or the saved default).
+    pub async fn api_torrent_remove(
+        &self,
+        idx: TorrentIdOrHash,
+        req: crate::remove_policy::RemoveRequest,
+        wait: bool,
+    ) -> Result<crate::remove_policy::RemoveOutcome> {
+        if let Some(id) = self.pending_id(idx) {
+            // Still resolving metadata: there are no files, whatever the policy.
+            let pm = self.session.pending.get(id);
+            self.session.pending_forget(id, "remove").await;
+            return Ok(crate::remove_policy::RemoveOutcome {
+                id,
+                name: pm.map(|p| p.display_name()).unwrap_or_default(),
+                policy: req.policy.unwrap_or(self.session.preferences.get().remove_policy),
+                result: "removed_before_metadata".into(),
+                ..Default::default()
+            });
+        }
+        self.mgr_handle(idx)?;
+        let out = self
+            .session
+            .remove_with_policy(idx, req.policy, "API/UI", wait)
+            .await
+            .with_status(StatusCode::CONFLICT)?;
+        Ok(out)
+    }
+
+    pub fn api_remove_preview(&self, ids: &[TorrentId]) -> crate::remove_policy::RemovePreview {
+        self.session.remove_preview(ids)
+    }
+
+    pub fn api_download_order(
+        &self,
+        idx: TorrentIdOrHash,
+    ) -> Result<crate::download_order::DownloadOrderView> {
+        let h = self.mgr_handle(idx)?;
+        self.session
+            .download_order_view(&h)
+            .with_status(StatusCode::CONFLICT)
+    }
+
+    pub fn api_set_download_order(
+        &self,
+        idx: TorrentIdOrHash,
+        patch: crate::download_order::DownloadOrderPatch,
+    ) -> Result<crate::download_order::DownloadOrderView> {
+        let h = self.mgr_handle(idx)?;
+        self.session
+            .set_download_order(&h, &patch)
+            .with_status(StatusCode::BAD_REQUEST)
+    }
+
+    pub fn api_torrent_rules(
+        &self,
+        idx: TorrentIdOrHash,
+    ) -> Result<crate::torrent_rules::TorrentRulesView> {
+        let h = self.mgr_handle(idx)?;
+        Ok(self.session.torrent_rules_view(&h))
+    }
+
+    pub fn api_set_torrent_rules(
+        &self,
+        idx: TorrentIdOrHash,
+        req: crate::torrent_rules::SetRulesOverride,
+    ) -> Result<crate::torrent_rules::TorrentRulesView> {
+        let h = self.mgr_handle(idx)?;
+        let o = req.override_.map(|o| crate::torrent_rules::RulesOverride {
+            stalled: o.stalled,
+            seeding: o.seeding,
+            speed_window: o.speed_window,
+        });
+        self.session
+            .rules
+            .set_override(&h.info_hash().as_string(), o);
+        Ok(self.session.torrent_rules_view(&h))
     }
 
     pub async fn api_torrent_action_update_only_files(

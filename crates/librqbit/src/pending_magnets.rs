@@ -502,7 +502,7 @@ impl Session {
         }
         self.events.emit(
             crate::event_log::NewEvent::new(
-                crate::event_log::kind::METADATA_FAILED,
+                crate::event_log::kind::TORRENT_REMOVED,
                 crate::event_log::Severity::Info,
                 format!(
                     "Removed {} before its metadata was resolved ({source})",

@@ -264,11 +264,168 @@ export interface SessionPreferences {
   peer_limit?: number | null;
   /** UI: ask before removing torrents (default true). Deleting files always asks. */
   confirm_remove?: boolean;
-  /** UI: default of the remove dialog's "also delete files" (default keep_files). */
+  /** Legacy single remove action (read-only; migrated to remove_policy by the server). */
   default_remove_action?: RemoveAction;
+  /** What Remove does with files, for complete and incomplete torrents. */
+  remove_policy?: RemovePolicy;
+  /** Automatic rules (stalled, seeding limits, full-speed window). All off by default. */
+  rules?: TorrentRules;
+  /** Rotate seeding slots every N seconds (needs queueing + max active uploads). */
+  queue_seed_rotation_secs?: number | null;
+  /** Default download order (piece picker). */
+  download_order?: DownloadOrderDefaults;
 }
 
 export type RemoveAction = "keep_files" | "delete_files";
+
+export type CompleteRemoveAction = "keep" | "delete";
+export type IncompleteRemoveAction = "keep" | "delete" | "finish";
+export interface RemovePolicy {
+  complete: CompleteRemoveAction;
+  incomplete: IncompleteRemoveAction;
+}
+
+export interface RemoveOutcome {
+  id: number;
+  name: string;
+  was_complete: boolean;
+  policy: RemovePolicy;
+  result: string;
+  deleted_files: string[];
+  deleted_bytes: number;
+  kept_files: number;
+  actions_run: string[];
+  final_folder?: string;
+}
+
+export interface RemovePreviewItem {
+  id: number;
+  name: string;
+  complete: boolean;
+  files_complete: number;
+  files_partial: number;
+  bytes_complete: number;
+  bytes_partial: number;
+}
+
+export interface RemovePreview {
+  policy: RemovePolicy;
+  confirm_remove: boolean;
+  completion_actions: string[];
+  items: RemovePreviewItem[];
+  complete: number;
+  incomplete: number;
+  incomplete_nothing_done: number;
+}
+
+export type RuleAction =
+  | "pause"
+  | "flag"
+  | "remove_keep"
+  | "remove_policy"
+  | "remove_delete"
+  | "remove_finish";
+
+export interface StalledRule {
+  enabled: boolean;
+  after_secs: number;
+  action: RuleAction;
+}
+
+export interface SeedingLimits {
+  enabled: boolean;
+  max_seed_secs?: number | null;
+  max_uploaded_bytes?: number | null;
+  max_ratio?: number | null;
+  action: RuleAction;
+}
+
+export interface SpeedWindow {
+  enabled: boolean;
+  full_speed_secs?: number | null;
+  full_speed_bytes?: number | null;
+  then: "cap" | "stop";
+  cap_kib_per_sec: number;
+}
+
+export interface TorrentRules {
+  stalled: StalledRule;
+  seeding: SeedingLimits;
+  speed_window: SpeedWindow;
+}
+
+export interface RulesOverride {
+  stalled?: StalledRule | null;
+  seeding?: SeedingLimits | null;
+  speed_window?: SpeedWindow | null;
+}
+
+export interface TorrentCounters {
+  seeding_secs: number;
+  uploaded_total: number;
+  idle_secs: number;
+  completed_unix?: number;
+}
+
+export interface TorrentRulesView {
+  global: TorrentRules;
+  override: RulesOverride | null;
+  effective: TorrentRules;
+  counters: TorrentCounters;
+  ratio: number;
+  status: string[];
+  warnings: string[];
+}
+
+export type FileOrder = "name" | "torrent" | "smallest_first" | "largest_first";
+
+export interface DownloadOrderDefaults {
+  sequential_files: boolean;
+  file_order: FileOrder;
+  sequential: boolean;
+  first_last_first: boolean;
+}
+
+export interface FileOrderSettings {
+  sequential?: boolean;
+  first_last_first?: boolean;
+}
+
+export interface TorrentDownloadOrder {
+  sequential_files?: boolean;
+  file_order?: FileOrder;
+  sequential?: boolean;
+  first_last_first?: boolean;
+  files?: Record<string, FileOrderSettings>;
+}
+
+export interface DownloadOrderView {
+  global: DownloadOrderDefaults;
+  torrent: TorrentDownloadOrder;
+  effective: DownloadOrderDefaults;
+  files: {
+    id: number;
+    name: string;
+    sequential: boolean;
+    first_last_first: boolean;
+    override: FileOrderSettings;
+  }[];
+  summary: string;
+}
+
+/** Absent = unchanged, null = inherit. */
+export interface DownloadOrderPatch {
+  sequential_files?: boolean | null;
+  file_order?: FileOrder | null;
+  sequential?: boolean | null;
+  first_last_first?: boolean | null;
+  files?: {
+    ids: number[];
+    sequential?: boolean | null;
+    first_last_first?: boolean | null;
+  }[];
+  reset?: boolean;
+}
 
 // Interface for the Torrent Stats API response
 export interface LiveTorrentStats {
@@ -684,6 +841,24 @@ export interface RqbitAPI {
   ) => Promise<RepairStartResponse>;
   forget: (index: number) => Promise<void>;
   delete: (index: number) => Promise<void>;
+  /** Remove with a policy (null = saved default). */
+  remove?: (
+    index: number,
+    policy: RemovePolicy | null,
+    opts?: { wait?: boolean },
+  ) => Promise<RemoveOutcome>;
+  removePreview?: (ids: number[]) => Promise<RemovePreview>;
+  recheck?: (index: number) => Promise<void>;
+  getTorrentRules?: (index: number) => Promise<TorrentRulesView>;
+  setTorrentRules?: (
+    index: number,
+    override: RulesOverride | null,
+  ) => Promise<TorrentRulesView>;
+  getDownloadOrder?: (index: number) => Promise<DownloadOrderView>;
+  setDownloadOrder?: (
+    index: number,
+    patch: DownloadOrderPatch,
+  ) => Promise<DownloadOrderView>;
   stats: () => Promise<SessionStats>;
   getLimits: () => Promise<LimitsConfig>;
   setLimits: (limits: LimitsConfig) => Promise<void>;

@@ -636,3 +636,135 @@ pub struct PublicIp {
     pub age_secs: Option<u64>,
     pub checking: bool,
 }
+
+/// What Remove does with files (`remove_policy` preference / remove endpoint).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemovePolicy {
+    /// "keep" | "delete"
+    pub complete: &'static str,
+    /// "keep" | "delete" | "finish"
+    pub incomplete: &'static str,
+}
+
+impl Default for RemovePolicy {
+    fn default() -> Self {
+        Self::KEEP
+    }
+}
+
+impl RemovePolicy {
+    pub const KEEP: RemovePolicy = RemovePolicy {
+        complete: "keep",
+        incomplete: "keep",
+    };
+
+    /// From stored strings (unknown values fall back to keep).
+    pub fn from_strs(complete: Option<&str>, incomplete: Option<&str>) -> Self {
+        RemovePolicy {
+            complete: match complete {
+                Some("delete") => "delete",
+                _ => "keep",
+            },
+            incomplete: match incomplete {
+                Some("delete") => "delete",
+                Some("finish") => "finish",
+                _ => "keep",
+            },
+        }
+    }
+
+    pub fn from_json(v: Option<&serde_json::Value>) -> Self {
+        Self::from_strs(
+            v.and_then(|v| v.get("complete")).and_then(|v| v.as_str()),
+            v.and_then(|v| v.get("incomplete")).and_then(|v| v.as_str()),
+        )
+    }
+
+    /// Whether removing these groups deletes anything.
+    pub fn deletes_files(&self, any_complete: bool, any_incomplete: bool) -> bool {
+        (any_complete && self.complete == "delete") || (any_incomplete && self.incomplete != "keep")
+    }
+
+    pub fn to_json(self) -> serde_json::Value {
+        serde_json::json!({"complete": self.complete, "incomplete": self.incomplete})
+    }
+}
+
+/// `GET /torrents/remove_preview?ids=…` item.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct RemovePreviewItem {
+    pub id: usize,
+    pub name: String,
+    pub complete: bool,
+    pub files_complete: usize,
+    pub files_partial: usize,
+    pub bytes_complete: u64,
+    pub bytes_partial: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct RemovePreview {
+    pub policy: Option<serde_json::Value>,
+    pub confirm_remove: bool,
+    pub completion_actions: Vec<String>,
+    pub items: Vec<RemovePreviewItem>,
+    pub complete: usize,
+    pub incomplete: usize,
+    pub incomplete_nothing_done: usize,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct RemoveOutcome {
+    pub id: usize,
+    pub name: String,
+    pub result: String,
+    pub deleted_files: Vec<String>,
+    pub actions_run: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct TorrentCounters {
+    pub seeding_secs: u64,
+    pub uploaded_total: u64,
+    pub idle_secs: u64,
+}
+
+/// `GET /torrents/{id}/rules`. Rules are kept as JSON (edited generically).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct TorrentRulesView {
+    pub global: serde_json::Value,
+    #[serde(rename = "override")]
+    pub override_: Option<serde_json::Value>,
+    pub effective: serde_json::Value,
+    pub counters: TorrentCounters,
+    pub ratio: f64,
+    pub status: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct FileOrderView {
+    pub id: usize,
+    pub name: String,
+    pub sequential: bool,
+    pub first_last_first: bool,
+    #[serde(rename = "override")]
+    pub override_: serde_json::Value,
+}
+
+/// `GET /torrents/{id}/download_order`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct DownloadOrderView {
+    pub global: serde_json::Value,
+    pub torrent: serde_json::Value,
+    pub effective: serde_json::Value,
+    pub files: Vec<FileOrderView>,
+    pub summary: String,
+}

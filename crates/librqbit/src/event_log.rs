@@ -83,6 +83,10 @@ pub mod kind {
     pub const RECHECK: &str = "recheck";
     pub const METADATA_RESOLVED: &str = "metadata_resolved";
     pub const METADATA_FAILED: &str = "metadata_failed";
+    pub const TORRENT_REMOVED: &str = "torrent_removed";
+    pub const REMOVE_FAILED: &str = "remove_failed";
+    pub const RULE_FIRED: &str = "rule_fired";
+    pub const QUEUE_ROTATION: &str = "queue_rotation";
 }
 
 fn one() -> u64 {

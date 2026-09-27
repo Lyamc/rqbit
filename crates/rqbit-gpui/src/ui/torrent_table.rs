@@ -352,6 +352,12 @@ pub fn row(
         .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
             this.row_clicked(id, ev, window, cx)
         }))
+        .on_mouse_down(
+            gpui::MouseButton::Right,
+            cx.listener(move |this, ev: &gpui::MouseDownEvent, window, cx| {
+                this.row_context_menu(id, ev.position, window, cx)
+            }),
+        )
         .child(
             cell(W_CHECK)
                 .id(("check", id))
@@ -444,7 +450,7 @@ pub fn row(
                         .justify_end()
                         .text_xs()
                         .text_color(theme::text_muted())
-                        .child(format!("{}%", (frac * 100.0).round() as u32)),
+                        .child(format!("{}%", progress_label(stats, 0))),
                 ),
         )
         .child(cell(W_SPEED).justify_end().child(down))
@@ -476,4 +482,13 @@ pub fn row(
             )
         })
         .into_any_element()
+}
+
+/// Floored progress text for a torrent row (no stats yet / no metadata = 0).
+fn progress_label(stats: Option<&crate::api::TorrentStats>, decimals: u32) -> String {
+    match stats {
+        Some(s) if s.total_bytes == 0 && !s.finished => crate::format::format_progress(0, 1, decimals),
+        Some(s) => crate::format::format_progress(s.progress_bytes, s.total_bytes, decimals),
+        None => crate::format::format_progress(0, 1, decimals),
+    }
 }

@@ -1,20 +1,28 @@
 import React from "react";
 import { Fieldset } from "../forms/Fieldset";
 import { FormCheckbox } from "../forms/FormCheckbox";
-import { RemoveAction, SessionPreferences } from "../../api-types";
+import {
+  CompleteRemoveAction,
+  IncompleteRemoveAction,
+  SessionPreferences,
+} from "../../api-types";
+import { policyDeletesFiles, policyFromPrefs } from "../../helper/removePrefs";
 
 export interface InterfaceTabProps {
   preferences: SessionPreferences;
   onChange: (patch: Partial<SessionPreferences>) => void;
 }
 
+export const selectClass =
+  "w-full bg-surface border border-divider rounded px-2 py-1.5 text-sm";
+
 export const InterfaceTab: React.FC<InterfaceTabProps> = ({
   preferences,
   onChange,
 }) => {
   const confirm = preferences.confirm_remove !== false;
-  const action: RemoveAction =
-    preferences.default_remove_action ?? "keep_files";
+  const policy = policyFromPrefs(preferences);
+  const deletes = policyDeletesFiles(policy);
   return (
     <div className="text-secondary py-2 space-y-4">
       <Fieldset label="Removing torrents">
@@ -22,40 +30,74 @@ export const InterfaceTab: React.FC<InterfaceTabProps> = ({
           checked={confirm}
           name="confirm_remove"
           label="Confirm before removing torrents"
-          help="Show the confirmation dialog for Remove / Delete (toolbar, row button and the Delete key). When off, torrents are removed right away and their files are kept. Saved on the server; applies to the web UI and the GPUI client."
+          help="Show the confirmation dialog for Remove (toolbar, row button, right-click menu and the Delete key). Saved on the server; applies to the web UI and the GPUI client."
           onChange={(e) => onChange({ confirm_remove: e.target.checked })}
         />
         <div className="mb-3">
           <label
-            htmlFor="default_remove_action"
+            htmlFor="remove_policy_complete"
             className="block text-sm text-text mb-1"
           >
-            Default remove action
+            When the torrent is complete
           </label>
           <select
-            id="default_remove_action"
-            className="w-full bg-surface border border-divider rounded px-2 py-1.5 text-sm"
-            value={action}
+            id="remove_policy_complete"
+            className={selectClass}
+            value={policy.complete}
             onChange={(e) =>
               onChange({
-                default_remove_action: e.target.value as RemoveAction,
+                remove_policy: {
+                  ...policy,
+                  complete: e.target.value as CompleteRemoveAction,
+                },
               })
             }
           >
-            <option value="keep_files">Remove torrent only (keep files)</option>
-            <option value="delete_files">
-              Remove torrent and delete files
-            </option>
+            <option value="keep">Keep files</option>
+            <option value="delete">Delete files</option>
+          </select>
+        </div>
+        <div className="mb-3">
+          <label
+            htmlFor="remove_policy_incomplete"
+            className="block text-sm text-text mb-1"
+          >
+            When the torrent is incomplete
+          </label>
+          <select
+            id="remove_policy_incomplete"
+            className={selectClass}
+            value={policy.incomplete}
+            onChange={(e) =>
+              onChange({
+                remove_policy: {
+                  ...policy,
+                  incomplete: e.target.value as IncompleteRemoveAction,
+                },
+              })
+            }
+          >
+            <option value="keep">Keep files (partial files stay on disk)</option>
+            <option value="delete">Delete all files</option>
+            <option value="finish">Finish what's done</option>
           </select>
           <p className="text-sm text-tertiary mt-1">
-            Presets the dialog's "Also delete downloaded files" checkbox.
-            Deleting files always asks for confirmation, even when confirmation
-            is turned off above.
+            <b>Finish what's done</b>: unfinished files are deselected and their
+            partial data deleted (only files this torrent created), the
+            completion actions (Preferences → Completion) run on the finished
+            files, and then the torrent is removed with those files kept where
+            the actions put them. If an action fails, the torrent is kept and
+            flagged "needs attention". With no finished file at all, all partial
+            data is deleted and the torrent removed.
           </p>
-          {!confirm && action === "delete_files" && (
+          <p className="text-sm text-tertiary mt-1">
+            These preset the remove dialog, where they can be changed for a
+            single removal. Every removal is written to the Events log.
+          </p>
+          {!confirm && deletes && (
             <p className="text-sm text-warning mt-1">
-              Confirmation is off, but because the default deletes files the
-              dialog will still be shown.
+              Confirmation is off, but this policy can delete files, so the
+              dialog is still shown whenever a removal would delete something.
             </p>
           )}
         </div>

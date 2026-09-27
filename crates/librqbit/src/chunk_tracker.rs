@@ -248,6 +248,19 @@ impl ChunkTracker {
             .filter_map(|id| self.lengths.validate_piece_index(id))
     }
 
+    /// Queued pieces following an explicit piece order (see `download_order`).
+    pub(crate) fn iter_queued_in_order<'a>(
+        &'a self,
+        order: &'a [usize],
+    ) -> impl Iterator<Item = ValidPieceIndex> + 'a {
+        order
+            .iter()
+            .copied()
+            .filter(|id| self.queue_pieces.get(*id).map(|b| *b).unwrap_or(false))
+            .filter_map(|id| id.try_into().ok())
+            .filter_map(|id| self.lengths.validate_piece_index(id))
+    }
+
     pub(crate) fn is_piece_have(&self, id: ValidPieceIndex) -> bool {
         self.have.as_slice()[id.get() as usize]
     }

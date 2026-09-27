@@ -25,6 +25,13 @@ import {
   EventSummary,
   RepairCounters,
   PublicIpInfo,
+  RemovePolicy,
+  RemoveOutcome,
+  RemovePreview,
+  TorrentRulesView,
+  RulesOverride,
+  DownloadOrderView,
+  DownloadOrderPatch,
 } from "./api-types";
 
 // Define API URL and base path
@@ -352,6 +359,42 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
 
   delete: (index: number): Promise<void> => {
     return makeRequest("POST", `/torrents/${index}/delete`);
+  },
+  remove: (
+    index: number,
+    policy: RemovePolicy | null,
+    opts?: { wait?: boolean },
+  ): Promise<RemoveOutcome> => {
+    return makeRequest(
+      "POST",
+      `/torrents/${index}/remove${opts?.wait ? "?wait=true" : ""}`,
+      { policy: policy ?? "default" },
+      true,
+    );
+  },
+  removePreview: (ids: number[]): Promise<RemovePreview> => {
+    return makeRequest("GET", `/torrents/remove_preview?ids=${ids.join(",")}`);
+  },
+  recheck: (index: number): Promise<void> => {
+    return makeRequest("POST", `/torrents/${index}/recheck`);
+  },
+  getTorrentRules: (index: number): Promise<TorrentRulesView> => {
+    return makeRequest("GET", `/torrents/${index}/rules`);
+  },
+  setTorrentRules: (
+    index: number,
+    override: RulesOverride | null,
+  ): Promise<TorrentRulesView> => {
+    return makeRequest("POST", `/torrents/${index}/rules`, { override }, true);
+  },
+  getDownloadOrder: (index: number): Promise<DownloadOrderView> => {
+    return makeRequest("GET", `/torrents/${index}/download_order`);
+  },
+  setDownloadOrder: (
+    index: number,
+    patch: DownloadOrderPatch,
+  ): Promise<DownloadOrderView> => {
+    return makeRequest("POST", `/torrents/${index}/download_order`, patch, true);
   },
   getVersion: async (): Promise<string> => {
     const r = await makeRequest("GET", "/");

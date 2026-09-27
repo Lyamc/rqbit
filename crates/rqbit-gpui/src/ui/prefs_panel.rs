@@ -31,17 +31,19 @@ enum Tab {
     Downloads,
     Organize,
     Completion,
+    Automation,
     Interface,
     Admin,
 }
 
-const TABS: [(Tab, &str); 8] = [
+const TABS: [(Tab, &str); 9] = [
     (Tab::Speed, "Speed"),
     (Tab::Connection, "Connection"),
     (Tab::BitTorrent, "BitTorrent"),
     (Tab::Downloads, "Downloads"),
     (Tab::Organize, "Organize"),
     (Tab::Completion, "Completion"),
+    (Tab::Automation, "Automation"),
     (Tab::Interface, "Interface"),
     (Tab::Admin, "Web UI / Admin"),
 ];
@@ -61,6 +63,14 @@ enum Kind {
     OptInt,
     /// Required integer; empty keeps the current value.
     Int,
+    /// Optional duration ("2h 30m", bare number = minutes); empty -> null.
+    Duration,
+    /// Required duration; empty keeps the current value.
+    DurationReq,
+    /// Optional size ("1.5 GB"); empty -> null.
+    Size,
+    /// Optional positive decimal (ratio); empty -> null.
+    Float,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -100,10 +110,85 @@ struct ChoiceField {
     initial: &'static str,
 }
 
-const REMOVE_ACTIONS: &[(&str, &str)] = &[
-    ("keep_files", "Remove torrent only (keep files)"),
-    ("delete_files", "Remove torrent and delete files"),
+const COMPLETE_ACTIONS: &[(&str, &str)] = &[("keep", "Keep files"), ("delete", "Delete files")];
+const INCOMPLETE_ACTIONS: &[(&str, &str)] = &[
+    ("keep", "Keep files"),
+    ("delete", "Delete all"),
+    ("finish", "Finish what's done"),
 ];
+const STALLED_ACTIONS: &[(&str, &str)] = &[
+    ("flag", "Flag"),
+    ("pause", "Pause"),
+    ("remove_keep", "Remove (keep)"),
+    ("remove_finish", "Remove (finish)"),
+    ("remove_delete", "Remove + delete"),
+    ("remove_policy", "Remove per policy"),
+];
+const SEEDING_ACTIONS: &[(&str, &str)] = &[
+    ("pause", "Pause"),
+    ("remove_keep", "Remove (keep files)"),
+    ("remove_policy", "Remove per policy"),
+];
+const WINDOW_THEN: &[(&str, &str)] = &[("cap", "Cap upload rate"), ("stop", "Stop seeding")];
+const FILE_ORDERS: &[(&str, &str)] = &[
+    ("name", "By name"),
+    ("torrent", "Torrent order"),
+    ("smallest_first", "Smallest first"),
+    ("largest_first", "Largest first"),
+];
+
+/// Value at a dotted path ("rules.stalled.enabled").
+fn get_path<'a>(m: &'a Map<String, Value>, path: &str) -> Option<&'a Value> {
+    let mut parts = path.split('.');
+    let mut cur = m.get(parts.next()?)?;
+    for p in parts {
+        cur = cur.get(p)?;
+    }
+    Some(cur)
+}
+
+/// Sets a dotted path, creating (or replacing non-object) parents.
+fn set_path(m: &mut Map<String, Value>, path: &str, value: Value) {
+    match path.split_once('.') {
+        None => {
+            m.insert(path.to_owned(), value);
+        }
+        Some((head, rest)) => {
+            let e = m
+                .entry(head.to_owned())
+                .or_insert_with(|| Value::Object(Map::new()));
+            if !e.is_object() {
+                *e = Value::Object(Map::new());
+            }
+            set_path(e.as_object_mut().expect("object"), rest, value);
+        }
+    }
+}
+
+/// Maps a stored string to the matching `&'static` option value.
+fn choice_value(
+    options: &'static [(&'static str, &'static str)],
+    v: Option<&str>,
+    default: &'static str,
+) -> &'static str {
+    options
+        .iter()
+        .find(|(k, _)| Some(*k) == v)
+        .map(|(k, _)| *k)
+        .unwrap_or(default)
+}
+
+/// Whether a rule action can delete files (mirrors `RuleAction::may_delete`).
+fn rule_may_delete(action: &str, complete: bool, policy: (&str, &str)) -> bool {
+    let p = match action {
+        "remove_keep" => ("keep", "keep"),
+        "remove_delete" => ("delete", "delete"),
+        "remove_finish" => ("keep", "finish"),
+        "remove_policy" => policy,
+        _ => return false,
+    };
+    if complete { p.0 == "delete" } else { p.1 != "keep" }
+}
 
 struct TriField {
     key: &'static str,
@@ -124,6 +209,8 @@ enum Row {
     Tri(usize),
     Choice(usize),
     Info(&'static str, String),
+    /// Live warnings about settings that can delete files.
+    Warnings,
     /// Basic auth editor (admin.json).
     Auth,
     /// Reload preferences.json / restart the process.
@@ -310,6 +397,55 @@ fn plan_save(
                             continue;
                         }
                     },
+                    Kind::Duration | Kind::DurationReq => {
+                        if text.is_empty() {
+                            if f.kind == Kind::DurationReq {
+                                continue;
+                            }
+                            Value::Null
+                        } else {
+                            match crate::format::parse_duration(text, 60) {
+                                Some(v) => json!(v),
+                                None => {
+                                    errors.push(format!(
+                                        "{}: \"{text}\" is not a duration (e.g. 15m, 2h 30m, 7d)",
+                                        f.label
+                                    ));
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    Kind::Size => {
+                        if text.is_empty() {
+                            Value::Null
+                        } else {
+                            match crate::format::parse_size(text) {
+                                Some(v) => json!(v),
+                                None => {
+                                    errors.push(format!(
+                                        "{}: \"{text}\" is not a size (e.g. 500 MB, 1.5 GB)",
+                                        f.label
+                                    ));
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    Kind::Float => {
+                        if text.is_empty() {
+                            Value::Null
+                        } else {
+                            match text.parse::<f64>() {
+                                Ok(v) if v.is_finite() && v > 0.0 => json!(v),
+                                Ok(_) => Value::Null,
+                                Err(_) => {
+                                    errors.push(format!("{}: \"{text}\" is not a number", f.label));
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                 };
                 if let Some(folder) = f.key.strip_prefix("auto_organize_folders.") {
                     let obj = new_prefs
@@ -337,7 +473,7 @@ fn plan_save(
                         },
                     );
                 } else {
-                    new_prefs.insert(f.key.to_owned(), value);
+                    set_path(&mut new_prefs, f.key, value);
                 }
                 prefs_changed = true;
             }
@@ -366,7 +502,7 @@ fn plan_save(
     }
     for (key, value, initial) in bools {
         if value != initial {
-            new_prefs.insert((*key).to_owned(), json!(value));
+            set_path(&mut new_prefs, key, json!(value));
             prefs_changed = true;
         }
     }
@@ -394,14 +530,52 @@ fn plan_save(
     })
 }
 
+/// Current (unsaved) settings that can delete files, shown as warnings in
+/// the Interface and Automation tabs.
+fn delete_warnings(l: &Loaded) -> Vec<String> {
+    let choice = |k: &str| l.choices.iter().find(|c| c.key == k).map(|c| c.value);
+    let boolv = |k: &str| l.bools.iter().any(|b| b.key == k && b.value);
+    let policy = (
+        choice("remove_policy.complete").unwrap_or("keep"),
+        choice("remove_policy.incomplete").unwrap_or("keep"),
+    );
+    warnings_for(
+        policy,
+        boolv("confirm_remove"),
+        boolv("rules.stalled.enabled").then(|| choice("rules.stalled.action").unwrap_or("pause")),
+        boolv("rules.seeding.enabled").then(|| choice("rules.seeding.action").unwrap_or("pause")),
+    )
+}
+
+fn warnings_for(
+    policy: (&str, &str),
+    confirm: bool,
+    stalled: Option<&str>,
+    seeding: Option<&str>,
+) -> Vec<String> {
+    let mut w = Vec::new();
+    if !confirm && (policy.0 == "delete" || policy.1 != "keep") {
+        w.push("Confirmation is off, but this remove policy can delete files, so the dialog is still shown whenever a removal would delete something.".to_owned());
+    }
+    if let Some(a) = stalled
+        && rule_may_delete(a, false, policy)
+    {
+        w.push("Stalled-torrent rule: torrents will be removed with file deletion.".to_owned());
+    }
+    if let Some(a) = seeding
+        && rule_may_delete(a, true, policy)
+    {
+        w.push("Seeding-limit rule: torrents will have their files deleted (remove policy deletes complete torrents).".to_owned());
+    }
+    w
+}
+
 /// Adds changed choice fields to a save plan (the full preferences object,
 /// unknown fields preserved, like `plan_save`).
 fn apply_choices(plan: &mut SavePlan, prefs: &Map<String, Value>, choices: &[(&str, &str, &str)]) {
     for (key, value, initial) in choices {
         if value != initial {
-            plan.prefs
-                .get_or_insert_with(|| prefs.clone())
-                .insert((*key).to_owned(), json!(value));
+            set_path(plan.prefs.get_or_insert_with(|| prefs.clone()), key, json!(value));
         }
     }
 }
@@ -493,7 +667,20 @@ impl PrefsPanel {
                                 .map(|(_, d)| d.to_string())
                                 .unwrap_or_default()
                         }),
-                    None => value_to_text(prefs.get(key)),
+                    None => {
+                        let v = get_path(&prefs, key);
+                        match kind {
+                            Kind::Duration | Kind::DurationReq => v
+                                .and_then(Value::as_u64)
+                                .map(crate::format::format_duration)
+                                .unwrap_or_default(),
+                            Kind::Size => v
+                                .and_then(Value::as_u64)
+                                .map(crate::format::format_bytes)
+                                .unwrap_or_default(),
+                            _ => value_to_text(v),
+                        }
+                    }
                 },
                 Target::Admin => value_to_text(persisted.get(key)),
             };
@@ -515,7 +702,9 @@ impl PrefsPanel {
                          label: &'static str,
                          help: &'static str,
                          rows: &mut Vec<(Tab, Row)>| {
-            let v = prefs.get(key).and_then(Value::as_bool).unwrap_or(false);
+            let v = get_path(&prefs, key)
+                .and_then(Value::as_bool)
+                .unwrap_or(key.starts_with("download_order.") || key == "confirm_remove");
             rows.push((tab, Row::Bool(bools.len())));
             bools.push(BoolField {
                 key,
@@ -540,6 +729,25 @@ impl PrefsPanel {
                 inverted,
                 label,
                 help,
+                value: v,
+                initial: v,
+            });
+        };
+        let mut choices: Vec<ChoiceField> = Vec::new();
+        let mut choicef = |tab: Tab,
+                           key: &'static str,
+                           label: &'static str,
+                           help: &'static str,
+                           options: &'static [(&'static str, &'static str)],
+                           default: &'static str,
+                           rows: &mut Vec<(Tab, Row)>| {
+            let v = choice_value(options, get_path(&prefs, key).and_then(Value::as_str), default);
+            rows.push((tab, Row::Choice(choices.len())));
+            choices.push(ChoiceField {
+                key,
+                label,
+                help,
+                options,
                 value: v,
                 initial: v,
             });
@@ -778,6 +986,23 @@ impl PrefsPanel {
             "Torrents below 2 KiB/s download and upload for 60 s keep running but don't take a slot.",
             &mut rows,
         );
+        input(
+            BitTorrent,
+            T::Prefs,
+            "queue_seed_rotation_secs",
+            None,
+            Duration,
+            "Rotate seeding slots: slot duration",
+            "Empty = off (default). Needs 'Maximum active uploads' (= the number of seeding slots). Finished torrents take turns: when a slot's time is up the torrent that has waited longest gets it (fair round robin). A torrent with no leechers yields early when someone is waiting; one with active leechers keeps its slot until another torrent is waiting. Typical: 15m.",
+            "off (e.g. 15m)",
+            &mut rows,
+            cx,
+        );
+        note(
+            &mut rows,
+            BitTorrent,
+            "How the limits fit together: max downloads / max uploads cap each group, max torrents caps both; rotation only decides which finished torrents use the seeding slots. Automatic rules (Automation tab) still apply — a torrent that hits its seeding limit leaves the rotation.",
+        );
         h(&mut rows, BitTorrent, "Peers (live)");
         input(
             BitTorrent,
@@ -953,6 +1178,185 @@ impl PrefsPanel {
             "Incomplete file extension",
             "While downloading, on-disk names get this suffix.",
             "(none)",
+            &mut rows,
+            cx,
+        );
+        h(&mut rows, Downloads, "Download order (defaults)");
+        note(
+            &mut rows,
+            Downloads,
+            "Order in which pieces are requested. Torrents can override these (right-click a torrent or files → Download order), single files override the torrent. Applied immediately.",
+        );
+        boolf(
+            Downloads,
+            "download_order.sequential_files",
+            "Sequential file download",
+            "Finish files one after another in the file order below. Off: work on all selected files at once.",
+            &mut rows,
+        );
+        choicef(
+            Downloads,
+            "download_order.file_order",
+            "File order",
+            "\"By name\" is rqbit's historical behaviour.",
+            FILE_ORDERS,
+            "name",
+            &mut rows,
+        );
+        boolf(
+            Downloads,
+            "download_order.sequential",
+            "Sequential download (within each file)",
+            "Request a file's pieces in order. Off: spread requests across the file.",
+            &mut rows,
+        );
+        boolf(
+            Downloads,
+            "download_order.first_last_first",
+            "Download first and last pieces first",
+            "Fetch each file's first and last pieces early (media headers / previews).",
+            &mut rows,
+        );
+
+        // Automation (rules; all off by default).
+        note(
+            &mut rows,
+            Automation,
+            "Automatic rules, all off by default. Global defaults; each torrent can override them in its details (Rules tab). Counters survive restarts and every firing is logged to Events. Rules only delete files when a delete action is chosen.",
+        );
+        rows.push((Automation, Row::Warnings));
+        h(&mut rows, Automation, "Stalled / no progress");
+        boolf(
+            Automation,
+            "rules.stalled.enabled",
+            "Act on stalled downloads",
+            "Counts only while the torrent is running (not paused, queued or checking). Any newly verified piece resets the timer.",
+            &mut rows,
+        );
+        input(
+            Automation,
+            T::Prefs,
+            "rules.stalled.after_secs",
+            None,
+            DurationReq,
+            "No verified progress for",
+            "e.g. 24h, 90m (bare number = minutes).",
+            "24h",
+            &mut rows,
+            cx,
+        );
+        choicef(
+            Automation,
+            "rules.stalled.action",
+            "Then",
+            "\"Remove (finish)\" = finish what's done: unfinished files deleted, completion actions run on finished ones.",
+            STALLED_ACTIONS,
+            "pause",
+            &mut rows,
+        );
+        h(&mut rows, Automation, "Seeding limits");
+        boolf(
+            Automation,
+            "rules.seeding.enabled",
+            "Seeding limits",
+            "Whichever limit is reached first fires. Empty = no limit of that kind.",
+            &mut rows,
+        );
+        input(
+            Automation,
+            T::Prefs,
+            "rules.seeding.max_seed_secs",
+            None,
+            Duration,
+            "Seeding time",
+            "Counted only while seeding.",
+            "e.g. 7d",
+            &mut rows,
+            cx,
+        );
+        input(
+            Automation,
+            T::Prefs,
+            "rules.seeding.max_uploaded_bytes",
+            None,
+            Size,
+            "Uploaded",
+            "",
+            "e.g. 50 GB",
+            &mut rows,
+            cx,
+        );
+        input(
+            Automation,
+            T::Prefs,
+            "rules.seeding.max_ratio",
+            None,
+            Float,
+            "Ratio",
+            "",
+            "e.g. 2.0",
+            &mut rows,
+            cx,
+        );
+        choicef(
+            Automation,
+            "rules.seeding.action",
+            "Then",
+            "",
+            SEEDING_ACTIONS,
+            "pause",
+            &mut rows,
+        );
+        h(&mut rows, Automation, "Full-speed window");
+        boolf(
+            Automation,
+            "rules.speed_window.enabled",
+            "Full-speed window after completion",
+            "Seed without a per-torrent cap for this long (or until this much is uploaded after completion), then cap this torrent's upload or stop seeding. The global upload limit still applies.",
+            &mut rows,
+        );
+        input(
+            Automation,
+            T::Prefs,
+            "rules.speed_window.full_speed_secs",
+            None,
+            Duration,
+            "Full speed for",
+            "",
+            "e.g. 2h",
+            &mut rows,
+            cx,
+        );
+        input(
+            Automation,
+            T::Prefs,
+            "rules.speed_window.full_speed_bytes",
+            None,
+            Size,
+            "or until uploaded",
+            "",
+            "e.g. 10 GB",
+            &mut rows,
+            cx,
+        );
+        choicef(
+            Automation,
+            "rules.speed_window.then",
+            "Then",
+            "",
+            WINDOW_THEN,
+            "cap",
+            &mut rows,
+        );
+        input(
+            Automation,
+            T::Prefs,
+            "rules.speed_window.cap_kib_per_sec",
+            None,
+            Int,
+            "Upload cap (KB/s)",
+            "Used when \"Cap upload rate\" is chosen.",
+            "100",
             &mut rows,
             cx,
         );
@@ -1152,32 +1556,32 @@ impl PrefsPanel {
 
         // Interface (server-persisted UI preferences shared with the web UI).
         h(&mut rows, Interface, "Removing torrents");
-        let confirm = prefs
-            .get("confirm_remove")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
-        rows.push((Interface, Row::Bool(bools.len())));
-        bools.push(BoolField {
-            key: "confirm_remove",
-            label: "Confirm before removing torrents",
-            help: "Show the confirmation dialog for Delete (toolbar button and Delete key). When off, torrents are removed right away and their files are kept. Also used by the web UI.",
-            value: confirm,
-            initial: confirm,
-        });
-        let action = match prefs.get("default_remove_action").and_then(Value::as_str) {
-            Some("delete_files") => "delete_files",
-            _ => "keep_files",
-        };
-        let mut choices = Vec::new();
-        rows.push((Interface, Row::Choice(choices.len())));
-        choices.push(ChoiceField {
-            key: "default_remove_action",
-            label: "Default remove action",
-            help: "Presets the dialog's \"Also delete downloaded files\". Deleting files always asks for confirmation, even when confirmation is turned off.",
-            options: REMOVE_ACTIONS,
-            value: action,
-            initial: action,
-        });
+        boolf(
+            Interface,
+            "confirm_remove",
+            "Confirm before removing torrents",
+            "Show the remove dialog (toolbar, right-click menu, Delete key). Anything that deletes files always shows it. Also used by the web UI.",
+            &mut rows,
+        );
+        choicef(
+            Interface,
+            "remove_policy.complete",
+            "When the torrent is complete",
+            "",
+            COMPLETE_ACTIONS,
+            "keep",
+            &mut rows,
+        );
+        choicef(
+            Interface,
+            "remove_policy.incomplete",
+            "When the torrent is incomplete",
+            "Finish what's done: unfinished files are deselected and their partial data deleted (only files this torrent created), completion actions run on the finished files, then the torrent is removed keeping those files. If an action fails the torrent is kept and flagged. With nothing finished, all partial data is deleted.",
+            INCOMPLETE_ACTIONS,
+            "keep",
+            &mut rows,
+        );
+        rows.push((Interface, Row::Warnings));
 
         self.loaded = Some(Loaded {
             limits,
@@ -1369,6 +1773,24 @@ impl PrefsPanel {
                     .text_color(theme::text_muted())
                     .child(t.clone())
                     .into_any_element(),
+                Row::Warnings => {
+                    let w = delete_warnings(l);
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .children(w.into_iter().map(|t| {
+                            div()
+                                .text_xs()
+                                .p_1()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(theme::error())
+                                .text_color(theme::error())
+                                .child(t)
+                        }))
+                        .into_any_element()
+                }
                 Row::Info(label, v) => div()
                     .flex()
                     .flex_row()
@@ -1566,14 +1988,6 @@ impl PrefsPanel {
                     let f = &l.choices[*i];
                     let i = *i;
                     let last = f.options.len().saturating_sub(1);
-                    // Confirmation off + delete-files default: say it still asks.
-                    let confirm_off = l
-                        .bools
-                        .iter()
-                        .any(|b| b.key == "confirm_remove" && !b.value);
-                    let warn = f.key == "default_remove_action"
-                        && f.value == "delete_files"
-                        && confirm_off;
                     div()
                         .flex()
                         .flex_col()
@@ -1601,13 +2015,9 @@ impl PrefsPanel {
                             div()
                                 .text_xs()
                                 .text_color(theme::text_muted())
+                                .when(f.help.is_empty(), |d| d.hidden())
                                 .child(f.help),
                         )
-                        .when(warn, |d| {
-                            d.child(div().text_xs().text_color(theme::warning()).child(
-                                "Confirmation is off, but because the default deletes files the dialog is still shown.",
-                            ))
-                        })
                         .into_any_element()
                 }
                 Row::Tri(i) => {
@@ -1795,21 +2205,60 @@ mod tests {
         apply_choices(
             &mut plan,
             &prefs,
-            &[("default_remove_action", "keep_files", "keep_files")],
+            &[("remove_policy.incomplete", "keep", "keep")],
         );
         assert_eq!(plan, SavePlan::default());
         apply_choices(
             &mut plan,
             &prefs,
-            &[("default_remove_action", "delete_files", "keep_files")],
+            &[("remove_policy.incomplete", "finish", "keep")],
         );
         let p = plan.prefs.expect("prefs saved");
-        assert_eq!(p["default_remove_action"], "delete_files");
+        assert_eq!(p["remove_policy"]["incomplete"], "finish");
         assert_eq!(p["future_field"], 1);
         assert_eq!(p["peer_limit"], 5);
     }
 
     use super::*;
+
+    #[test]
+    fn nested_paths_and_unit_kinds() {
+        let prefs: Map<String, Value> = serde_json::from_value(json!({
+            "rules": {"stalled": {"enabled": false, "after_secs": 86400, "action": "pause"}},
+            "other": 1
+        }))
+        .unwrap();
+        assert_eq!(get_path(&prefs, "rules.stalled.after_secs"), Some(&json!(86400)));
+        assert_eq!(get_path(&prefs, "rules.seeding.enabled"), None);
+        let inputs = [
+            fv(Target::Prefs, "rules.stalled.after_secs", None, Kind::DurationReq, "2h 30m", "1d"),
+            fv(Target::Prefs, "rules.seeding.max_uploaded_bytes", None, Kind::Size, "1.5 GB", ""),
+            fv(Target::Prefs, "rules.seeding.max_ratio", None, Kind::Float, "2", ""),
+            fv(Target::Prefs, "queue_seed_rotation_secs", None, Kind::Duration, "", "15m"),
+        ];
+        let plan = plan_save(&LimitsConfig::default(), &prefs, &inputs, &[("rules.seeding.enabled", true, false)], &[])
+            .expect("valid");
+        let p = plan.prefs.expect("changed");
+        assert_eq!(p["rules"]["stalled"]["after_secs"], 9000);
+        assert_eq!(p["rules"]["stalled"]["action"], "pause", "siblings kept");
+        assert_eq!(p["rules"]["seeding"]["max_uploaded_bytes"], 1610612736u64);
+        assert_eq!(p["rules"]["seeding"]["max_ratio"], 2.0);
+        assert_eq!(p["rules"]["seeding"]["enabled"], true);
+        assert_eq!(p["queue_seed_rotation_secs"], Value::Null, "empty = rotation off");
+        assert_eq!(p["other"], 1);
+        let bad = [fv(Target::Prefs, "rules.stalled.after_secs", None, Kind::DurationReq, "soon", "1d")];
+        assert!(plan_save(&LimitsConfig::default(), &prefs, &bad, &[], &[]).is_err());
+    }
+
+    #[test]
+    fn delete_warning_rules() {
+        assert!(warnings_for(("keep", "keep"), false, None, None).is_empty());
+        assert_eq!(warnings_for(("keep", "finish"), false, None, None).len(), 1);
+        assert!(warnings_for(("keep", "finish"), true, None, None).is_empty());
+        assert_eq!(warnings_for(("keep", "keep"), true, Some("remove_delete"), None).len(), 1);
+        assert!(warnings_for(("keep", "keep"), true, Some("pause"), Some("remove_policy")).is_empty());
+        assert_eq!(warnings_for(("delete", "keep"), true, None, Some("remove_policy")).len(), 1);
+    }
 
     #[test]
     fn auth_patches() {

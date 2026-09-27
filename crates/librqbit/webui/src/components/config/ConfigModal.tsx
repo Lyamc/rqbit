@@ -8,6 +8,8 @@ import { AdminTab } from "./AdminTab";
 import { ConnectionTab } from "./ConnectionTab";
 import { BitTorrentTab } from "./BitTorrentTab";
 import { InterfaceTab } from "./InterfaceTab";
+import { AutomationTab, DEFAULT_RULES } from "./AutomationTab";
+import { DEFAULT_DOWNLOAD_ORDER } from "./DownloadsTab";
 import { usePrefsStore } from "../../stores/prefsStore";
 import { APIContext } from "../../context";
 import {
@@ -49,7 +51,10 @@ const defaultPreferences = (): SessionPreferences => ({
   completion_actions: [],
   peer_limit: null,
   confirm_remove: true,
-  default_remove_action: "keep_files",
+  remove_policy: { complete: "keep", incomplete: "keep" },
+  rules: DEFAULT_RULES(),
+  queue_seed_rotation_secs: null,
+  download_order: { ...DEFAULT_DOWNLOAD_ORDER },
 });
 
 const emptyAdmin = (): AdminConfigPublic => ({
@@ -210,6 +215,8 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({
           : null,
         completion_actions: preferences.completion_actions || [],
         peer_limit: preferences.peer_limit || null,
+        // Legacy field; the server migrates it and the policy replaces it.
+        default_remove_action: undefined,
       });
       if (Object.keys(adminPatch).length > 0) {
         await API.updateAdminConfig(adminPatch);
@@ -305,6 +312,16 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({
           label: "Completion",
           content: (
             <CompletionTab
+              preferences={preferences}
+              onChange={patchPreferences}
+            />
+          ),
+        },
+        {
+          id: "automation",
+          label: "Automation",
+          content: (
+            <AutomationTab
               preferences={preferences}
               onChange={patchPreferences}
             />

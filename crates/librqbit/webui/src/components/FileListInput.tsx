@@ -5,6 +5,7 @@ import { CiSquarePlus, CiSquareMinus } from "react-icons/ci";
 import { IconButton } from "./buttons/IconButton";
 import { formatBytes } from "../helper/formatBytes";
 import { ProgressBar } from "./ProgressBar";
+import { floorPercent } from "../helper/progress";
 import sortBy from "lodash.sortby";
 import { APIContext } from "../context";
 
@@ -91,6 +92,15 @@ const newFileTree = (
   );
 };
 
+/** Highlight selection + right-click support (Files tab). */
+export interface FileUi {
+  highlighted: Set<number>;
+  onHighlight: (fileId: number, e: React.MouseEvent) => void;
+  /** `fileIds`: the right-clicked file, or all files of a folder. */
+  onContextMenu: (fileIds: number[], e: React.MouseEvent) => void;
+  badge: (fileId: number) => string | undefined;
+}
+
 const FileTreeComponent: React.FC<{
   torrentId?: number;
   tree: FileTree;
@@ -102,9 +112,11 @@ const FileTreeComponent: React.FC<{
   showProgressBar?: boolean;
   disabled?: boolean;
   allowStream?: boolean;
+  fileUi?: FileUi;
 }> = ({
   torrentId,
   tree,
+  fileUi,
   selectedFiles,
   setSelectedFiles,
   initialExpanded,
@@ -168,7 +180,17 @@ const FileTreeComponent: React.FC<{
 
   return (
     <>
-      <div className="flex items-center">
+      <div
+        className="flex items-center"
+        onContextMenu={
+          fileUi
+            ? (e) => {
+                e.preventDefault();
+                fileUi.onContextMenu(children, e);
+              }
+            : undefined
+        }
+      >
         <IconButton onClick={() => setExpanded(!expanded)}>
           {expanded ? <CiSquareMinus /> : <CiSquarePlus />}
         </IconButton>
@@ -198,17 +220,46 @@ const FileTreeComponent: React.FC<{
             showProgressBar={showProgressBar}
             disabled={disabled}
             allowStream={allowStream}
+            fileUi={fileUi}
           />
         ))}
         <div className="pl-1">
           {tree.files.map((file) => (
             <div
               key={file.id}
+              data-file-id={file.id}
               className={`${
                 showProgressBar
                   ? "grid grid-cols-1 gap-1 items-start lg:grid-cols-2 mb-2 lg:mb-0"
                   : ""
-              }`}
+              } ${fileUi?.highlighted.has(file.id) ? "bg-primary/15 rounded" : ""}`}
+              onClickCapture={
+                fileUi
+                  ? (e) => {
+                      const mod = e.ctrlKey || e.metaKey || e.shiftKey;
+                      const onControl = (e.target as HTMLElement).closest(
+                        "input,label,a",
+                      );
+                      if (mod) {
+                        // Modifier clicks highlight instead of toggling "included".
+                        e.preventDefault();
+                        e.stopPropagation();
+                        fileUi.onHighlight(file.id, e);
+                      } else if (!onControl) {
+                        fileUi.onHighlight(file.id, e);
+                      }
+                    }
+                  : undefined
+              }
+              onContextMenu={
+                fileUi
+                  ? (e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      fileUi.onContextMenu([file.id], e);
+                    }
+                  : undefined
+              }
             >
               <FormCheckbox
                 checked={selectedFiles.has(file.id)}
@@ -218,9 +269,14 @@ const FileTreeComponent: React.FC<{
                 onChange={() => handleToggleFile(file.id)}
                 labelLink={fileLink(file)}
               ></FormCheckbox>
+              {fileUi?.badge(file.id) && (
+                <span className="text-xs text-tertiary lg:col-start-1 -mt-1 ml-6">
+                  {fileUi.badge(file.id)}
+                </span>
+              )}
               {showProgressBar && (
                 <ProgressBar
-                  now={(file.have_bytes / file.length) * 100}
+                  now={floorPercent(file.have_bytes, file.length, 2)}
                   variant={file.have_bytes == file.length ? "success" : "info"}
                 />
               )}
@@ -241,7 +297,9 @@ export const FileListInput: React.FC<{
   showProgressBar?: boolean;
   disabled?: boolean;
   allowStream?: boolean;
+  fileUi?: FileUi;
 }> = ({
+  fileUi,
   torrentId,
   torrentDetails,
   selectedFiles,
@@ -268,6 +326,7 @@ export const FileListInput: React.FC<{
       showProgressBar={showProgressBar}
       disabled={disabled}
       allowStream={allowStream}
+      fileUi={fileUi}
     />
   );
 };

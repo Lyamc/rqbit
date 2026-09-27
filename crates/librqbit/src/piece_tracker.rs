@@ -62,6 +62,8 @@ where
     pub file_priorities: &'a FilePriorities,
     /// File metadata for iterating pieces.
     pub file_infos: &'a FileInfos,
+    /// Explicit piece order (download order settings); overrides `file_priorities`.
+    pub piece_order: Option<&'a [usize]>,
     /// Returns true if the peer has the given piece.
     pub peer_has_piece: P,
     /// Returns true if the piece can be stolen (e.g., not locked for writing).
@@ -144,10 +146,13 @@ impl PieceTracker {
 
         // Then check naturally ordered queued pieces
         // Note: iter_queued_pieces only returns pieces in queue_pieces (not in-flight)
-        let queued: Vec<_> = self
-            .chunks
-            .iter_queued_pieces(req.file_priorities, req.file_infos)
-            .collect();
+        let queued: Vec<_> = match req.piece_order {
+            Some(order) => self.chunks.iter_queued_in_order(order).collect(),
+            None => self
+                .chunks
+                .iter_queued_pieces(req.file_priorities, req.file_infos)
+                .collect(),
+        };
 
         for piece in queued {
             if (req.peer_has_piece)(piece) {
@@ -400,6 +405,7 @@ mod tests {
             priority_pieces: std::iter::empty(),
             file_priorities: &file_priorities,
             file_infos: &file_infos,
+            piece_order: None,
             peer_has_piece: |_| true, // Peer has all pieces
             can_steal: |_| true,
         });
@@ -433,6 +439,7 @@ mod tests {
             priority_pieces: std::iter::empty(),
             file_priorities: &file_priorities,
             file_infos: &file_infos,
+            piece_order: None,
             peer_has_piece: |p| p.get() >= 2,
             can_steal: |_| true,
         });
@@ -461,6 +468,7 @@ mod tests {
             priority_pieces: std::iter::empty(),
             file_priorities: &file_priorities,
             file_infos: &file_infos,
+            piece_order: None,
             peer_has_piece: |_| true,
             can_steal: |_| true,
         });
@@ -494,6 +502,7 @@ mod tests {
             priority_pieces: std::iter::empty(),
             file_priorities: &file_priorities,
             file_infos: &file_infos,
+            piece_order: None,
             peer_has_piece: |_| true,
             can_steal: |_| true,
         });
@@ -522,6 +531,7 @@ mod tests {
             priority_pieces: std::iter::empty(),
             file_priorities: &file_priorities,
             file_infos: &file_infos,
+            piece_order: None,
             peer_has_piece: |p| p == piece, // Only has the failed piece
             can_steal: |_| true,
         });
@@ -545,6 +555,7 @@ mod tests {
                 priority_pieces: std::iter::empty(),
                 file_priorities: &file_priorities,
                 file_infos: &file_infos,
+                piece_order: None,
                 peer_has_piece: |p| only.map(|o| o == p).unwrap_or(true),
                 can_steal: |_| true,
             })
@@ -587,6 +598,7 @@ mod tests {
             priority_pieces: std::iter::empty(),
             file_priorities: &file_priorities,
             file_infos: &file_infos,
+            piece_order: None,
             peer_has_piece: |_| true,
             can_steal: |_| true,
         }) {
@@ -599,6 +611,7 @@ mod tests {
             priority_pieces: std::iter::empty(),
             file_priorities: &file_priorities,
             file_infos: &file_infos,
+            piece_order: None,
             peer_has_piece: |_| true,
             can_steal: |_| true,
         }) {
@@ -613,6 +626,7 @@ mod tests {
             priority_pieces: std::iter::empty(),
             file_priorities: &file_priorities,
             file_infos: &file_infos,
+            piece_order: None,
             peer_has_piece: |_| true,
             can_steal: |_| true,
         }) {
@@ -652,6 +666,7 @@ mod tests {
             priority_pieces: std::iter::empty(),
             file_priorities: &file_priorities,
             file_infos: &file_infos,
+            piece_order: None,
             peer_has_piece: |_| true,
             can_steal: |_| true,
         });
@@ -661,6 +676,7 @@ mod tests {
             priority_pieces: std::iter::empty(),
             file_priorities: &file_priorities,
             file_infos: &file_infos,
+            piece_order: None,
             peer_has_piece: |_| true,
             can_steal: |_| true,
         });
@@ -678,6 +694,7 @@ mod tests {
             priority_pieces: std::iter::empty(),
             file_priorities: &file_priorities,
             file_infos: &file_infos,
+            piece_order: None,
             peer_has_piece: |_| true,
             can_steal: |_| true,
         });
@@ -716,6 +733,7 @@ mod tests {
             priority_pieces: priority.into_iter(),
             file_priorities: &file_priorities,
             file_infos: &file_infos,
+            piece_order: None,
             peer_has_piece: |_| true,
             can_steal: |_| true,
         });
@@ -742,6 +760,7 @@ mod tests {
             priority_pieces: std::iter::empty(),
             file_priorities: &file_priorities,
             file_infos: &file_infos,
+            piece_order: None,
             peer_has_piece: |_| false, // Peer has nothing
             can_steal: |_| true,
         });
@@ -790,6 +809,7 @@ mod tests {
             priority_pieces: std::iter::empty(),
             file_priorities: &file_priorities,
             file_infos: &file_infos,
+            piece_order: None,
             peer_has_piece: |_| true,
             can_steal: |_| true,
         }) {
@@ -806,6 +826,7 @@ mod tests {
             priority_pieces: std::iter::empty(),
             file_priorities: &file_priorities,
             file_infos: &file_infos,
+            piece_order: None,
             peer_has_piece: |_| true,
             can_steal: |_| true,
         }) {
@@ -828,6 +849,7 @@ mod tests {
             priority_pieces: std::iter::empty(),
             file_priorities: &file_priorities,
             file_infos: &file_infos,
+            piece_order: None,
             peer_has_piece: |p| p.get() == 4, // Peer B only has piece 4
             can_steal: |_| true,
         });
@@ -842,5 +864,46 @@ mod tests {
             }
             _ => panic!("Expected Stolen, got {:?}", result),
         }
+    }
+
+    #[test]
+    fn test_piece_order_drives_reservation() {
+        let chunks = make_test_chunk_tracker(6);
+        let mut tracker = PieceTracker::new(chunks);
+        let file_infos = make_test_file_infos(6);
+        let file_priorities = make_default_file_priorities(&file_infos);
+        let order = vec![5usize, 0, 4, 1, 3, 2];
+        let mut got = Vec::new();
+        for i in 0..6u8 {
+            let r = tracker.acquire_piece(AcquireRequest {
+                peer: peer(i + 1),
+                peer_avg_time: None,
+                priority_pieces: std::iter::empty(),
+                file_priorities: &file_priorities,
+                file_infos: &file_infos,
+                piece_order: Some(&order),
+                peer_has_piece: |_| true,
+                can_steal: |_| false,
+            });
+            match r {
+                AcquireResult::Reserved(p) => got.push(p.get() as usize),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(got, order);
+        // A peer that only has piece 1 gets piece 1 even though it is late in the order.
+        let chunks = make_test_chunk_tracker(6);
+        let mut tracker = PieceTracker::new(chunks);
+        let r = tracker.acquire_piece(AcquireRequest {
+            peer: peer(9),
+            peer_avg_time: None,
+            priority_pieces: std::iter::empty(),
+            file_priorities: &file_priorities,
+            file_infos: &file_infos,
+            piece_order: Some(&order),
+            peer_has_piece: |p| p.get() == 1,
+            can_steal: |_| false,
+        });
+        assert!(matches!(r, AcquireResult::Reserved(p) if p.get() == 1));
     }
 }

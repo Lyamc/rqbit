@@ -29,16 +29,7 @@ pub enum CompletionAction {
     DropIncompleteExt,
 }
 
-/// What the UIs' remove/delete buttons do by default.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RemoveAction {
-    /// Remove the torrent from rqbit, keep the downloaded files.
-    #[default]
-    KeepFiles,
-    /// Remove the torrent and delete its files.
-    DeleteFiles,
-}
+pub use crate::remove_policy::{RemoveAction, RemovePolicy};
 
 /// Persisted session-level user preferences.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -139,10 +130,31 @@ pub struct SessionPreferences {
     #[serde(default = "default_true")]
     pub confirm_remove: bool,
 
-    /// UI: default action of Remove/Delete (preset of the dialog's "also
-    /// delete files" checkbox).
+    /// Legacy single remove action; migrated into `remove_policy` on load/save and never
+    /// written back.
+    #[serde(default, skip_serializing)]
+    pub default_remove_action: Option<RemoveAction>,
+
+    /// What Remove does with files, separately for complete and incomplete torrents.
+    /// Used by `POST /torrents/{id}/remove` when no explicit policy is given, and as the
+    /// preset of the UIs' remove dialog.
     #[serde(default)]
-    pub default_remove_action: RemoveAction,
+    pub remove_policy: RemovePolicy,
+
+    /// Automatic per-torrent rules (stalled, seeding limits, full-speed window). All off
+    /// by default; torrents may override them individually.
+    #[serde(default)]
+    pub rules: crate::torrent_rules::TorrentRules,
+
+    /// Rotate seeding slots (needs queueing and a max-uploads limit): when more completed
+    /// torrents want to seed than the limit, each seeds for this long before the one that
+    /// waited longest takes its slot. 0 / unset = off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_seed_rotation_secs: Option<u64>,
+
+    /// Default download order (piece picker); torrents and files may override it.
+    #[serde(default)]
+    pub download_order: crate::download_order::DownloadOrderDefaults,
 }
 
 fn default_true() -> bool {
@@ -186,7 +198,11 @@ impl Default for SessionPreferences {
             completion_actions: Vec::new(),
             peer_limit: None,
             confirm_remove: true,
-            default_remove_action: RemoveAction::KeepFiles,
+            default_remove_action: None,
+            remove_policy: RemovePolicy::default(),
+            rules: Default::default(),
+            queue_seed_rotation_secs: None,
+            download_order: Default::default(),
         }
     }
 }
@@ -205,6 +221,17 @@ impl SessionPreferences {
         empty_to_none(&mut self.move_completed_path);
         empty_to_none(&mut self.auto_organize_root);
         empty_to_none(&mut self.incomplete_extension);
+        if let Some(legacy) = self.default_remove_action.take() {
+            // Older clients/files: the single action maps to keep/keep or delete/delete,
+            // unless a policy other than the default was set explicitly alongside.
+            if self.remove_policy == RemovePolicy::default() {
+                self.remove_policy = legacy.into();
+            }
+        }
+        self.rules = self.rules.sanitize();
+        if self.queue_seed_rotation_secs == Some(0) {
+            self.queue_seed_rotation_secs = None;
+        }
         self.completion_actions.retain(|a| match a {
             CompletionAction::Shell { command } => !command.trim().is_empty(),
             CompletionAction::Move { path, .. } => !path.trim().is_empty(),
@@ -472,6 +499,23 @@ pub async fn run_shell_hook_async(hook: &str, env: &[(&str, String)]) {
     }
 }
 
+/// Run a shell hook, wait, and fail on a non-zero exit (strict pipeline, e.g. finish-and-remove).
+pub async fn run_shell_hook_checked(hook: &str, env: &[(&str, String)]) -> anyhow::Result<()> {
+    let hook = hook.to_owned();
+    let env: Vec<(String, String)> = env
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), v.clone()))
+        .collect();
+    let status = tokio::task::spawn_blocking(move || run_shell_hook_sync(&hook, &env))
+        .await
+        .map_err(|e| anyhow::anyhow!("shell action task failed: {e}"))?
+        .map_err(|e| anyhow::anyhow!("shell action failed to start: {e}"))?;
+    if !status.success() {
+        anyhow::bail!("shell action exited with {status}");
+    }
+    Ok(())
+}
+
 fn run_shell_hook_sync(
     hook: &str,
     env: &[(String, String)],
@@ -506,18 +550,30 @@ mod remove_pref_tests {
         let p: SessionPreferences =
             serde_json::from_str(r#"{"soft_recover_on_io_error": false}"#).unwrap();
         assert!(p.confirm_remove);
-        assert_eq!(p.default_remove_action, RemoveAction::KeepFiles);
+        assert_eq!(p.remove_policy, RemovePolicy::KEEP);
         assert_eq!(p, SessionPreferences::default());
 
-        let p: SessionPreferences = serde_json::from_str(
+        // Migration: legacy delete_files -> delete/delete, legacy field not written back.
+        let p: SessionPreferences = serde_json::from_str::<SessionPreferences>(
             r#"{"soft_recover_on_io_error": false, "confirm_remove": false,
                 "default_remove_action": "delete_files"}"#,
         )
-        .unwrap();
+        .unwrap()
+        .sanitize();
         assert!(!p.confirm_remove);
-        assert_eq!(p.default_remove_action, RemoveAction::DeleteFiles);
+        assert_eq!(p.remove_policy, RemovePolicy::DELETE);
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(v["confirm_remove"], false);
-        assert_eq!(v["default_remove_action"], "delete_files");
+        assert!(v.get("default_remove_action").is_none());
+        assert_eq!(v["remove_policy"]["complete"], "delete");
+        assert_eq!(v["remove_policy"]["incomplete"], "delete");
+
+        let p: SessionPreferences = serde_json::from_str::<SessionPreferences>(
+            r#"{"default_remove_action": "keep_files",
+                "remove_policy": {"complete": "keep", "incomplete": "finish"}}"#,
+        )
+        .unwrap()
+        .sanitize();
+        assert_eq!(p.remove_policy.incomplete, crate::remove_policy::IncompleteRemoveAction::Finish);
     }
 }

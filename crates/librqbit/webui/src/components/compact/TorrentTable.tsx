@@ -9,6 +9,7 @@ import {
 import { Virtuoso, VirtuosoHandle } from "react-virtuoso";
 import { TorrentListItem } from "../../api-types";
 import { TorrentTableRow } from "./TorrentTableRow";
+import { TorrentContextMenu } from "./TorrentContextMenu";
 import { useUIStore } from "../../stores/uiStore";
 import { Spinner } from "../Spinner";
 import { TableHeader } from "./TableHeader";
@@ -262,6 +263,29 @@ export const TorrentTable: React.FC<TorrentTableProps> = ({
     [selectRange, selectTorrent, toggleSelection],
   );
 
+  const [menu, setMenu] = useState<{
+    x: number;
+    y: number;
+    ids: number[];
+  } | null>(null);
+  const handleContextMenu = useCallback(
+    (id: number, e: React.MouseEvent) => {
+      // Right-click on a selected row acts on the whole selection; on an
+      // unselected row it selects just that row.
+      const sel = useUIStore.getState().selectedTorrentIds;
+      let ids: number[];
+      if (sel.has(id)) {
+        ids = orderedIdsRef.current.filter((x) => sel.has(x));
+        if (ids.length === 0) ids = [id];
+      } else {
+        selectTorrent(id);
+        ids = [id];
+      }
+      setMenu({ x: e.clientX, y: e.clientY, ids });
+    },
+    [selectTorrent],
+  );
+
   const itemContent = useCallback(
     (index: number) => {
       const torrent = filteredTorrents![index];
@@ -273,6 +297,7 @@ export const TorrentTable: React.FC<TorrentTableProps> = ({
           isFocused={focusedTorrentId === torrent.id}
           onRowClick={handleRowClick}
           onCheckboxChange={toggleSelection}
+          onContextMenu={handleContextMenu}
         />
       );
     },
@@ -282,6 +307,7 @@ export const TorrentTable: React.FC<TorrentTableProps> = ({
       focusedTorrentId,
       handleRowClick,
       toggleSelection,
+      handleContextMenu,
     ],
   );
 
@@ -432,6 +458,15 @@ export const TorrentTable: React.FC<TorrentTableProps> = ({
           components={{ Scroller: GutterScroller }}
         />
       </div>
+      {menu && (
+        <TorrentContextMenu
+          key={`${menu.x},${menu.y}`}
+          x={menu.x}
+          y={menu.y}
+          ids={menu.ids}
+          onClose={() => setMenu(null)}
+        />
+      )}
     </div>
   );
 };

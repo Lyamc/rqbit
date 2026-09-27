@@ -368,32 +368,53 @@ impl Selection {
     }
 }
 
-/// How Remove/Delete behaves given the server preferences
-/// (`confirm_remove`, `default_remove_action`; web UI `helper/removePrefs.ts`).
+/// How Remove behaves given the server preferences (`confirm_remove`,
+/// `remove_policy`, legacy `default_remove_action`) and, once known, whether
+/// the selection has complete / incomplete torrents (web UI
+/// `helper/removePrefs.ts`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RemovePlan {
     /// Show the confirmation dialog.
     pub confirm: bool,
-    /// Preset of "also delete files" (the action when there is no dialog).
-    pub delete_files: bool,
+    /// Preset of the dialog (the policy used when there is no dialog).
+    pub policy: crate::api::RemovePolicy,
 }
 
-/// Deleting files never happens without a confirmation, so a "delete files"
-/// default always shows the dialog; unknown preferences also confirm.
-pub fn plan_remove(prefs: Option<&serde_json::Map<String, serde_json::Value>>) -> RemovePlan {
+/// The saved policy, migrating the legacy single action.
+pub fn policy_from_prefs(
+    prefs: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> crate::api::RemovePolicy {
+    use crate::api::RemovePolicy;
+    let Some(p) = prefs else {
+        return RemovePolicy::KEEP;
+    };
+    if p.get("remove_policy").is_some_and(|v| v.is_object()) {
+        return RemovePolicy::from_json(p.get("remove_policy"));
+    }
+    if p.get("default_remove_action").and_then(|v| v.as_str()) == Some("delete_files") {
+        return RemovePolicy::from_strs(Some("delete"), Some("delete"));
+    }
+    RemovePolicy::KEEP
+}
+
+/// Anything that deletes files always shows the dialog; unknown preferences
+/// or unknown groups (`None`: preview not loaded) also confirm when the
+/// policy could delete.
+pub fn plan_remove(
+    prefs: Option<&serde_json::Map<String, serde_json::Value>>,
+    groups: Option<(usize, usize)>,
+) -> RemovePlan {
+    let policy = policy_from_prefs(prefs);
     let Some(p) = prefs else {
         return RemovePlan {
             confirm: true,
-            delete_files: false,
+            policy,
         };
     };
-    let delete_files =
-        p.get("default_remove_action").and_then(|v| v.as_str()) == Some("delete_files");
-    let confirm = p.get("confirm_remove").and_then(|v| v.as_bool()) != Some(false) || delete_files;
-    RemovePlan {
-        confirm,
-        delete_files,
-    }
+    let (any_c, any_i) = groups.map(|(c, i)| (c > 0, i > 0)).unwrap_or((true, true));
+    let confirm = p.get("confirm_remove").and_then(|v| v.as_bool()) != Some(false)
+        || policy.deletes_files(any_c, any_i);
+    RemovePlan { confirm, policy }
 }
 
 /// What "Fix errors" does for one torrent (web UI `fixErrorsSelected`).
@@ -647,28 +668,25 @@ mod tests {
 
     #[test]
     fn remove_plan() {
-        let plan = |v: serde_json::Value| plan_remove(v.as_object());
-        let p = |confirm, delete_files| RemovePlan {
-            confirm,
-            delete_files,
-        };
-        assert_eq!(plan_remove(None), p(true, false));
-        assert_eq!(plan(serde_json::json!({})), p(true, false));
+        use crate::api::RemovePolicy;
+        let plan = |v: serde_json::Value, g| plan_remove(v.as_object(), g);
+        let keep = RemovePolicy::KEEP;
+        let fwd = RemovePolicy::from_strs(Some("keep"), Some("finish"));
+        let del = RemovePolicy::from_strs(Some("delete"), Some("delete"));
+        let p = |confirm, policy| RemovePlan { confirm, policy };
+        assert_eq!(plan_remove(None, None), p(true, keep));
+        assert_eq!(plan(serde_json::json!({}), None), p(true, keep));
+        assert_eq!(plan(serde_json::json!({"confirm_remove": false}), None), p(false, keep));
+        // Legacy migration: delete → delete/delete, and deleting always asks.
         assert_eq!(
-            plan(serde_json::json!({"confirm_remove": false})),
-            p(false, false)
+            plan(serde_json::json!({"confirm_remove": false, "default_remove_action": "delete_files"}), None),
+            p(true, del)
         );
-        assert_eq!(
-            plan(serde_json::json!({"default_remove_action": "delete_files"})),
-            p(true, true)
-        );
-        // Deleting files always asks.
-        assert_eq!(
-            plan(
-                serde_json::json!({"confirm_remove": false, "default_remove_action": "delete_files"})
-            ),
-            p(true, true)
-        );
+        let fwd_prefs = serde_json::json!({"confirm_remove": false, "remove_policy": {"complete": "keep", "incomplete": "finish"}});
+        // Only complete torrents: FWD deletes nothing → no dialog.
+        assert_eq!(plan(fwd_prefs.clone(), Some((2, 0))), p(false, fwd));
+        assert_eq!(plan(fwd_prefs.clone(), Some((2, 1))), p(true, fwd));
+        assert_eq!(plan(fwd_prefs, None), p(true, fwd), "unknown groups confirm");
     }
 
     #[test]

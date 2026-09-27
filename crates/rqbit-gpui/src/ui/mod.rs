@@ -6,10 +6,12 @@
 //! `events.rs`) with any new endpoints going into `crate::api`.
 
 mod add_panel;
+mod context_menu;
 mod details;
 mod events_panel;
 mod files;
 mod list_state;
+mod menus;
 mod prefs_panel;
 mod server_browser;
 mod text_input;
@@ -59,6 +61,8 @@ pub enum TorrentAction {
     Recheck,
     Forget,
     Delete,
+    /// `POST /remove` with an explicit policy.
+    Remove(api::RemovePolicy),
 }
 
 impl TorrentAction {
@@ -71,13 +75,26 @@ impl TorrentAction {
             TorrentAction::Recheck => "Force recheck",
             TorrentAction::Forget => "Remove",
             TorrentAction::Delete => "Delete",
+            TorrentAction::Remove(_) => "Remove",
         }
     }
 }
 
+/// Open right-click menu on torrent rows.
+struct RowMenu {
+    pos: gpui::Point<gpui::Pixels>,
+    ids: Vec<usize>,
+    open_sub: Option<usize>,
+    /// Download order of a single right-clicked torrent (marks the menu).
+    order: Option<api::DownloadOrderView>,
+}
+
 struct DeleteDialog {
     items: Vec<(usize, SharedString)>,
-    delete_files: bool,
+    policy: api::RemovePolicy,
+    /// Complete / incomplete counts (None while loading or on old servers).
+    preview: Option<api::RemovePreview>,
+    loading: bool,
 }
 
 enum ConnState {
@@ -104,6 +121,9 @@ pub struct RqbitWindow {
     pending: HashSet<usize>,
     action_error: Option<String>,
     confirm_delete: Option<DeleteDialog>,
+    row_menu: Option<RowMenu>,
+    /// "Move files…" from the menu: open the details' move form once shown.
+    pending_move: Option<usize>,
     selection: Selection,
     /// Scroll position of the torrent list (keeps the keyboard cursor in view).
     list_scroll: UniformListScrollHandle,
@@ -169,6 +189,8 @@ impl RqbitWindow {
             pending: HashSet::new(),
             action_error: None,
             confirm_delete: None,
+            row_menu: None,
+            pending_move: None,
             selection: Selection::default(),
             list_scroll: UniformListScrollHandle::new(),
             filter: StatusFilter::All,
@@ -436,6 +458,10 @@ impl RqbitWindow {
                     TorrentAction::Recheck => client.recheck(id),
                     TorrentAction::Forget => client.forget(id),
                     TorrentAction::Delete => client.delete(id),
+                    TorrentAction::Remove(p) => {
+                        let f = client.remove(id, Some(p));
+                        futures::FutureExt::boxed(async move { f.await.map(|_| ()) })
+                    }
                 };
                 let res = cx.background_executor().spawn(request).await;
                 if let Err(e) = res {
@@ -559,18 +585,56 @@ impl RqbitWindow {
         if items.is_empty() {
             return;
         }
-        let plan = list_state::plan_remove(self.ui_prefs.as_ref());
-        if !plan.confirm && !plan.delete_files {
-            // Confirmation off in Preferences: remove now, keep the files.
-            let ids = items.into_iter().map(|(id, _)| id).collect();
-            self.run_action(ids, TorrentAction::Forget, true, cx);
-            return;
-        }
+        let plan = list_state::plan_remove(self.ui_prefs.as_ref(), None);
+        let ids: Vec<usize> = items.iter().map(|(id, _)| *id).collect();
         self.confirm_delete = Some(DeleteDialog {
             items,
-            delete_files: plan.delete_files,
+            policy: plan.policy,
+            preview: None,
+            loading: true,
         });
         cx.notify();
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        // Which torrents are complete decides what the policy does (and
+        // whether the dialog can be skipped).
+        cx.spawn(async move |this, cx| {
+            let pv = cx
+                .background_executor()
+                .spawn(client.remove_preview(&ids))
+                .await;
+            this.update(cx, |this, cx| {
+                let Some(d) = &mut this.confirm_delete else { return };
+                d.loading = false;
+                match pv {
+                    Ok(pv) => {
+                        let mut prefs = this.ui_prefs.clone().unwrap_or_default();
+                        prefs.insert("confirm_remove".into(), pv.confirm_remove.into());
+                        if let Some(p) = &pv.policy {
+                            prefs.insert("remove_policy".into(), p.clone());
+                        }
+                        let plan =
+                            list_state::plan_remove(Some(&prefs), Some((pv.complete, pv.incomplete)));
+                        d.policy = plan.policy;
+                        d.preview = Some(pv);
+                        if !plan.confirm {
+                            let ids = d.items.iter().map(|(id, _)| *id).collect();
+                            this.confirm_delete = None;
+                            this.run_action(ids, TorrentAction::Remove(plan.policy), true, cx);
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        // Old server without the preview: keep the dialog.
+                        log::debug!("remove preview failed: {e:#}");
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(crate) fn sort_by(&mut self, col: SortColumn, cx: &mut Context<Self>) {
@@ -638,6 +702,137 @@ impl RqbitWindow {
         cx.notify();
     }
 
+    /// Right-click on a row: acts on the selection if the row is part of it,
+    /// otherwise selects just that row.
+    pub(crate) fn row_context_menu(
+        &mut self,
+        id: usize,
+        pos: gpui::Point<gpui::Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        text_input::focus(window, &self.focus_handle, cx);
+        if !self.selection.contains(id) {
+            self.selection.select_one(id);
+        }
+        let ids = self.selected_in_order();
+        let single = (ids.len() == 1).then(|| ids[0]);
+        self.row_menu = Some(RowMenu {
+            pos,
+            ids,
+            open_sub: None,
+            order: None,
+        });
+        cx.notify();
+        if let (Some(id), Some(client)) = (single, self.client.clone()) {
+            cx.spawn(async move |this, cx| {
+                let r = cx
+                    .background_executor()
+                    .spawn(client.get_download_order(id))
+                    .await;
+                this.update(cx, |this, cx| {
+                    if let (Ok(v), Some(m)) = (r, &mut this.row_menu)
+                        && m.ids == [id]
+                    {
+                        m.order = Some(v);
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
+    fn row_menu_action(&mut self, action: menus::RowMenuAction, cx: &mut Context<Self>) {
+        use menus::RowMenuAction as R;
+        let Some(ids) = self.row_menu.take().map(|m| m.ids) else {
+            return;
+        };
+        match action {
+            R::Details => {
+                if let Some(id) = ids.first() {
+                    self.open_details(*id, cx);
+                }
+            }
+            R::Act(a) => self.run_action(ids, a, false, cx),
+            R::Queue(a) => self.queue_move(a, cx),
+            R::Move => {
+                if let Some(id) = ids.first().copied() {
+                    self.open_details(id, cx);
+                    self.pending_move = Some(id);
+                }
+            }
+            R::Remove => self.ask_delete(cx),
+            R::Order(patch) => {
+                let Some(client) = self.client.clone() else {
+                    return;
+                };
+                cx.spawn(async move |this, cx| {
+                    let mut errors = Vec::new();
+                    for id in ids {
+                        let r = cx
+                            .background_executor()
+                            .spawn(client.set_download_order(id, &patch))
+                            .await;
+                        if let Err(e) = r {
+                            errors.push(format!("#{id}: {e:#}"));
+                        }
+                    }
+                    this.update(cx, |this, cx| {
+                        if !errors.is_empty() {
+                            this.action_error =
+                                Some(format!("Download order failed: {}", errors.join("; ")));
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
+        cx.notify();
+    }
+
+    fn render_row_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let m = self.row_menu.as_ref()?;
+        let rows: Vec<menus::RowInfo> = m
+            .ids
+            .iter()
+            .map(|id| {
+                let stats = self.torrents.iter().find(|t| t.id == *id).and_then(|t| t.stats.as_ref());
+                menus::RowInfo {
+                    state: stats.map(|s| s.state),
+                    fixable: list_state::fix_action(stats) != FixAction::Skip,
+                }
+            })
+            .collect();
+        let entries = menus::torrent_menu(&rows, m.order.as_ref(), true);
+        Some(context_menu::render_menu(
+            m.pos,
+            window.viewport_size(),
+            &entries,
+            m.open_sub,
+            context_menu::MenuHost {
+                on_action: |this: &mut Self, a, cx| this.row_menu_action(a, cx),
+                on_sub: |this: &mut Self, sub, cx| {
+                    if let Some(m) = &mut this.row_menu
+                        && m.open_sub != sub
+                    {
+                        m.open_sub = sub;
+                        cx.notify();
+                    }
+                },
+                on_close: |this: &mut Self, cx| {
+                    if this.row_menu.take().is_some() {
+                        cx.notify();
+                    }
+                },
+            },
+            cx,
+        ))
+    }
+
     fn open_details(&mut self, id: usize, cx: &mut Context<Self>) {
         self.details_hidden = false;
         self.selection.select_one(id);
@@ -677,11 +872,32 @@ impl RqbitWindow {
         }
         let panel = self.details.as_ref().map(|(p, _)| p.clone())?;
         let t = self.torrents.iter().find(|t| t.id == id).cloned();
-        panel.update(cx, |p, _| p.set_torrent(t));
+        let open_move = self.pending_move.take_if(|m| *m == id).is_some();
+        panel.update(cx, |p, cx| {
+            p.set_torrent(t);
+            if open_move {
+                p.open_move(cx);
+            }
+        });
         Some(panel)
     }
 
     fn on_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Escape closes an open right-click menu or the remove dialog first
+        // (and only that), wherever focus is.
+        if ev.keystroke.key == "escape" {
+            // The remove dialog is also cancelled by Escape (never confirmed).
+            let mut closed =
+                self.row_menu.take().is_some() || self.confirm_delete.take().is_some();
+            if let Some((panel, _)) = &self.details {
+                closed |= panel.update(cx, |p, cx| p.close_menu(cx));
+            }
+            if closed {
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
+        }
         // Only when the list itself has focus (not a text field).
         if !self.focus_handle.is_focused(window) {
             return;
@@ -1356,19 +1572,142 @@ impl RqbitWindow {
     fn render_confirm(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let dialog = self.confirm_delete.as_ref()?;
         let n = dialog.items.len();
-        let delete_files = dialog.delete_files;
-        let title = if n == 1 {
-            "Delete torrent?".to_owned()
+        let policy = dialog.policy;
+        let pv = dialog.preview.clone();
+        let loading = dialog.loading;
+        let known = pv.is_some();
+        let (n_c, n_i) = pv.as_ref().map(|p| (p.complete, p.incomplete)).unwrap_or((0, 0));
+        let deletes = if known {
+            policy.deletes_files(n_c > 0, n_i > 0)
         } else {
-            format!("Delete {n} torrents?")
+            policy.deletes_files(true, true)
         };
-        let shown: Vec<SharedString> = dialog
+        let title = if n == 1 {
+            "Remove torrent".to_owned()
+        } else {
+            format!("Remove {n} torrents")
+        };
+        let shown: Vec<(SharedString, Option<String>)> = dialog
             .items
             .iter()
             .take(12)
-            .map(|(_, n)| n.clone())
+            .map(|(id, name)| {
+                let tag = pv.as_ref().and_then(|p| p.items.iter().find(|i| i.id == *id)).map(|i| {
+                    if i.complete {
+                        "complete".to_owned()
+                    } else {
+                        format!(
+                            "incomplete: {} done ({}), {} unfinished",
+                            i.files_complete,
+                            format_bytes(i.bytes_complete),
+                            i.files_partial
+                        )
+                    }
+                });
+                (name.clone(), tag)
+            })
             .collect();
         let more = n.saturating_sub(shown.len());
+        let complete_text = match policy.complete {
+            "delete" => "remove and delete their files",
+            _ => "remove, keep files on disk",
+        };
+        let nothing_done = pv.as_ref().map(|p| p.incomplete_nothing_done).unwrap_or(0);
+        let incomplete_text = match policy.incomplete {
+            "delete" => "remove and delete all their files (including finished ones)".to_owned(),
+            "finish" => {
+                let mut t = "finish what's done: delete unfinished files, run completion actions on the finished ones, then remove".to_owned();
+                if nothing_done > 0 {
+                    if nothing_done == n_i {
+                        t.push_str(". Nothing is complete yet, so all partial data is deleted and the torrent removed");
+                    } else {
+                        t.push_str(&format!(". {nothing_done} of them have no complete file yet: all their partial data is deleted"));
+                    }
+                }
+                t
+            }
+            _ => "remove, keep partial files on disk".to_owned(),
+        };
+        let fwd = policy.incomplete == "finish" && (!known || n_i > 0);
+        let actions = pv
+            .as_ref()
+            .map(|p| p.completion_actions.join(" → "))
+            .unwrap_or_default();
+        let legacy = !known && !loading;
+
+        let seg_row = |label: String,
+                       options: &'static [(&'static str, &'static str)],
+                       current: &'static str,
+                       enabled: bool,
+                       base: usize,
+                       complete: bool,
+                       desc: String,
+                       cx: &mut Context<Self>| {
+            let last = options.len() - 1;
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(div().w(px(120.)).text_sm().font_weight(gpui::FontWeight::SEMIBOLD).child(label))
+                        .child(div().flex().flex_row().children(options.iter().enumerate().map(
+                            |(k, (value, text))| {
+                                let value: &'static str = value;
+                                widgets::segment(("rm-policy", base + k), *text, current == value)
+                                    .when(k == 0, |d| d.rounded_l_md())
+                                    .when(k == last, |d| d.rounded_r_md())
+                                    .when(!enabled, |d| d.opacity(0.4))
+                                    .when(enabled, |d| {
+                                        d.on_click(cx.listener(move |this, _, _, cx| {
+                                            if let Some(d) = &mut this.confirm_delete {
+                                                if complete {
+                                                    d.policy.complete = value;
+                                                } else {
+                                                    d.policy.incomplete = value;
+                                                }
+                                            }
+                                            cx.notify();
+                                        }))
+                                    })
+                            },
+                        ))),
+                )
+                .when(enabled, |d| {
+                    d.child(
+                        div()
+                            .pl(px(128.))
+                            .text_xs()
+                            .text_color(theme::text_muted())
+                            .child(format!("→ {desc}")),
+                    )
+                })
+        };
+        let complete_row = seg_row(
+            if known { format!("{n_c} complete") } else { "Complete".into() },
+            &[("keep", "Keep files"), ("delete", "Delete files")],
+            policy.complete,
+            !known || n_c > 0,
+            0,
+            true,
+            complete_text.to_owned(),
+            cx,
+        );
+        let incomplete_row = seg_row(
+            if known { format!("{n_i} incomplete") } else { "Incomplete".into() },
+            &[("keep", "Keep files"), ("delete", "Delete all"), ("finish", "Finish what's done")],
+            policy.incomplete,
+            !known || n_i > 0,
+            10,
+            false,
+            incomplete_text,
+            cx,
+        );
+
         Some(
             div()
                 .id("confirm-overlay")
@@ -1386,7 +1725,7 @@ impl RqbitWindow {
                         .flex()
                         .flex_col()
                         .gap_3()
-                        .w(px(520.))
+                        .w(px(640.))
                         .p_4()
                         .rounded_lg()
                         .border_1()
@@ -1400,7 +1739,26 @@ impl RqbitWindow {
                                 .flex_col()
                                 .gap_1()
                                 .text_sm()
-                                .children(shown.into_iter().map(|n| div().truncate().child(n)))
+                                .children(shown.into_iter().map(|(name, tag)| {
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .gap_2()
+                                        .child(div().truncate().child(name))
+                                        .when_some(tag, |d, t| {
+                                            d.child(
+                                                div()
+                                                    .flex_shrink_0()
+                                                    .text_xs()
+                                                    .text_color(if t == "complete" {
+                                                        theme::success()
+                                                    } else {
+                                                        theme::warning()
+                                                    })
+                                                    .child(t),
+                                            )
+                                        })
+                                }))
                                 .when(more > 0, |d| {
                                     d.child(
                                         div()
@@ -1409,27 +1767,36 @@ impl RqbitWindow {
                                     )
                                 }),
                         )
-                        .child(
-                            widgets::checkbox(
-                                "delete-files",
-                                "Also delete downloaded files",
-                                delete_files,
-                                true,
+                        .when(loading, |d| {
+                            d.child(div().text_xs().text_color(theme::text_muted()).child("Checking which torrents are complete…"))
+                        })
+                        .child(complete_row)
+                        .child(incomplete_row)
+                        .when(fwd, |d| {
+                            d.child(
+                                div()
+                                    .text_xs()
+                                    .p_2()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(theme::border())
+                                    .text_color(theme::text_muted())
+                                    .child(format!(
+                                        "Completion actions that will run on the finished files: {}. If an action fails the torrent is kept and marked \"needs attention\". Runs in the background; progress shows in the status and in Events.",
+                                        if actions.is_empty() { "none configured (files stay where they are)".to_owned() } else { actions.clone() }
+                                    )),
                             )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if let Some(d) = &mut this.confirm_delete {
-                                    d.delete_files = !d.delete_files;
-                                }
-                                cx.notify();
-                            })),
-                        )
-                        .child(div().text_xs().text_color(theme::text_muted()).child(
-                            if delete_files {
-                                "The torrents are removed from rqbit and their files are deleted from disk."
-                            } else {
-                                "The torrents are removed from rqbit. Downloaded files are kept on disk."
-                            },
-                        ))
+                        })
+                        .when(legacy, |d| {
+                            d.child(div().text_xs().text_color(theme::warning()).child(
+                                "This server doesn't support remove policies: Keep removes the torrent only, anything else deletes all files.",
+                            ))
+                        })
+                        .when(deletes, |d| {
+                            d.child(div().text_xs().text_color(theme::error()).child(
+                                "Files will be deleted from disk. This cannot be undone.",
+                            ))
+                        })
                         .child(
                             div()
                                 .flex()
@@ -1445,15 +1812,23 @@ impl RqbitWindow {
                                 .child(
                                     widgets::danger_button(
                                         "confirm-remove",
-                                        if delete_files { "Delete with files" } else { "Delete" },
+                                        if deletes { "Remove (deletes files)" } else { "Remove" },
                                     )
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                    .when(loading, |d| d.opacity(0.5))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if loading {
+                                            return;
+                                        }
                                         if let Some(d) = this.confirm_delete.take() {
                                             let ids = d.items.iter().map(|(id, _)| *id).collect();
-                                            let action = if d.delete_files {
-                                                TorrentAction::Delete
+                                            let action = if legacy {
+                                                if d.policy.deletes_files(true, true) {
+                                                    TorrentAction::Delete
+                                                } else {
+                                                    TorrentAction::Forget
+                                                }
                                             } else {
-                                                TorrentAction::Forget
+                                                TorrentAction::Remove(d.policy)
                                             };
                                             this.run_action(ids, action, true, cx);
                                         }
@@ -1564,7 +1939,7 @@ fn public_ip_label(p: Option<&api::PublicIp>) -> (String, String) {
 }
 
 impl Render for RqbitWindow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let query = self.search_input.read(cx).text().to_owned();
         self.visible = list_state::visible_rows(
             &self.torrents,
@@ -1670,7 +2045,8 @@ impl Render for RqbitWindow {
                 self.events_panel.as_ref().map(|(p, _)| p.clone()),
                 |d, p| d.child(widgets::modal("events-overlay", 1000., p)),
             )
-            .children(self.render_confirm(cx));
+            .children(self.render_confirm(cx))
+            .children(self.render_row_menu(window, cx));
         #[cfg(not(target_family = "wasm"))]
         let root = root.on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _, cx| {
             let paths = paths.paths().to_vec();
