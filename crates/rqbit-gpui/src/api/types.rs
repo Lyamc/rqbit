@@ -211,12 +211,15 @@ pub struct AddTorrentResponse {
     pub id: Option<usize>,
     pub details: AddedTorrentDetails,
     pub output_folder: String,
-    /// Magnet accepted with `defer_metadata`: resolving metadata in the background.
+    /// Magnet queued; its metadata is resolving in the background (a success).
     #[serde(default)]
     pub resolving: bool,
     /// Deferred magnet add: the info hash was already in rqbit (or resolving).
     #[serde(default)]
     pub already_managed: bool,
+    /// `resolving_metadata`, `added`, `already_managed` or `list_only` (newer servers).
+    #[serde(default)]
+    pub state: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -228,8 +231,8 @@ pub struct AddedTorrentDetails {
 
 /// `GET /add_jobs/{id}`: what the server is doing with an in-flight add.
 /// `stage` is one of starting, fetching_torrent, resolving_metadata,
-/// adopting, waiting_for_server, adding, added, already_managed, list_only,
-/// failed, cancelled.
+/// adopting, waiting_for_server, adding, added, already_managed,
+/// resolving_in_background, list_only, failed, cancelled.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct AddJobStatus {

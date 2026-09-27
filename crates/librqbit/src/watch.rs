@@ -54,6 +54,26 @@ async fn watch_adder(
             Some(s) => s,
             None => return Ok(()),
         };
+        // A .magnet file: queue it as a resolving placeholder (never blocks the
+        // watcher on a slow / dead magnet, never fails for missing metadata).
+        if let AddTorrent::Url(url) = &add_torrent
+            && crate::pending_magnets::is_magnet_like(url.trim())
+        {
+            let r = session
+                .add_magnet_deferred(
+                    url.trim(),
+                    AddTorrentOptions {
+                        overwrite: true,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .with_context(|| format!("error adding magnet from {path:?}"))?;
+            if let crate::pending_magnets::DeferredAdd::Resolving(pm) = r {
+                debug!(?path, id = pm.id, "magnet queued, resolving metadata");
+            }
+            return Ok(());
+        }
         let res = session
             .add_torrent(
                 add_torrent,

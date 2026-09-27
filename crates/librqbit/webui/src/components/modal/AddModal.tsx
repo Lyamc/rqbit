@@ -14,6 +14,7 @@ import { StagingItem, StagingQueue } from "../add/StagingQueue";
 import { UrlLinesEditor } from "../add/UrlLinesEditor";
 import { extractTorrentSources } from "../../helper/parseTorrentSources";
 import { shouldAutoClose } from "../../helper/autoClose";
+import { addOutcome, RESOLVING_NOTE } from "../../helper/addOutcome";
 import {
   TransferCandidate,
   TransferCandidateChild,
@@ -33,9 +34,10 @@ import {
 
 const DEFAULT_CONCURRENCY = 4;
 
-// Magnets are added with defer_metadata: the server accepts them at once (with
-// a torrent id, duplicate check by info hash) and resolves the metadata in the
-// background; failures show on the torrent row and in Events, not here. Each
+// Magnets are queued at once by the server (a torrent id, duplicate check by
+// info hash; defer_metadata is still sent for older servers) and the metadata is
+// resolved in the background for as long as it takes: "added, resolving" is a
+// success here, never an error (no peers / slow DHT never fail the add). Each
 // add carries an add_job_id: the server reports what it is doing
 // (GET /add_jobs/{id}) and cancels it for real (POST .../cancel).
 const MAGNET_TIMEOUT_MS = 60_000;
@@ -849,6 +851,7 @@ export const AddModal: React.FC<Props> = ({
             serverStage: undefined,
             stageSince: undefined,
             note: undefined,
+            outcome: undefined,
             addedTorrentId: undefined,
             cancelling: false,
           });
@@ -878,10 +881,12 @@ export const AddModal: React.FC<Props> = ({
             const res = await addOne(item, itemOpts, {
               signal: job.ctrl.signal,
             });
-            if (res?.resolving) {
+            const outcome = addOutcome(res);
+            setItem(item.id, { outcome });
+            if (outcome === "resolving") {
               setItem(item.id, {
-                addedTorrentId: res.id ?? undefined,
-                note: "Added — resolving metadata in the background (progress and errors show in the torrent list).",
+                addedTorrentId: res?.id ?? undefined,
+                note: RESOLVING_NOTE,
               });
             }
             if (job.outcome === "already_added") {

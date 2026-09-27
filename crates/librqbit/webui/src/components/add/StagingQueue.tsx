@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Button } from "../buttons/Button";
 import { AddJobStage } from "../../api-types";
+import { AddOutcome, okLabel } from "../../helper/addOutcome";
 
 export type StagingStatus =
   "pending" | "ready" | "error" | "running" | "resolving" | "ok" | "cancelled";
@@ -50,6 +51,9 @@ export type StagingItem = {
   addedTorrentId?: number;
   /** Informational note (not an error). */
   note?: string;
+  /** How a finished ("ok") add ended up: "resolving" = in rqbit, metadata still
+   *  being fetched in the background (a success, not a failure). */
+  outcome?: AddOutcome;
   /** User asked to cancel; waiting for the server's answer. */
   cancelling?: boolean;
 };
@@ -81,6 +85,8 @@ const stageLabel = (
     case "added":
     case "already_managed":
       return "added, finishing…";
+    case "resolving_in_background":
+      return "added, resolving metadata…";
     default:
       return "sending to server…";
   }
@@ -92,6 +98,7 @@ const itemLabel = (item: StagingItem) => {
       ? "cancelling…"
       : stageLabel(item.serverStage, item.serverStep, item.serverBusy);
   }
+  if (item.status === "ok") return okLabel(item.outcome);
   return statusLabel(item.status);
 };
 

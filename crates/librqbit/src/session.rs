@@ -345,14 +345,37 @@ pub struct AddTorrentOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub add_job_id: Option<String>,
 
-    /// Give up resolving magnet metadata after this long (default: wait forever).
+    /// Stop waiting for magnet metadata after this long (default: wait forever). The
+    /// add then returns a [`crate::pending_magnets::MetadataNotReady`] error, which the
+    /// HTTP API / placeholder resolver turn into "keep resolving in the background";
+    /// it is never reported as a failed add.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub magnet_resolve_timeout: Option<Duration>,
 
-    /// Magnets only (HTTP API): return at once with a reserved id and resolve the
-    /// metadata in the background (see [`crate::pending_magnets`]).
+    /// HTTP API: accepted for compatibility, no effect. Magnets are always queued at
+    /// once with a reserved id and resolved in the background (see
+    /// [`crate::pending_magnets`]) unless `wait_for_metadata` is set.
     #[serde(default)]
     pub defer_metadata: bool,
+
+    /// HTTP API, magnets only: wait for the metadata before answering (the old
+    /// blocking behaviour). If it doesn't arrive within `magnet_resolve_timeout` / the
+    /// request timeout, the magnet is queued as a resolving placeholder and that is
+    /// returned: never an error.
+    #[serde(default)]
+    pub wait_for_metadata: bool,
+}
+
+/// Context marking an add error as caused by malformed input (a URL that can't be
+/// fetched or isn't a .torrent, unparseable .torrent bytes, an unsupported scheme).
+/// The HTTP API answers these with 400 `invalid_input`.
+#[derive(Debug, Clone, Copy)]
+pub struct InvalidAddInput(pub &'static str);
+
+impl std::fmt::Display for InvalidAddInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
 }
 
 pub struct ListOnlyResponse {
@@ -1281,6 +1304,11 @@ impl Session {
                     AddJobStage::AlreadyManaged { torrent_id: *id }
                 }
                 Ok(AddTorrentResponse::ListOnly(_)) => AddJobStage::ListOnly,
+                // Not a failure: the caller queues the magnet as a resolving
+                // placeholder and finishes the job with its id.
+                Err(e) if crate::pending_magnets::is_metadata_wait(e) => {
+                    AddJobStage::ResolvingMetadata
+                }
                 Err(e) => AddJobStage::Failed {
                     error: format!("{e:#}"),
                 },
@@ -1335,18 +1363,23 @@ impl Session {
                             if url.starts_with("http://") || url.starts_with("https://") =>
                         {
                             job.set_stage(AddJobStage::FetchingTorrent);
-                            job.cancellable(torrent_from_url(&self.reqwest_client, &url))
-                                .await?
+                            job.cancellable(async {
+                                torrent_from_url(&self.reqwest_client, &url)
+                                    .await
+                                    .context(InvalidAddInput("the .torrent URL didn't give a usable .torrent"))
+                            })
+                            .await?
                         }
                         AddTorrent::Url(url) => {
-                            bail!(
+                            return Err(anyhow::anyhow!(
                                 "unsupported URL {:?}. Supporting magnet:, http:, and https",
                                 url
                             )
+                            .context(InvalidAddInput("unsupported URL")));
                         }
-                        AddTorrent::TorrentFileBytes(bytes) => {
-                            torrent_from_bytes(bytes).context("error decoding torrent")?
-                        }
+                        AddTorrent::TorrentFileBytes(bytes) => torrent_from_bytes(bytes)
+                            .context("error decoding torrent")
+                            .context(InvalidAddInput("not a valid .torrent file"))?,
                     };
 
                     let mut trackers = torrent
@@ -1365,13 +1398,17 @@ impl Session {
                         trackers.extend(custom_trackers);
                     }
 
-                    InternalAddResult {
-                        info_hash: torrent.meta.info_hash,
-                        metadata: Some(TorrentMetadata::new(
+                    let metadata = (|| {
+                        TorrentMetadata::new(
                             torrent.meta.info.data.validate()?,
                             torrent.torrent_bytes,
                             torrent.meta.info.raw_bytes.0,
-                        )?),
+                        )
+                    })()
+                    .context(InvalidAddInput("not a valid .torrent file"))?;
+                    InternalAddResult {
+                        info_hash: torrent.meta.info_hash,
+                        metadata: Some(metadata),
                         trackers: trackers
                             .iter()
                             .filter_map(|t| url::Url::parse(t).ok())
@@ -1466,24 +1503,42 @@ impl Session {
                     (metadata, peer_rx)
                 }
                 None => {
-                    let peer_rx = make_peer_rx().context(
-                        "no known way to resolve peers (no DHT, no trackers, no initial_peers)",
-                    )?;
+                    use crate::pending_magnets::{MetadataNotReady, is_metadata_wait};
                     job.set_stage(AddJobStage::ResolvingMetadata);
+                    // Anything below only means "no metadata yet" (never a failed add):
+                    // callers keep the magnet resolving in the background.
+                    let peer_rx = make_peer_rx().ok_or_else(|| {
+                        MetadataNotReady(
+                            "no way to find peers right now (DHT off, no trackers, no initial peers)"
+                                .into(),
+                        )
+                    })?;
                     let resolve = job.cancellable(self.resolve_magnet(
                         info_hash,
                         peer_rx,
                         &trackers,
                         opts.peer_opts,
                     ));
-                    let resolved_magnet = match opts.magnet_resolve_timeout {
-                        Some(t) => tokio::time::timeout(t, resolve).await.map_err(|_| {
-                            anyhow::anyhow!(
-                                "timed out after {}s waiting for torrent metadata from peers (magnet may be dead or poorly seeded)",
+                    let res = match opts.magnet_resolve_timeout {
+                        Some(t) => match tokio::time::timeout(t, resolve).await {
+                            Ok(r) => r,
+                            Err(_) => Err(MetadataNotReady(format!(
+                                "no peer sent the metadata within {}s (no peers yet or poorly seeded)",
                                 t.as_secs()
-                            )
-                        })??,
-                        None => resolve.await?,
+                            ))
+                            .into()),
+                        },
+                        None => resolve.await,
+                    };
+                    let resolved_magnet = match res {
+                        Ok(r) => r,
+                        Err(e) if job.is_cancelled() || is_metadata_wait(&e) => return Err(e),
+                        Err(e) => {
+                            return Err(MetadataNotReady(format!(
+                                "couldn't get the metadata from peers yet: {e:#}"
+                            ))
+                            .into());
+                        }
                     };
 
                     // Add back seen_peers into the peer stream, as we consumed some peers
@@ -3068,7 +3123,10 @@ impl Session {
                 })
             }
             ReadMetainfoResult::ChannelClosed { .. } => {
-                bail!("input address stream exhausted, no way to discover torrent metainfo")
+                Err(crate::pending_magnets::MetadataNotReady(
+                    "ran out of peers to ask for the metadata (no peers yet)".into(),
+                )
+                .into())
             }
         }
     }

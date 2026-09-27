@@ -13,11 +13,13 @@
 //!
 //! Every add carries an `add_job_id`; the server's progress is polled with
 //! `GET /add_jobs/{id}` and cancels go through `POST /add_jobs/{id}/cancel`,
-//! exactly like the web UI. Magnets are sent with `defer_metadata=true`: the
-//! server answers at once with a torrent id (listed as "Resolving metadata"),
-//! so the client only gives up after 1 minute without an answer; other adds
-//! after 15 minutes. When every item went in, the panel shows "All added" and
-//! closes after 1.5 s; any failure keeps it open.
+//! exactly like the web UI. The server queues magnets at once with a torrent id
+//! (listed as "Resolving metadata"; `defer_metadata=true` is still sent for older
+//! servers), so the client only gives up after 1 minute without an answer; other
+//! adds after 15 minutes. "Added, resolving metadata" is a success: the metadata
+//! keeps resolving in the background for as long as it takes and never fails for
+//! lack of peers. When every item went in, the panel shows "All added" and closes
+//! after 1.5 s; any failure keeps it open.
 //!
 //! - "Browse server…": pick .torrent files on the server (`/fs/list`),
 //!   added with `from_server_path`.
@@ -73,6 +75,8 @@ enum ItemStatus {
     Queued,
     Running,
     Added(Option<usize>),
+    /// Added; the magnet's metadata is resolving in the background (a success).
+    AddedResolving(Option<usize>),
     AlreadyInRqbit(Option<usize>),
     Failed(String),
     Cancelled,
@@ -83,6 +87,7 @@ impl ItemStatus {
         matches!(
             self,
             ItemStatus::Added(_)
+                | ItemStatus::AddedResolving(_)
                 | ItemStatus::AlreadyInRqbit(_)
                 | ItemStatus::Failed(_)
                 | ItemStatus::Cancelled
@@ -209,6 +214,7 @@ fn stage_label(st: Option<&AddJobStatus>) -> String {
             format!("adding: {what}{busy}…")
         }
         "added" | "already_managed" => "added, finishing…".into(),
+        "resolving_in_background" => "added, resolving metadata…".into(),
         _ => "sending to server…".into(),
     }
 }
@@ -805,14 +811,13 @@ impl AddPanel {
                         item.added_id = r.id.or(item.added_id);
                     }
                     let fs = final_stage.as_ref();
-                    if r.resolving && !r.already_managed {
-                        item.note = Some(
-                            "Added — resolving metadata in the background (progress and errors show in the torrent list)."
-                                .into(),
-                        );
-                    }
                     if r.already_managed || fs.is_some_and(|s| s.stage == "already_managed") {
                         ItemStatus::AlreadyInRqbit(r.id.or(fs.and_then(|s| s.torrent_id)))
+                    } else if is_resolving(&r, fs) {
+                        added = true;
+                        item.added_id = r.id.or(item.added_id);
+                        item.note = Some(RESOLVING_NOTE.into());
+                        ItemStatus::AddedResolving(r.id)
                     } else {
                         added = true;
                         ItemStatus::Added(r.id)
@@ -926,6 +931,13 @@ impl AddPanel {
                 match id {
                     Some(id) => format!("added (id {id})"),
                     None => "added".into(),
+                },
+                theme::success(),
+            ),
+            ItemStatus::AddedResolving(id) => (
+                match id {
+                    Some(id) => format!("added · resolving metadata (id {id})"),
+                    None => "added · resolving metadata".into(),
                 },
                 theme::success(),
             ),
@@ -1099,7 +1111,10 @@ impl Render for AddPanel {
             let done = batch.iter().filter(|i| i.status.is_terminal()).count();
             let count =
                 |f: &dyn Fn(&ItemStatus) -> bool| batch.iter().filter(|i| f(&i.status)).count();
-            let added = count(&|s| matches!(s, ItemStatus::Added(_)));
+            let added = count(&|s| {
+                matches!(s, ItemStatus::Added(_) | ItemStatus::AddedResolving(_))
+            });
+            let added_resolving = count(&|s| matches!(s, ItemStatus::AddedResolving(_)));
             let already = count(&|s| matches!(s, ItemStatus::AlreadyInRqbit(_)));
             let failed = count(&|s| matches!(s, ItemStatus::Failed(_)));
             let cancelled = count(&|s| matches!(s, ItemStatus::Cancelled));
@@ -1130,6 +1145,8 @@ impl Render for AddPanel {
                 (waiting > 0).then(|| format!("{waiting} waiting for server (busy checking)")),
                 (adding > 0).then(|| format!("{adding} adding")),
                 Some(format!("{added} added")),
+                (added_resolving > 0)
+                    .then(|| format!("{added_resolving} of them resolving metadata in the background")),
                 (already > 0).then(|| format!("{already} already in rqbit")),
                 (failed > 0).then(|| format!("{failed} failed")),
                 (cancelled > 0).then(|| format!("{cancelled} cancelled")),
@@ -1450,9 +1467,21 @@ fn all_went_in<'a>(mut statuses: impl Iterator<Item = &'a ItemStatus>) -> bool {
     let mut any = false;
     let ok = statuses.all(|s| {
         any = true;
-        matches!(s, ItemStatus::Added(_) | ItemStatus::AlreadyInRqbit(_))
+        matches!(
+            s,
+            ItemStatus::Added(_) | ItemStatus::AddedResolving(_) | ItemStatus::AlreadyInRqbit(_)
+        )
     });
     any && ok
+}
+
+const RESOLVING_NOTE: &str = "Added — resolving metadata in the background. It waits for peers as long as it takes (never fails for lack of peers); see the torrent list.";
+
+/// The server queued a magnet whose metadata is still resolving: a successful add.
+fn is_resolving(r: &AddTorrentResponse, final_stage: Option<&AddJobStatus>) -> bool {
+    r.resolving
+        || r.state.as_deref() == Some("resolving_metadata")
+        || final_stage.is_some_and(|s| s.stage == "resolving_in_background")
 }
 
 #[cfg(test)]
@@ -1463,10 +1492,33 @@ mod tests {
     fn auto_close_only_when_everything_went_in() {
         use ItemStatus::*;
         assert!(all_went_in([Added(Some(1)), AlreadyInRqbit(Some(2))].iter()));
+        // "Added, resolving metadata" is a success: the panel closes.
+        assert!(all_went_in([AddedResolving(Some(3)), Added(Some(1))].iter()));
+        assert!(!all_went_in([AddedResolving(Some(3)), Failed("x".into())].iter()));
         assert!(!all_went_in([Added(Some(1)), Failed("x".into())].iter()));
         assert!(!all_went_in([Added(Some(1)), Cancelled].iter()));
         assert!(!all_went_in([Added(Some(1)), Ready].iter()));
         assert!(!all_went_in(std::iter::empty()));
+    }
+
+    #[test]
+    fn resolving_responses_are_successes() {
+        let r: AddTorrentResponse = serde_json::from_str(
+            r#"{"id":7,"details":{"info_hash":"ab"},"output_folder":"","resolving":true,"state":"resolving_metadata"}"#,
+        )
+        .unwrap();
+        assert!(is_resolving(&r, None));
+        let r: AddTorrentResponse =
+            serde_json::from_str(r#"{"id":7,"details":{"info_hash":"ab"},"output_folder":""}"#)
+                .unwrap();
+        assert!(!is_resolving(&r, None));
+        let st = AddJobStatus {
+            stage: "resolving_in_background".into(),
+            torrent_id: Some(7),
+            ..Default::default()
+        };
+        assert!(is_resolving(&r, Some(&st)));
+        assert_eq!(stage_label(Some(&st)), "added, resolving metadata…");
     }
 
     #[test]

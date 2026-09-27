@@ -44,8 +44,14 @@ export interface AddTorrentResponse {
   details: TorrentDetails;
   output_folder: string;
   seen_peers?: Array<string>;
-  /** Magnet accepted with `defer_metadata`: resolving metadata in the background. */
+  /** Magnet queued (the default for magnets): its metadata is resolving in the
+   *  background and the torrent is listed as "Resolving metadata". A success. For a
+   *  `list_only` preview (HTTP 202) it means "no metadata yet" and `id` is null. */
   resolving?: boolean;
+  /** Deferred magnet whose info hash was already in rqbit (or resolving). */
+  already_managed?: boolean;
+  info_hash?: string;
+  state?: "resolving_metadata" | "added" | "already_managed" | "list_only";
 }
 
 export interface ListTorrentsResponse {
@@ -727,11 +733,15 @@ export interface AddTorrentOptions {
   adopt_foreign_incomplete?: "auto" | "qbit" | null;
   /** Poll `GET /add_jobs/{id}` / cancel via `POST /add_jobs/{id}/cancel`. */
   add_job_id?: string;
-  /** Server gives up resolving magnet metadata after this many seconds. */
+  /** Magnets: length of one metadata resolve attempt; afterwards the server backs
+   *  off and keeps trying (never fails the add). */
   magnet_timeout_secs?: number | null;
-  /** Magnets: return at once with a torrent id; the server resolves metadata in
-   *  the background and lists the torrent as "Resolving metadata". */
+  /** No effect on current servers (magnets are always queued at once with a torrent
+   *  id and resolved in the background); older servers needed it. */
   defer_metadata?: boolean;
+  /** Magnets: wait for metadata before answering (old behaviour); if it doesn't
+   *  arrive in time the magnet is queued anyway (`resolving: true`), never an error. */
+  wait_for_metadata?: boolean;
 }
 
 export type Value = string | number | boolean;
@@ -822,6 +832,7 @@ export type AddJobStage =
   | "adding"
   | "added"
   | "already_managed"
+  | "resolving_in_background"
   | "list_only"
   | "failed"
   | "cancelled";

@@ -48,7 +48,7 @@ Server settings added by the fork live in `preferences.json` (and `admin.json`, 
 ### Adding torrents
 
 - The web UI's **Add** window has three tabs: **Upload** (.torrent files and .zip archives of them), **URLs** (magnets and http(s) links, one per line) and **Browse server**. Browse server walks the server's filesystem, limited to the download folder plus `RQBIT_FS_BROWSE_ROOTS`, a comma- or colon-separated list of absolute paths. Items are staged in a queue before anything is added, with an optional custom output folder.
-- **Magnets without waiting**: `?defer_metadata=true` adds a placeholder right away and resolves its metadata in the background (15 min default timeout, `?magnet_timeout_secs=`). Progress of an add can be followed with `?add_job_id=` and `GET /add_jobs/{id}`.
+- **Magnets never wait and never fail for missing metadata**: `POST /torrents` checks that a magnet is well formed, queues it and answers at once with its id, info hash and `"resolving": true, "state": "resolving_metadata"`. The metadata is fetched in the background for as long as it takes: an attempt (10 min, or `?magnet_timeout_secs=`) that finds no peers is followed by a backoff (1 min doubling to 30 min, no DHT/tracker queries in between), shown as "Resolving metadata (no peers yet)". Placeholders survive restarts. Only malformed input is an error (400 `invalid_input`: bad scheme, no `xt=urn:btih`, bad hash length/encoding, BTv2-only magnet, unparseable .torrent, a URL that can't be fetched or isn't a .torrent). `?defer_metadata=true` is still accepted (no effect); `?wait_for_metadata=true` restores the old blocking add, but still answers the resolving placeholder instead of an error if the metadata doesn't arrive in time. A `list_only` preview of a magnet needs the metadata: without it the answer is 202 `{"resolving": true, "id": null}` (same for `POST /torrents/resolve_magnet`). Progress of an add can be followed with `?add_job_id=` and `GET /add_jobs/{id}` (`resolving_in_background` = queued).
 - **Transfer from another client** (`?adopt_foreign_incomplete=auto`) adopts partial files another client left behind (`name.!qB`, `.part`, `.incomplete`, ...) before the first check:
   - a candidate is used only if it is the unique match for a file and its sampled pieces hash-match (or are all zeros)
   - matching files are renamed into place
@@ -61,7 +61,7 @@ Server settings added by the fork live in `preferences.json` (and `admin.json`, 
   - repairs and damage
   - I/O errors, aggregated per 60 s
   - needs-attention flags, rechecks, adoption renames
-  - magnet metadata resolved / failed
+  - magnet metadata resolved (waiting for metadata is never logged as a failure)
   - rules firing, queue rotation, cleanup scans
   - every torrent removal
 - **Removal logging**: every path writes a `torrent_removed` entry. That covers `/forget`, `/delete`, `/remove`, bulk actions in either UI, rules, finish-what's-done and placeholder magnets. Each entry has the id and name, whether files were kept or deleted, the trigger (`manual`, `automation` or `library`), the endpoint or rule, and the client IP (from `X-Forwarded-For` / `X-Real-IP` behind a proxy) and user agent.

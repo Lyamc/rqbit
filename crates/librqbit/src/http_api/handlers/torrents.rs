@@ -46,10 +46,7 @@ pub async fn h_torrents_post(
     if let Some(path) = from_server_path {
         let data = super::fs::read_torrent_under_roots(&state, &path)?;
         let add = AddTorrent::TorrentFileBytes(data.into());
-        return tokio::time::timeout(timeout, state.api.api_add_torrent(add, Some(opts)))
-            .await
-            .context("timeout")?
-            .map(axum::Json);
+        return add_with_timeout(&state, add, opts, timeout).await;
     }
 
     let max_size = state.opts.max_upload_body_size.unwrap_or(10 * 1024 * 1024);
@@ -85,10 +82,41 @@ pub async fn h_torrents_post(
         }
         _ => AddTorrent::TorrentFileBytes(data.into()),
     };
-    tokio::time::timeout(timeout, state.api.api_add_torrent(add, Some(opts)))
+    add_with_timeout(&state, add, opts, timeout).await
+}
+
+/// Magnets never wait here (queued at once, or `wait_for_metadata` falls back to the
+/// placeholder before `timeout`). For .torrent bytes / URLs the timeout only covers
+/// downloading the .torrent and waiting for a disk slot. A `list_only` preview whose
+/// metadata isn't available yet answers 202 with `resolving: true` and no id.
+async fn add_with_timeout(
+    state: &ApiState,
+    add: AddTorrent<'_>,
+    opts: crate::AddTorrentOptions,
+    timeout: std::time::Duration,
+) -> Result<axum::response::Response> {
+    let fut = state
+        .api
+        .api_add_torrent_with_deadline(add, Some(opts), Some(timeout));
+    // The magnet paths finish before `timeout` themselves; the margin only matters
+    // for .torrent downloads / disk-slot waits.
+    let r = tokio::time::timeout(timeout + std::time::Duration::from_secs(1), fut)
         .await
-        .context("timeout")?
-        .map(axum::Json)
+        .map_err(|_| {
+            ApiError::from((
+                StatusCode::GATEWAY_TIMEOUT,
+                anyhow::anyhow!(
+                    "timed out after {}s adding the torrent (downloading the .torrent or waiting for a disk slot); nothing was added",
+                    timeout.as_secs()
+                ),
+            ))
+        })??;
+    let status = if r.resolving && r.id.is_none() {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, axum::Json(r)).into_response())
 }
 
 pub async fn h_add_job_status(
