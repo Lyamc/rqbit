@@ -1822,7 +1822,79 @@ impl Session {
         }
     }
 
+    /// Remove a torrent (optionally deleting its files) and record it in the Events log
+    /// as a library call. Prefer [`Self::delete_logged`] when the caller knows more.
     pub async fn delete(&self, id: TorrentIdOrHash, delete_files: bool) -> anyhow::Result<()> {
+        self.delete_logged(id, delete_files, &crate::remove_policy::RemoveOrigin::library())
+            .await
+    }
+
+    /// Remove a torrent and write a `torrent_removed` Events entry with the id, name,
+    /// whether files were kept or deleted, and who/what triggered it.
+    pub async fn delete_logged(
+        &self,
+        id: TorrentIdOrHash,
+        delete_files: bool,
+        origin: &crate::remove_policy::RemoveOrigin,
+    ) -> anyhow::Result<()> {
+        let handle = self.get(id).context("no such torrent")?;
+        let name = handle.name();
+        let tref = handle.shared().torrent_ref(name.clone());
+        let tid = handle.id();
+        let folder = handle.output_folder();
+        drop(handle);
+        let res = self.delete_quiet(id, delete_files).await;
+        let files = if delete_files { "deleted" } else { "kept" };
+        let details = origin.merge_into(serde_json::json!({
+            "id": tid,
+            "name": name,
+            "files": files,
+            "output_folder": folder.to_string_lossy(),
+            "result": match (&res, delete_files) {
+                (Ok(()), false) => "forgot".to_string(),
+                (Ok(()), true) => "deleted_files".to_string(),
+                (Err(e), _) => format!("error: {e:#}"),
+            },
+        }));
+        let display = name.unwrap_or_else(|| tref.info_hash.clone());
+        let (severity, msg) = match &res {
+            Ok(()) if delete_files => (
+                crate::event_log::Severity::Info,
+                format!("Removed {display} and deleted its files ({})", origin.label()),
+            ),
+            Ok(()) => (
+                crate::event_log::Severity::Info,
+                format!("Removed {display}, files kept ({})", origin.label()),
+            ),
+            // The torrent is gone from the session but deleting files failed.
+            Err(e) if !self.db.read().torrents.contains_key(&tid) => (
+                crate::event_log::Severity::Error,
+                format!(
+                    "Removed {display}, but deleting its files failed: {e:#} ({})",
+                    origin.label()
+                ),
+            ),
+            Err(e) => (
+                crate::event_log::Severity::Error,
+                format!("Removing {display} failed: {e:#} ({})", origin.label()),
+            ),
+        };
+        let kind = if res.is_ok() || !self.db.read().torrents.contains_key(&tid) {
+            crate::event_log::kind::TORRENT_REMOVED
+        } else {
+            crate::event_log::kind::REMOVE_FAILED
+        };
+        self.events.emit(
+            crate::event_log::NewEvent::new(kind, severity, msg)
+                .torrent(tref)
+                .details(details),
+        );
+        res
+    }
+
+    /// Remove without writing an Events entry: only for callers that write their own
+    /// (richer) `torrent_removed` event, e.g. [`Self::remove_with_policy`].
+    pub(crate) async fn delete_quiet(&self, id: TorrentIdOrHash, delete_files: bool) -> anyhow::Result<()> {
         let id = match id {
             TorrentIdOrHash::Id(id) => id,
             TorrentIdOrHash::Hash(h) => self
@@ -2038,6 +2110,23 @@ impl Session {
         )
     }
 
+    fn remove_details(
+        out: &crate::remove_policy::RemoveOutcome,
+        origin: &crate::remove_policy::RemoveOrigin,
+    ) -> serde_json::Value {
+        let files = match out.result.as_str() {
+            "forgot" => "kept",
+            "deleted_files" | "deleted_nothing_complete" => "deleted",
+            "finished_and_removed" => "kept_complete_deleted_partial",
+            _ => "unchanged",
+        };
+        let mut v = origin.merge_into(serde_json::to_value(out).unwrap_or_default());
+        if let Some(o) = v.as_object_mut() {
+            o.insert("files".into(), files.into());
+        }
+        v
+    }
+
     fn emit_remove_event(
         &self,
         tref: crate::event_log::TorrentRef,
@@ -2059,9 +2148,10 @@ impl Session {
         self: &Arc<Self>,
         id: TorrentIdOrHash,
         policy: Option<crate::remove_policy::RemovePolicy>,
-        source: &str,
+        origin: &crate::remove_policy::RemoveOrigin,
         wait: bool,
     ) -> anyhow::Result<crate::remove_policy::RemoveOutcome> {
+        let source = origin.label();
         use crate::remove_policy::{RemoveDecision, RemoveOutcome};
         let handle = self.get(id).context("no such torrent")?;
         let prefs = self.preferences.get();
@@ -2096,20 +2186,20 @@ impl Session {
 
         match policy.decide(complete) {
             RemoveDecision::Forget => {
-                self.delete(TorrentIdOrHash::Id(tid), false).await?;
+                self.delete_quiet(TorrentIdOrHash::Id(tid), false).await?;
                 out.result = "forgot".into();
                 self.emit_remove_event(
                     tref,
                     crate::event_log::Severity::Info,
                     crate::event_log::kind::TORRENT_REMOVED,
                     format!("Removed {state} torrent, files kept ({source})"),
-                    serde_json::to_value(&out).unwrap_or_default(),
+                    Self::remove_details(&out, origin),
                 );
             }
             RemoveDecision::DeleteAll => {
                 let folder = handle.output_folder();
                 let paths = Self::owned_file_paths(&handle, None, ext.as_deref());
-                self.delete(TorrentIdOrHash::Id(tid), false).await?;
+                self.delete_quiet(TorrentIdOrHash::Id(tid), false).await?;
                 let (deleted, bytes) =
                     tokio::task::spawn_blocking(move || Self::delete_owned_paths(&folder, &paths))
                         .await?;
@@ -2125,17 +2215,17 @@ impl Session {
                         out.deleted_files.len(),
                         crate::torrent_rules::fmt_bytes(out.deleted_bytes)
                     ),
-                    serde_json::to_value(&out).unwrap_or_default(),
+                    Self::remove_details(&out, origin),
                 );
             }
             RemoveDecision::FinishWhatsDone => {
                 if !wait {
                     unmark.2 = false;
                     let session = self.clone();
-                    let source = source.to_owned();
+                    let origin = origin.clone();
                     let o = out.clone();
                     tokio::spawn(async move {
-                        let r = session.finish_and_remove(&handle, o, &source).await;
+                        let r = session.finish_and_remove(&handle, o, &origin).await;
                         session.finishing.lock().remove(&tid);
                         if let Err(e) = r {
                             warn!(id = tid, "finish-and-remove failed: {e:#}");
@@ -2144,7 +2234,7 @@ impl Session {
                     out.result = "finishing".into();
                     return Ok(out);
                 }
-                out = self.finish_and_remove(&handle, out, source).await?;
+                out = self.finish_and_remove(&handle, out, origin).await?;
             }
         }
         drop(unmark);
@@ -2155,8 +2245,9 @@ impl Session {
         self: &Arc<Self>,
         handle: &ManagedTorrentHandle,
         mut out: crate::remove_policy::RemoveOutcome,
-        source: &str,
+        origin: &crate::remove_policy::RemoveOrigin,
     ) -> anyhow::Result<crate::remove_policy::RemoveOutcome> {
+        let source = origin.label();
         let tid = handle.id();
         let tref = handle.shared.torrent_ref(Some(out.name.clone()));
         let prefs = self.preferences.get();
@@ -2168,7 +2259,7 @@ impl Session {
                 .begin_op(crate::torrent_status::ActiveOp::FinishingRemoval);
             if handle.metadata.load().is_none() {
                 // Nothing known about the files: nothing can be complete.
-                self.delete(TorrentIdOrHash::Id(tid), false).await?;
+                self.delete_quiet(TorrentIdOrHash::Id(tid), false).await?;
                 out.result = "deleted_nothing_complete".into();
                 return Ok(());
             }
@@ -2182,7 +2273,7 @@ impl Session {
             let folder = handle.output_folder();
             if complete.is_empty() {
                 let paths = Self::owned_file_paths(handle, None, ext.as_deref());
-                self.delete(TorrentIdOrHash::Id(tid), false).await?;
+                self.delete_quiet(TorrentIdOrHash::Id(tid), false).await?;
                 let f = folder.clone();
                 let (deleted, bytes) =
                     tokio::task::spawn_blocking(move || Self::delete_owned_paths(&f, &paths)).await?;
@@ -2217,7 +2308,7 @@ impl Session {
                     .into_iter()
                     .filter(|(_, len)| *len == 0)
                     .collect();
-            self.delete(TorrentIdOrHash::Id(tid), false).await?;
+            self.delete_quiet(TorrentIdOrHash::Id(tid), false).await?;
             if !leftovers.is_empty() {
                 let f = final_folder.clone();
                 let (removed, _) = tokio::task::spawn_blocking(move || {
@@ -2265,7 +2356,7 @@ impl Session {
                     crate::event_log::Severity::Info,
                     crate::event_log::kind::TORRENT_REMOVED,
                     msg,
-                    serde_json::to_value(&out).unwrap_or_default(),
+                    Self::remove_details(&out, origin),
                 );
                 Ok(out)
             }
@@ -2282,7 +2373,7 @@ impl Session {
                         out.deleted_files.len(),
                         crate::torrent_rules::fmt_bytes(out.deleted_bytes)
                     ),
-                    serde_json::to_value(&out).unwrap_or_default(),
+                    Self::remove_details(&out, origin),
                 );
                 Err(e)
             }
@@ -2538,10 +2629,11 @@ impl Session {
                         let policy = other.remove_policy(prefs.remove_policy);
                         let s = self.clone();
                         let id = t.id();
-                        let source = format!("rule: {rule}");
+                        let origin =
+                            crate::remove_policy::RemoveOrigin::automation(format!("rule: {rule}"));
                         tokio::spawn(async move {
                             if let Err(e) = s
-                                .remove_with_policy(TorrentIdOrHash::Id(id), policy, &source, true)
+                                .remove_with_policy(TorrentIdOrHash::Id(id), policy, &origin, true)
                                 .await
                             {
                                 warn!(id, "rule: error removing: {e:#}");

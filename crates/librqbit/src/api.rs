@@ -546,61 +546,37 @@ impl Api {
     }
 
 
-    fn log_legacy_removal(&self, idx: TorrentIdOrHash, delete_files: bool) -> Option<impl FnOnce()> {
-        let h = self.session.get(idx)?;
-        let tref = h.shared().torrent_ref(h.name());
-        let events = self.session.events.clone();
-        Some(move || {
-            events.emit(
-                crate::event_log::NewEvent::new(
-                    crate::event_log::kind::TORRENT_REMOVED,
-                    crate::event_log::Severity::Info,
-                    if delete_files {
-                        "Removed torrent and deleted its files (POST /delete)"
-                    } else {
-                        "Removed torrent, files kept (POST /forget)"
-                    },
-                )
-                .torrent(tref),
-            );
-        })
-    }
-
     pub async fn api_torrent_action_forget(
         &self,
         idx: TorrentIdOrHash,
+        origin: crate::remove_policy::RemoveOrigin,
     ) -> Result<EmptyJsonResponse> {
         if let Some(id) = self.pending_id(idx) {
-            self.session.pending_forget(id, "forget").await;
+            self.session.pending_forget(id, &origin).await;
             return Ok(Default::default());
         }
-        let log = self.log_legacy_removal(idx, false);
+        self.mgr_handle(idx)?;
         self.session
-            .delete(idx, false)
+            .delete_logged(idx, false, &origin)
             .await
             .context("error forgetting torrent")?;
-        if let Some(log) = log {
-            log();
-        }
         Ok(Default::default())
     }
 
     pub async fn api_torrent_action_delete(
         &self,
         idx: TorrentIdOrHash,
+        origin: crate::remove_policy::RemoveOrigin,
     ) -> Result<EmptyJsonResponse> {
         if let Some(id) = self.pending_id(idx) {
-            self.session.pending_forget(id, "delete").await;
+            self.session.pending_forget(id, &origin).await;
             return Ok(Default::default());
         }
-        let log = self.log_legacy_removal(idx, true);
+        self.mgr_handle(idx)?;
         self.session
-            .delete(idx, true)
+            .delete_logged(idx, true, &origin)
             .await
             .context("error deleting torrent with files")?;
-        if let Some(log) = log {
-            log();
-        }
         Ok(Default::default())
     }
 
@@ -610,11 +586,12 @@ impl Api {
         idx: TorrentIdOrHash,
         req: crate::remove_policy::RemoveRequest,
         wait: bool,
+        origin: crate::remove_policy::RemoveOrigin,
     ) -> Result<crate::remove_policy::RemoveOutcome> {
         if let Some(id) = self.pending_id(idx) {
             // Still resolving metadata: there are no files, whatever the policy.
             let pm = self.session.pending.get(id);
-            self.session.pending_forget(id, "remove").await;
+            self.session.pending_forget(id, &origin).await;
             return Ok(crate::remove_policy::RemoveOutcome {
                 id,
                 name: pm.map(|p| p.display_name()).unwrap_or_default(),
@@ -626,7 +603,7 @@ impl Api {
         self.mgr_handle(idx)?;
         let out = self
             .session
-            .remove_with_policy(idx, req.policy, "API/UI", wait)
+            .remove_with_policy(idx, req.policy, &origin, wait)
             .await
             .with_status(StatusCode::CONFLICT)?;
         Ok(out)

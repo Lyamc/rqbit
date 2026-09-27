@@ -285,8 +285,168 @@ pub fn may_skip_dialog(confirm_remove: bool, policy: RemovePolicy, any_complete:
     !(deletes_complete || deletes_incomplete)
 }
 
+/// Who/what triggered a removal: recorded in the `torrent_removed` event.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoveTrigger {
+    /// A person asked for it (HTTP API: web UI, GPUI, scripts).
+    Manual,
+    /// An automation rule, a policy, a resolver dedup, ...
+    Automation,
+    /// A direct library call (`Session::delete`) without more context.
+    Library,
+}
+
+/// Context of a removal, carried from the entry point into the Events log.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RemoveOrigin {
+    pub trigger: RemoveTrigger,
+    /// e.g. "POST /torrents/12/forget" or "rule: stalled".
+    pub source: String,
+    /// Original client IP (X-Forwarded-For / X-Real-IP when behind a proxy, else the peer).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_ip: Option<String>,
+    /// TCP peer when it differs from `client_ip` (i.e. the proxy).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
+}
+
+impl RemoveOrigin {
+    pub fn manual(source: impl Into<String>) -> Self {
+        Self {
+            trigger: RemoveTrigger::Manual,
+            source: source.into(),
+            client_ip: None,
+            peer: None,
+            user_agent: None,
+        }
+    }
+
+    pub fn automation(source: impl Into<String>) -> Self {
+        Self {
+            trigger: RemoveTrigger::Automation,
+            ..Self::manual(source)
+        }
+    }
+
+    pub fn library() -> Self {
+        Self {
+            trigger: RemoveTrigger::Library,
+            ..Self::manual("library call")
+        }
+    }
+
+    /// Short human label for event messages: "POST /torrents/3/forget from 192.168.0.30".
+    pub fn label(&self) -> String {
+        match &self.client_ip {
+            Some(ip) => format!("{} from {ip}", self.source),
+            None => self.source.clone(),
+        }
+    }
+
+    /// Build from the HTTP request context. `forwarded_for` is the raw
+    /// `X-Forwarded-For` header (first entry wins), `real_ip` is `X-Real-IP`.
+    pub fn from_http(
+        source: impl Into<String>,
+        peer: Option<std::net::SocketAddr>,
+        forwarded_for: Option<&str>,
+        real_ip: Option<&str>,
+        user_agent: Option<&str>,
+    ) -> Self {
+        fn clean(s: &str) -> Option<String> {
+            let s = s.trim().trim_matches('"');
+            if s.is_empty() || s.len() > 64 || s.eq_ignore_ascii_case("unknown") {
+                return None;
+            }
+            // Accept "ip", "ip:port" and "[v6]:port".
+            if let Ok(a) = s.parse::<std::net::SocketAddr>() {
+                return Some(a.ip().to_canonical().to_string());
+            }
+            s.parse::<std::net::IpAddr>()
+                .ok()
+                .map(|ip| ip.to_canonical().to_string())
+        }
+        let peer_ip = peer.map(|p| p.ip().to_canonical().to_string());
+        let fwd = forwarded_for
+            .and_then(|h| h.split(',').next())
+            .and_then(clean)
+            .or_else(|| real_ip.and_then(clean));
+        let client_ip = fwd.clone().or_else(|| peer_ip.clone());
+        let peer = match (&fwd, &peer_ip) {
+            (Some(f), Some(p)) if f != p => Some(p.clone()),
+            _ => None,
+        };
+        let user_agent = user_agent
+            .map(|u| u.trim())
+            .filter(|u| !u.is_empty())
+            .map(|u| u.chars().take(200).collect());
+        Self {
+            trigger: RemoveTrigger::Manual,
+            source: source.into(),
+            client_ip,
+            peer,
+            user_agent,
+        }
+    }
+
+    /// Merge origin fields (trigger, source, client_ip, ...) into an event `details` object.
+    pub fn merge_into(&self, mut details: serde_json::Value) -> serde_json::Value {
+        if !details.is_object() {
+            details = serde_json::json!({});
+        }
+        if let (Some(obj), Ok(serde_json::Value::Object(o))) =
+            (details.as_object_mut(), serde_json::to_value(self))
+        {
+            for (k, v) in o {
+                obj.insert(k, v);
+            }
+        }
+        details
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn origin_from_http_prefers_forwarded_for() {
+        let peer: std::net::SocketAddr = "172.17.0.2:5555".parse().unwrap();
+        let o = RemoveOrigin::from_http(
+            "POST /torrents/3/forget",
+            Some(peer),
+            Some("192.168.0.30, 172.17.0.2"),
+            None,
+            Some("Mozilla/5.0"),
+        );
+        assert_eq!(o.trigger, RemoveTrigger::Manual);
+        assert_eq!(o.client_ip.as_deref(), Some("192.168.0.30"));
+        assert_eq!(o.peer.as_deref(), Some("172.17.0.2"));
+        assert_eq!(o.label(), "POST /torrents/3/forget from 192.168.0.30");
+        let d = o.merge_into(serde_json::json!({"id": 3}));
+        assert_eq!(d["id"], 3);
+        assert_eq!(d["trigger"], "manual");
+        assert_eq!(d["client_ip"], "192.168.0.30");
+        assert_eq!(d["user_agent"], "Mozilla/5.0");
+    }
+
+    #[test]
+    fn origin_from_http_falls_back_to_real_ip_then_peer() {
+        let peer: std::net::SocketAddr = "[::ffff:10.0.0.5]:80".parse().unwrap();
+        let o = RemoveOrigin::from_http("x", Some(peer), Some("garbage"), Some("10.1.1.1"), None);
+        assert_eq!(o.client_ip.as_deref(), Some("10.1.1.1"));
+        let o = RemoveOrigin::from_http("x", Some(peer), None, None, Some("  "));
+        assert_eq!(o.client_ip.as_deref(), Some("10.0.0.5"));
+        assert_eq!(o.peer, None);
+        assert_eq!(o.user_agent, None);
+        let o = RemoveOrigin::from_http("x", None, Some("[2001:db8::1]:443"), None, None);
+        assert_eq!(o.client_ip.as_deref(), Some("2001:db8::1"));
+        assert_eq!(RemoveOrigin::automation("rule: stalled").label(), "rule: stalled");
+        let d = RemoveOrigin::automation("rule: stalled").merge_into(serde_json::Value::Null);
+        assert_eq!(d["trigger"], "automation");
+        assert!(d.get("client_ip").is_none());
+    }
+
     use super::*;
 
     fn fv(id: usize, length: u64, have: u64) -> FileView {

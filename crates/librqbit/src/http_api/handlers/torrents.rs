@@ -316,13 +316,45 @@ pub async fn h_queue_move(
     state.api.api_queue_move(req).map(axum::Json)
 }
 
+/// Who asked for a removal: method + path, client IP (proxy headers first), user agent.
+pub struct ClientOrigin(pub crate::remove_policy::RemoveOrigin);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for ClientOrigin {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut http::request::Parts,
+        _state: &S,
+    ) -> std::result::Result<Self, Self::Rejection> {
+        let peer = parts
+            .extensions
+            .get::<axum::extract::ConnectInfo<librqbit_dualstack_sockets::WrappedSocketAddr>>()
+            .map(|c| c.0.0)
+            .or_else(|| {
+                parts
+                    .extensions
+                    .get::<axum::extract::ConnectInfo<SocketAddr>>()
+                    .map(|c| c.0)
+            });
+        let h = |n: &str| parts.headers.get(n).and_then(|v| v.to_str().ok());
+        Ok(Self(crate::remove_policy::RemoveOrigin::from_http(
+            format!("{} {}", parts.method, parts.uri.path()),
+            peer,
+            h("x-forwarded-for"),
+            h("x-real-ip"),
+            h("user-agent"),
+        )))
+    }
+}
+
 pub async fn h_torrent_action_forget(
     State(state): State<ApiState>,
     Path(idx): Path<TorrentIdOrHash>,
+    ClientOrigin(origin): ClientOrigin,
 ) -> Result<impl IntoResponse> {
     state
         .api
-        .api_torrent_action_forget(idx)
+        .api_torrent_action_forget(idx, origin)
         .await
         .map(axum::Json)
 }
@@ -330,10 +362,11 @@ pub async fn h_torrent_action_forget(
 pub async fn h_torrent_action_delete(
     State(state): State<ApiState>,
     Path(idx): Path<TorrentIdOrHash>,
+    ClientOrigin(origin): ClientOrigin,
 ) -> Result<impl IntoResponse> {
     state
         .api
-        .api_torrent_action_delete(idx)
+        .api_torrent_action_delete(idx, origin)
         .await
         .map(axum::Json)
 }
@@ -349,6 +382,7 @@ pub async fn h_torrent_action_remove(
     State(state): State<ApiState>,
     Path(idx): Path<TorrentIdOrHash>,
     Query(q): Query<RemoveQuery>,
+    ClientOrigin(origin): ClientOrigin,
     body: Bytes,
 ) -> Result<impl IntoResponse> {
     let req: crate::remove_policy::RemoveRequest = if body.iter().all(|b| b.is_ascii_whitespace()) {
@@ -360,7 +394,7 @@ pub async fn h_torrent_action_remove(
     };
     state
         .api
-        .api_torrent_remove(idx, req, q.wait)
+        .api_torrent_remove(idx, req, q.wait, origin)
         .await
         .map(axum::Json)
 }

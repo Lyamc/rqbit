@@ -423,9 +423,25 @@ impl Session {
                     existing = tid,
                     "magnet resolved to a torrent that is already managed"
                 );
+                self.emit_placeholder_dropped(
+                    &pm,
+                    format!(
+                        "Removed placeholder {}: it resolved to torrent {tid}, which is already in the list; no files touched (magnet resolver)",
+                        pm.display_name()
+                    ),
+                    serde_json::json!({"result": "already_managed", "existing_id": tid}),
+                );
             }
             Ok(AddTorrentResponse::ListOnly(_)) => {
                 self.pending.remove(id);
+                self.emit_placeholder_dropped(
+                    &pm,
+                    format!(
+                        "Removed placeholder {}: list-only add; no files touched (magnet resolver)",
+                        pm.display_name()
+                    ),
+                    serde_json::json!({"result": "list_only"}),
+                );
             }
             Err(e) => {
                 if !still {
@@ -481,8 +497,39 @@ impl Session {
         true
     }
 
+    fn emit_placeholder_dropped(&self, pm: &PendingMagnet, msg: String, extra: serde_json::Value) {
+        let mut details = crate::remove_policy::RemoveOrigin::automation("magnet resolver")
+            .merge_into(serde_json::json!({
+                "id": pm.id,
+                "name": pm.display_name(),
+                "files": "none",
+            }));
+        if let (Some(d), Some(e)) = (details.as_object_mut(), extra.as_object()) {
+            for (k, v) in e {
+                d.insert(k.clone(), v.clone());
+            }
+        }
+        self.events.emit(
+            crate::event_log::NewEvent::new(
+                crate::event_log::kind::TORRENT_REMOVED,
+                crate::event_log::Severity::Info,
+                msg,
+            )
+            .torrent(crate::event_log::TorrentRef {
+                id: Some(pm.id),
+                info_hash: pm.info_hash.clone(),
+                name: pm.name.clone(),
+            })
+            .details(details),
+        );
+    }
+
     /// Forget a pending magnet (there are no files yet). Returns false if not pending.
-    pub async fn pending_forget(self: &Arc<Self>, id: usize, source: &str) -> bool {
+    pub async fn pending_forget(
+        self: &Arc<Self>,
+        id: usize,
+        origin: &crate::remove_policy::RemoveOrigin,
+    ) -> bool {
         let Some(pm) = self.pending.remove(id) else {
             return false;
         };
@@ -494,7 +541,7 @@ impl Session {
             .torrents
             .get(&id)
             .is_some_and(|t| t.info_hash().as_string() == pm.info_hash);
-        if committed && let Err(e) = self.delete(TorrentIdOrHash::Id(id), false).await {
+        if committed && let Err(e) = self.delete_quiet(TorrentIdOrHash::Id(id), false).await {
             warn!(
                 id,
                 "error removing torrent committed while being cancelled: {e:#}"
@@ -505,15 +552,23 @@ impl Session {
                 crate::event_log::kind::TORRENT_REMOVED,
                 crate::event_log::Severity::Info,
                 format!(
-                    "Removed {} before its metadata was resolved ({source})",
-                    pm.display_name()
+                    "Removed {} before its metadata was resolved, no files yet ({})",
+                    pm.display_name(),
+                    origin.label()
                 ),
             )
             .torrent(crate::event_log::TorrentRef {
                 id: Some(id),
                 info_hash: pm.info_hash.clone(),
                 name: pm.name.clone(),
-            }),
+            })
+            .details(origin.merge_into(serde_json::json!({
+                "id": id,
+                "name": pm.display_name(),
+                "files": "none",
+                "result": "removed_before_metadata",
+                "committed": committed,
+            }))),
         );
         true
     }
