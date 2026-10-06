@@ -18,7 +18,7 @@ use super::ApiState;
 use crate::{
     AddTorrent, ApiError, CreateTorrentOptions, SUPPORTED_SCHEMES,
     api::{ApiTorrentListOpts, Result, TorrentIdOrHash},
-    api_error::WithStatusError,
+    api_error::{WithStatus, WithStatusError},
     http_api::timeout::Timeout,
     http_api_types::TorrentAddQueryParams,
     torrent_state::peer::stats::snapshot::{PeerStatsFilter, PeerStatsFilterState},
@@ -39,7 +39,32 @@ pub async fn h_torrents_post(
     body: Body,
 ) -> Result<impl IntoResponse> {
     let is_url = params.is_url;
-    let opts = params.into_add_torrent_options();
+    let from_server_path = params.from_server_path.clone();
+    // Paused: explicit parameter, else the "When a torrent is added" preference. An
+    // Add dialog's torrents are held paused until it finishes, if that's enabled and
+    // they weren't added paused on purpose.
+    let prefs = &state.api.session().preferences;
+    let want_paused = params.paused.unwrap_or_else(|| prefs.add_paused_default());
+    let dialog = match params.add_dialog_id.clone() {
+        Some(d) => {
+            crate::add_dialog::validate_dialog_id(&d).map_err(ApiError::invalid_input)?;
+            Some(d)
+        }
+        None => None,
+    };
+    let hold = dialog.filter(|_| {
+        !want_paused && prefs.start_after_add_dialog() && !params.list_only.unwrap_or(false)
+    });
+    let mut opts = params.into_add_torrent_options();
+    opts.paused = want_paused || hold.is_some();
+
+    // Add from a validated server filesystem path (browse UI).
+    if let Some(path) = from_server_path {
+        let data = super::fs::read_torrent_under_roots(&state, &path)?;
+        let add = AddTorrent::TorrentFileBytes(data.into());
+        return add_with_timeout(&state, add, opts, timeout, hold).await;
+    }
+
     let max_size = state.opts.max_upload_body_size.unwrap_or(10 * 1024 * 1024);
     let data = to_bytes(body, max_size)
         .await
@@ -73,10 +98,102 @@ pub async fn h_torrents_post(
         }
         _ => AddTorrent::TorrentFileBytes(data.into()),
     };
-    tokio::time::timeout(timeout, state.api.api_add_torrent(add, Some(opts)))
+    add_with_timeout(&state, add, opts, timeout, hold).await
+}
+
+/// Magnets never wait here (queued at once, or `wait_for_metadata` falls back to the
+/// placeholder before `timeout`). For .torrent bytes / URLs the timeout only covers
+/// downloading the .torrent and waiting for a disk slot. A `list_only` preview whose
+/// metadata isn't available yet answers 202 with `resolving: true` and no id.
+async fn add_with_timeout(
+    state: &ApiState,
+    add: AddTorrent<'_>,
+    opts: crate::AddTorrentOptions,
+    timeout: std::time::Duration,
+    hold_for_dialog: Option<String>,
+) -> Result<axum::response::Response> {
+    let fut = state
+        .api
+        .api_add_torrent_with_deadline(add, Some(opts), Some(timeout));
+    // The magnet paths finish before `timeout` themselves; the margin only matters
+    // for .torrent downloads / disk-slot waits.
+    let r = tokio::time::timeout(timeout + std::time::Duration::from_secs(1), fut)
         .await
-        .context("timeout")?
+        .map_err(|_| {
+            ApiError::from((
+                StatusCode::GATEWAY_TIMEOUT,
+                anyhow::anyhow!(
+                    "timed out after {}s adding the torrent (downloading the .torrent or waiting for a disk slot); nothing was added",
+                    timeout.as_secs()
+                ),
+            ))
+        })??;
+    let mut r = r;
+    if let (Some(dialog), Some(id)) = (hold_for_dialog, r.id)
+        && !r.already_managed
+        && matches!(
+            r.state,
+            crate::api::AddState::Added | crate::api::AddState::ResolvingMetadata
+        )
+    {
+        state.api.session().add_dialogs.hold(&dialog, id);
+        r.held = true;
+    }
+    let status = if r.resolving && r.id.is_none() {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, axum::Json(r)).into_response())
+}
+
+pub async fn h_add_job_status(
+    State(state): State<ApiState>,
+    Path(job_id): Path<String>,
+) -> Result<impl IntoResponse> {
+    state
+        .api
+        .session()
+        .add_jobs
+        .get(&job_id)
         .map(axum::Json)
+        .ok_or_else(|| ApiError::from((StatusCode::NOT_FOUND, "no such add job")))
+}
+
+pub async fn h_add_job_cancel(
+    State(state): State<ApiState>,
+    Path(job_id): Path<String>,
+) -> Result<impl IntoResponse> {
+    let outcome = state
+        .api
+        .session()
+        .add_jobs
+        .cancel(&job_id)
+        .with_status(StatusCode::BAD_REQUEST)?;
+    Ok(axum::Json(outcome))
+}
+
+pub async fn h_add_dialog_heartbeat(
+    State(state): State<ApiState>,
+    Path(dialog_id): Path<String>,
+) -> Result<impl IntoResponse> {
+    crate::add_dialog::validate_dialog_id(&dialog_id).map_err(ApiError::invalid_input)?;
+    let held = state.api.session().add_dialogs.heartbeat(&dialog_id);
+    Ok(axum::Json(serde_json::json!({ "held": held })))
+}
+
+/// Also the target of the UI's `navigator.sendBeacon` on tab/window close.
+pub async fn h_add_dialog_finish(
+    State(state): State<ApiState>,
+    Path(dialog_id): Path<String>,
+) -> Result<impl IntoResponse> {
+    crate::add_dialog::validate_dialog_id(&dialog_id).map_err(ApiError::invalid_input)?;
+    let r = state
+        .api
+        .session()
+        .release_add_dialog(&dialog_id, "Add dialog closed")
+        .await;
+    Ok(axum::Json(r))
 }
 
 pub async fn h_torrent_details(
@@ -214,13 +331,109 @@ pub async fn h_torrent_action_start(
         .map(axum::Json)
 }
 
-pub async fn h_torrent_action_forget(
+pub async fn h_torrent_action_restart(
     State(state): State<ApiState>,
     Path(idx): Path<TorrentIdOrHash>,
 ) -> Result<impl IntoResponse> {
     state
         .api
-        .api_torrent_action_forget(idx)
+        .api_torrent_action_restart(idx)
+        .await
+        .map(axum::Json)
+}
+
+pub async fn h_torrent_action_fix_errors(
+    State(state): State<ApiState>,
+    Path(idx): Path<TorrentIdOrHash>,
+) -> Result<impl IntoResponse> {
+    state
+        .api
+        .api_torrent_action_fix_errors(idx)
+        .await
+        .map(axum::Json)
+}
+
+pub async fn h_torrent_action_recheck(
+    State(state): State<ApiState>,
+    Path(idx): Path<TorrentIdOrHash>,
+) -> Result<impl IntoResponse> {
+    state
+        .api
+        .api_torrent_action_recheck(idx)
+        .await
+        .map(axum::Json)
+}
+
+/// Body (optional): `{"files": [idx, ...]}` or `{"scope": "damaged" | "all"}`.
+/// Default: scan all files and repair whatever is unreadable.
+pub async fn h_torrent_action_repair_files(
+    State(state): State<ApiState>,
+    Path(idx): Path<TorrentIdOrHash>,
+    body: axum::body::Bytes,
+) -> Result<impl IntoResponse> {
+    let req: crate::repair::RepairRequest = if body.iter().all(|b| b.is_ascii_whitespace()) {
+        Default::default()
+    } else {
+        serde_json::from_slice(&body)
+            .context("invalid repair request body")
+            .with_status(StatusCode::BAD_REQUEST)?
+    };
+    state
+        .api
+        .api_torrent_action_repair_files(idx, req)
+        .map(axum::Json)
+}
+
+pub async fn h_queue_order(State(state): State<ApiState>) -> Result<impl IntoResponse> {
+    Ok(axum::Json(state.api.api_queue_order()))
+}
+
+pub async fn h_queue_move(
+    State(state): State<ApiState>,
+    axum::Json(req): axum::Json<crate::api::QueueMoveRequest>,
+) -> Result<impl IntoResponse> {
+    state.api.api_queue_move(req).map(axum::Json)
+}
+
+/// Who asked for a removal: method + path, client IP (proxy headers first), user agent.
+pub struct ClientOrigin(pub crate::remove_policy::RemoveOrigin);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for ClientOrigin {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut http::request::Parts,
+        _state: &S,
+    ) -> std::result::Result<Self, Self::Rejection> {
+        let peer = parts
+            .extensions
+            .get::<axum::extract::ConnectInfo<librqbit_dualstack_sockets::WrappedSocketAddr>>()
+            .map(|c| c.0.0)
+            .or_else(|| {
+                parts
+                    .extensions
+                    .get::<axum::extract::ConnectInfo<SocketAddr>>()
+                    .map(|c| c.0)
+            });
+        let h = |n: &str| parts.headers.get(n).and_then(|v| v.to_str().ok());
+        Ok(Self(crate::remove_policy::RemoveOrigin::from_http(
+            format!("{} {}", parts.method, parts.uri.path()),
+            peer,
+            h("x-forwarded-for"),
+            h("x-real-ip"),
+            h("user-agent"),
+        )))
+    }
+}
+
+pub async fn h_torrent_action_forget(
+    State(state): State<ApiState>,
+    Path(idx): Path<TorrentIdOrHash>,
+    ClientOrigin(origin): ClientOrigin,
+) -> Result<impl IntoResponse> {
+    state
+        .api
+        .api_torrent_action_forget(idx, origin)
         .await
         .map(axum::Json)
 }
@@ -228,12 +441,92 @@ pub async fn h_torrent_action_forget(
 pub async fn h_torrent_action_delete(
     State(state): State<ApiState>,
     Path(idx): Path<TorrentIdOrHash>,
+    ClientOrigin(origin): ClientOrigin,
 ) -> Result<impl IntoResponse> {
     state
         .api
-        .api_torrent_action_delete(idx)
+        .api_torrent_action_delete(idx, origin)
         .await
         .map(axum::Json)
+}
+
+#[derive(Deserialize, Default)]
+pub struct RemoveQuery {
+    /// Block until "finish what's done" completed (default: it runs in the background).
+    #[serde(default)]
+    wait: bool,
+}
+
+pub async fn h_torrent_action_remove(
+    State(state): State<ApiState>,
+    Path(idx): Path<TorrentIdOrHash>,
+    Query(q): Query<RemoveQuery>,
+    ClientOrigin(origin): ClientOrigin,
+    body: Bytes,
+) -> Result<impl IntoResponse> {
+    let req: crate::remove_policy::RemoveRequest = if body.iter().all(|b| b.is_ascii_whitespace()) {
+        Default::default()
+    } else {
+        serde_json::from_slice(&body)
+            .context("invalid remove request")
+            .with_status(StatusCode::BAD_REQUEST)?
+    };
+    state
+        .api
+        .api_torrent_remove(idx, req, q.wait, origin)
+        .await
+        .map(axum::Json)
+}
+
+#[derive(Deserialize)]
+pub struct RemovePreviewQuery {
+    /// Comma-separated torrent ids.
+    ids: String,
+}
+
+pub async fn h_remove_preview(
+    State(state): State<ApiState>,
+    Query(q): Query<RemovePreviewQuery>,
+) -> Result<impl IntoResponse> {
+    let ids: Vec<usize> = q
+        .ids
+        .split(',')
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().parse::<usize>())
+        .collect::<std::result::Result<_, _>>()
+        .context("ids must be comma-separated numbers")
+        .with_status(StatusCode::BAD_REQUEST)?;
+    Ok(axum::Json(state.api.api_remove_preview(&ids)))
+}
+
+pub async fn h_download_order(
+    State(state): State<ApiState>,
+    Path(idx): Path<TorrentIdOrHash>,
+) -> Result<impl IntoResponse> {
+    state.api.api_download_order(idx).map(axum::Json)
+}
+
+pub async fn h_set_download_order(
+    State(state): State<ApiState>,
+    Path(idx): Path<TorrentIdOrHash>,
+    axum::Json(req): axum::Json<crate::download_order::DownloadOrderPatch>,
+) -> Result<impl IntoResponse> {
+    state.api.api_set_download_order(idx, req).map(axum::Json)
+}
+
+pub async fn h_torrent_rules(
+    State(state): State<ApiState>,
+    Path(idx): Path<TorrentIdOrHash>,
+) -> Result<impl IntoResponse> {
+    state.api.api_torrent_rules(idx).map(axum::Json)
+}
+
+pub async fn h_set_torrent_rules(
+    State(state): State<ApiState>,
+    Path(idx): Path<TorrentIdOrHash>,
+    axum::Json(req): axum::Json<crate::torrent_rules::SetRulesOverride>,
+) -> Result<impl IntoResponse> {
+    state.api.api_set_torrent_rules(idx, req).map(axum::Json)
 }
 
 #[derive(Deserialize)]
@@ -434,4 +727,45 @@ pub async fn h_create_torrent(
             Ok((headers, torrent.as_bytes()?).into_response())
         }
     }
+}
+
+#[derive(Deserialize)]
+pub struct RenameFileBody {
+    pub file_id: usize,
+    pub new_path: String,
+}
+
+pub async fn h_rename_file(
+    State(state): State<ApiState>,
+    Path(id): Path<TorrentIdOrHash>,
+    axum::Json(body): axum::Json<RenameFileBody>,
+) -> Result<impl IntoResponse> {
+    state
+        .api
+        .api_torrent_action_rename_file(id, body.file_id, body.new_path)
+        .await
+        .map(axum::Json)
+}
+
+#[derive(Deserialize)]
+pub struct RelocateBody {
+    pub destination: String,
+    #[serde(default)]
+    pub copy: bool,
+    /// `destination` is the folder to put the torrent in: a multi-file torrent goes to
+    /// `<destination>/<TorrentName>` (default false: `destination` is the torrent's folder).
+    #[serde(default)]
+    pub into: bool,
+}
+
+pub async fn h_relocate(
+    State(state): State<ApiState>,
+    Path(id): Path<TorrentIdOrHash>,
+    axum::Json(body): axum::Json<RelocateBody>,
+) -> Result<impl IntoResponse> {
+    state
+        .api
+        .api_torrent_action_relocate(id, body.destination, body.copy, body.into)
+        .await
+        .map(axum::Json)
 }

@@ -22,7 +22,32 @@ pub struct TorrentAddQueryParams {
     pub initial_peers: Option<InitialPeers>,
     // Will force interpreting the content as a URL.
     pub is_url: Option<bool>,
+    /// Read a .torrent from this server filesystem path (must be under browse roots).
+    pub from_server_path: Option<String>,
     pub list_only: Option<bool>,
+    /// Optional Newznab/Torznab category id (e.g. 2000=Movies, 5070=Anime).
+    pub torznab_category: Option<u32>,
+    /// Adopt another client's data in output_folder before the initial check
+    /// (transfer from other client). Supported: "auto" ("qbit" = alias).
+    pub adopt_foreign_incomplete: Option<String>,
+    /// Client-chosen id to poll / cancel this add (see /add_jobs).
+    pub add_job_id: Option<String>,
+    /// Magnets: length of one metadata resolve attempt (seconds). When it runs out the
+    /// magnet keeps resolving in the background after a backoff; it never fails the add.
+    pub magnet_timeout_secs: Option<u64>,
+    /// Accepted for compatibility; no effect. Magnets are always queued at once with a
+    /// torrent id and resolved in the background ("Resolving metadata").
+    pub defer_metadata: Option<bool>,
+    /// Magnets: wait for the metadata before answering (old behaviour). If it doesn't
+    /// arrive in time the magnet is queued as a resolving placeholder anyway (still a
+    /// 200 with `resolving: true`), never an error.
+    pub wait_for_metadata: Option<bool>,
+    /// Add paused (`true`) or started (`false`). Unset: the "When a torrent is added"
+    /// preference. Magnets still fetch their metadata while paused (no data).
+    pub paused: Option<bool>,
+    /// Sent by Add dialogs: with "Start after I finish the Add dialog" on, the torrent
+    /// is held paused until `POST /add_dialog/{id}/finish` (see [`crate::add_dialog`]).
+    pub add_dialog_id: Option<String>,
 }
 
 impl Serialize for OnlyFiles {
@@ -106,6 +131,13 @@ impl TorrentAddQueryParams {
                 read_write_timeout: self.peer_read_write_timeout.map(Duration::from_secs),
                 ..Default::default()
             }),
+            torznab_category: self.torznab_category,
+            adopt_foreign_incomplete: self.adopt_foreign_incomplete,
+            add_job_id: self.add_job_id,
+            magnet_resolve_timeout: self.magnet_timeout_secs.map(Duration::from_secs),
+            defer_metadata: self.defer_metadata.unwrap_or(false),
+            wait_for_metadata: self.wait_for_metadata.unwrap_or(false),
+            paused: self.paused.unwrap_or(false),
             ..Default::default()
         }
     }

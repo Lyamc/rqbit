@@ -1,0 +1,668 @@
+use std::{
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
+};
+
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
+use tracing::{info, warn};
+
+use crate::media_classify::{AutoOrganizeFolders, MediaType};
+
+/// One step in the ordered on-complete action pipeline.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CompletionAction {
+    /// Run a shell command (`sh -c` / `cmd /C`). Same env vars as the legacy hook.
+    Shell {
+        command: String,
+    },
+    /// Relocate torrent content into `path` (move, or copy when `copy` is true).
+    Move {
+        path: String,
+        #[serde(default)]
+        copy: bool,
+    },
+    /// Classify media and relocate under `auto_organize_root` / type subfolder.
+    Organize,
+    /// Strip the configured incomplete-extension suffix from on-disk filenames.
+    DropIncompleteExt,
+}
+
+pub use crate::remove_policy::{RemoveAction, RemovePolicy};
+
+/// Persisted session-level user preferences.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionPreferences {
+    /// When true, I/O write errors invalidate only the failed piece and redownload it
+    /// instead of fatally erroring the torrent.
+    #[serde(default)]
+    pub soft_recover_on_io_error: bool,
+
+    /// When soft recovery is on and a file is marked damaged (reads/writes return EIO, or
+    /// the same piece keeps failing), automatically run "Repair damaged files" on it.
+    /// **Off by default.**
+    #[serde(default)]
+    pub auto_repair_damaged_files: bool,
+
+    /// Exponential backoff for automatic recovery (re-downloading pieces that failed with
+    /// I/O errors, automatic repairs): first retry after this many seconds, doubling per
+    /// consecutive failure (±20% jitter).
+    #[serde(default = "default_recovery_backoff_base_secs")]
+    pub recovery_backoff_base_secs: u64,
+
+    /// Upper bound for the automatic recovery delay, in seconds.
+    #[serde(default = "default_recovery_backoff_cap_secs")]
+    pub recovery_backoff_cap_secs: u64,
+
+    /// After this many consecutive failures, automatic recovery of a piece/file stops and
+    /// it is flagged "needs attention" (manual Fix errors retries immediately).
+    #[serde(default = "default_recovery_max_attempts")]
+    pub recovery_max_attempts: u32,
+
+    /// Total size cap of the event log (events.jsonl + rotated segments), in MiB.
+    /// Oldest segments are deleted to stay under it. Clamped to 1..=1024.
+    #[serde(default = "default_event_log_max_mb")]
+    pub event_log_max_mb: u64,
+
+    /// Queueing (qBittorrent-style active limits). **Off by default** (no limits).
+    #[serde(default)]
+    pub queueing_enabled: bool,
+    /// Max torrents downloading at once (None = unlimited).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_max_active_downloads: Option<u32>,
+    /// Max torrents seeding at once (None = unlimited).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_max_active_uploads: Option<u32>,
+    /// Max active torrents in total (None = unlimited).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_max_active_torrents: Option<u32>,
+    /// Torrents slower than 2 KiB/s both ways for 60 s don't count toward the limits.
+    #[serde(default)]
+    pub queue_ignore_slow_torrents: bool,
+
+    /// Legacy: shell command when a torrent finishes. Migrated into `completion_actions`
+    /// when the actions list is empty (see [`SessionPreferences::effective_actions`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_complete_hook: Option<String>,
+
+    /// Legacy: move/copy completed content here. See `effective_actions`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub move_completed_path: Option<String>,
+
+    /// Legacy: copy instead of move for `move_completed_path`.
+    #[serde(default)]
+    pub move_completed_copy: bool,
+
+    /// When true (and not overridden by an explicit actions list that omits Organize),
+    /// completed torrents are classified and moved into a type subfolder.
+    /// **Disabled by default** — heuristics can mis-classify.
+    #[serde(default)]
+    pub auto_organize_enabled: bool,
+
+    /// Root for auto-organize. Empty/None = session default download folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_organize_root: Option<String>,
+
+    /// Mapping of media type → subfolder name under the organize root.
+    #[serde(default)]
+    pub auto_organize_folders: AutoOrganizeFolders,
+
+    /// While downloading, append this suffix to on-disk filenames (e.g. `.!qB`, `.part`).
+    /// Empty / unset = disabled. On completion, `DropIncompleteExt` removes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incomplete_extension: Option<String>,
+
+    /// Ordered on-complete pipeline. When non-empty, this is the sole source of actions
+    /// (legacy hook/move fields and the auto_organize/incomplete toggles are ignored for
+    /// execution — configure them as explicit actions instead). When empty, actions are
+    /// synthesized from legacy fields + toggles for backward compatibility.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub completion_actions: Vec<CompletionAction>,
+
+    /// Default max connected peers per torrent for newly added torrents.
+    /// Applied live when preferences are saved. None / unset = engine default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_limit: Option<usize>,
+
+    /// UI: ask before removing torrents. Deleting files always asks, whatever
+    /// this says. **On by default.**
+    #[serde(default = "default_true")]
+    pub confirm_remove: bool,
+
+    /// Legacy single remove action; migrated into `remove_policy` on load/save and never
+    /// written back.
+    #[serde(default, skip_serializing)]
+    pub default_remove_action: Option<RemoveAction>,
+
+    /// What Remove does with files, separately for complete and incomplete torrents.
+    /// Used by `POST /torrents/{id}/remove` when no explicit policy is given, and as the
+    /// preset of the UIs' remove dialog.
+    #[serde(default)]
+    pub remove_policy: RemovePolicy,
+
+    /// Automatic per-torrent rules (stalled, seeding limits, full-speed window). All off
+    /// by default; torrents may override them individually.
+    #[serde(default)]
+    pub rules: crate::torrent_rules::TorrentRules,
+
+    /// Rotate seeding slots (needs queueing and a max-uploads limit): when more completed
+    /// torrents want to seed than the limit, each seeds for this long before the one that
+    /// waited longest takes its slot. 0 / unset = off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_seed_rotation_secs: Option<u64>,
+
+    /// Default download order (piece picker); torrents and files may override it.
+    #[serde(default)]
+    pub download_order: crate::download_order::DownloadOrderDefaults,
+
+    /// Orphan cleanup: scan the default folders every N hours and report what it finds
+    /// (to Events and the Cleanup view). Never moves or deletes anything by itself.
+    /// 0 / unset = off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_scan_hours: Option<u64>,
+
+    /// Orphan cleanup ignores anything modified in the last N minutes. Unset = 60.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_min_age_minutes: Option<u64>,
+
+    /// Extra folders to offer in the Cleanup view (must be under the download folder,
+    /// a completion Move / organize folder, or `RQBIT_FS_BROWSE_ROOTS`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cleanup_extra_roots: Vec<String>,
+
+    /// "When a torrent is added": start it at once (default) or add it paused. Used
+    /// when the add request doesn't pass `paused` (API, watch folder, UIs); an explicit
+    /// `paused=true|false` wins.
+    #[serde(default)]
+    pub when_added: WhenAdded,
+
+    /// "Start after I finish the Add dialog". Torrents added from an Add dialog (web
+    /// UI Add window, GPUI Add window, magnet/.torrent handler opening it) go in paused
+    /// while the dialog is open, so files, folder and download order can be adjusted
+    /// first, and are started when the dialog is closed / finished (or, as a fallback,
+    /// when it stops sending heartbeats). Not applied to torrents added paused on
+    /// purpose, nor to API / anorak / watch-folder adds. Off by default.
+    #[serde(default)]
+    pub start_after_add_dialog: bool,
+
+    /// How completed torrents are moved (completion "move" action / auto-organize).
+    /// `folder` (default): when the torrent completes, its whole folder moves at once.
+    /// `files`: each file moves into `<destination>/<TorrentName>/<subpath>` as soon as
+    /// it finishes; the torrent keeps seeding and downloading across both places.
+    #[serde(default)]
+    pub move_mode: MoveMode,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MoveMode {
+    /// "Move the whole folder at once" when the torrent completes.
+    #[default]
+    Folder,
+    /// "Move files individually as they complete".
+    Files,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WhenAdded {
+    #[default]
+    Start,
+    Paused,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_recovery_backoff_base_secs() -> u64 {
+    60
+}
+fn default_recovery_backoff_cap_secs() -> u64 {
+    6 * 3600
+}
+fn default_recovery_max_attempts() -> u32 {
+    8
+}
+fn default_event_log_max_mb() -> u64 {
+    10
+}
+
+impl Default for SessionPreferences {
+    fn default() -> Self {
+        Self {
+            soft_recover_on_io_error: false,
+            auto_repair_damaged_files: false,
+            recovery_backoff_base_secs: default_recovery_backoff_base_secs(),
+            recovery_backoff_cap_secs: default_recovery_backoff_cap_secs(),
+            recovery_max_attempts: default_recovery_max_attempts(),
+            event_log_max_mb: default_event_log_max_mb(),
+            queueing_enabled: false,
+            queue_max_active_downloads: None,
+            queue_max_active_uploads: None,
+            queue_max_active_torrents: None,
+            queue_ignore_slow_torrents: false,
+            on_complete_hook: None,
+            move_completed_path: None,
+            move_completed_copy: false,
+            auto_organize_enabled: false,
+            auto_organize_root: None,
+            auto_organize_folders: AutoOrganizeFolders::default(),
+            incomplete_extension: None,
+            completion_actions: Vec::new(),
+            peer_limit: None,
+            confirm_remove: true,
+            default_remove_action: None,
+            remove_policy: RemovePolicy::default(),
+            rules: Default::default(),
+            queue_seed_rotation_secs: None,
+            download_order: Default::default(),
+            cleanup_scan_hours: None,
+            cleanup_min_age_minutes: None,
+            cleanup_extra_roots: Vec::new(),
+            when_added: WhenAdded::Start,
+            start_after_add_dialog: false,
+            move_mode: MoveMode::Folder,
+        }
+    }
+}
+
+impl SessionPreferences {
+    /// Normalize empty strings to None for optional path/command fields.
+    pub fn sanitize(mut self) -> Self {
+        fn empty_to_none(v: &mut Option<String>) {
+            if let Some(s) = v {
+                if s.trim().is_empty() {
+                    *v = None;
+                }
+            }
+        }
+        empty_to_none(&mut self.on_complete_hook);
+        empty_to_none(&mut self.move_completed_path);
+        empty_to_none(&mut self.auto_organize_root);
+        empty_to_none(&mut self.incomplete_extension);
+        if let Some(legacy) = self.default_remove_action.take() {
+            // Older clients/files: the single action maps to keep/keep or delete/delete,
+            // unless a policy other than the default was set explicitly alongside.
+            if self.remove_policy == RemovePolicy::default() {
+                self.remove_policy = legacy.into();
+            }
+        }
+        self.rules = self.rules.sanitize();
+        if self.queue_seed_rotation_secs == Some(0) {
+            self.queue_seed_rotation_secs = None;
+        }
+        self.completion_actions.retain(|a| match a {
+            CompletionAction::Shell { command } => !command.trim().is_empty(),
+            CompletionAction::Move { path, .. } => !path.trim().is_empty(),
+            CompletionAction::Organize | CompletionAction::DropIncompleteExt => true,
+        });
+        self
+    }
+
+    /// Actions to run on torrent completion, in order.
+    pub fn effective_actions(&self) -> Vec<CompletionAction> {
+        if !self.completion_actions.is_empty() {
+            return self.completion_actions.clone();
+        }
+        let mut actions = Vec::new();
+        if self
+            .incomplete_extension
+            .as_ref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+        {
+            actions.push(CompletionAction::DropIncompleteExt);
+        }
+        if self.auto_organize_enabled {
+            actions.push(CompletionAction::Organize);
+        }
+        if let Some(path) = self.move_completed_path.clone() {
+            actions.push(CompletionAction::Move {
+                path,
+                copy: self.move_completed_copy,
+            });
+        }
+        if let Some(command) = self.on_complete_hook.clone() {
+            actions.push(CompletionAction::Shell { command });
+        }
+        actions
+    }
+
+    pub fn incomplete_extension_str(&self) -> Option<&str> {
+        self.incomplete_extension
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
+
+    pub fn folder_for_media(&self, t: MediaType) -> &str {
+        self.auto_organize_folders.folder_for(t)
+    }
+}
+
+/// Runtime store for preferences with durable JSON writes.
+pub struct SessionPreferencesStore {
+    path: PathBuf,
+    soft_recover_on_io_error: AtomicBool,
+    prefs: RwLock<SessionPreferences>,
+}
+
+impl SessionPreferencesStore {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub async fn load_or_default(path: PathBuf) -> Self {
+        let prefs = match tokio::fs::read(&path).await {
+            Ok(bytes) => match serde_json::from_slice::<SessionPreferences>(&bytes) {
+                Ok(p) => p.sanitize(),
+                Err(e) => {
+                    warn!(error=?e, ?path, "failed to parse preferences.json; using defaults");
+                    SessionPreferences::default()
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => SessionPreferences::default(),
+            Err(e) => {
+                warn!(error=?e, ?path, "failed to read preferences.json; using defaults");
+                SessionPreferences::default()
+            }
+        };
+        info!(
+            ?path,
+            soft_recover_on_io_error = prefs.soft_recover_on_io_error,
+            auto_organize_enabled = prefs.auto_organize_enabled,
+            has_incomplete_extension = prefs.incomplete_extension_str().is_some(),
+            completion_actions = prefs.completion_actions.len(),
+            effective_actions = prefs.effective_actions().len(),
+            "loaded session preferences"
+        );
+        Self {
+            soft_recover_on_io_error: AtomicBool::new(prefs.soft_recover_on_io_error),
+            prefs: RwLock::new(prefs),
+            path,
+        }
+    }
+
+    pub fn get(&self) -> SessionPreferences {
+        self.prefs.read().clone()
+    }
+
+    /// Default for adds that don't pass `paused` ("When a torrent is added").
+    pub fn add_paused_default(&self) -> bool {
+        self.prefs.read().when_added == WhenAdded::Paused
+    }
+
+    pub fn start_after_add_dialog(&self) -> bool {
+        self.prefs.read().start_after_add_dialog
+    }
+
+    /// "Move files individually as they complete".
+    pub fn move_files_individually(&self) -> bool {
+        self.prefs.read().move_mode == MoveMode::Files
+    }
+
+    pub fn soft_recover_on_io_error(&self) -> bool {
+        self.soft_recover_on_io_error.load(Ordering::Relaxed)
+    }
+
+    pub fn auto_repair_damaged_files(&self) -> bool {
+        self.prefs.read().auto_repair_damaged_files
+    }
+
+    /// Event log size cap in bytes.
+    pub fn event_log_max_bytes(&self) -> u64 {
+        event_log_cap_bytes(self.prefs.read().event_log_max_mb)
+    }
+
+    /// Queue limits, or None when queueing is off.
+    pub fn queue_limits(&self) -> Option<crate::torrent_queue::QueueLimits> {
+        let p = self.prefs.read();
+        p.queueing_enabled.then(|| crate::torrent_queue::QueueLimits {
+            max_downloads: p.queue_max_active_downloads,
+            max_uploads: p.queue_max_active_uploads,
+            max_active: p.queue_max_active_torrents,
+            ignore_slow: p.queue_ignore_slow_torrents,
+        })
+    }
+
+    /// Backoff schedule for automatic recovery (sanitized: base >= 1s, cap >= base,
+    /// max attempts >= 1).
+    pub fn recovery_backoff(&self) -> crate::repair::BackoffConfig {
+        let p = self.prefs.read();
+        let base = p.recovery_backoff_base_secs.clamp(1, 7 * 86400);
+        let cap = p.recovery_backoff_cap_secs.clamp(base, 30 * 86400);
+        crate::repair::BackoffConfig {
+            base: std::time::Duration::from_secs(base),
+            cap: std::time::Duration::from_secs(cap),
+            max_attempts: p.recovery_max_attempts.clamp(1, 1000),
+        }
+    }
+
+    pub fn on_complete_hook(&self) -> Option<String> {
+        self.prefs.read().on_complete_hook.clone()
+    }
+
+    pub fn move_completed_path(&self) -> Option<String> {
+        self.prefs.read().move_completed_path.clone()
+    }
+
+    pub fn move_completed_copy(&self) -> bool {
+        self.prefs.read().move_completed_copy
+    }
+
+    pub fn incomplete_extension(&self) -> Option<String> {
+        self.prefs
+            .read()
+            .incomplete_extension_str()
+            .map(|s| s.to_owned())
+    }
+
+    pub async fn update(&self, prefs: SessionPreferences) -> anyhow::Result<()> {
+        let prefs = prefs.sanitize();
+        self.soft_recover_on_io_error
+            .store(prefs.soft_recover_on_io_error, Ordering::Relaxed);
+        *self.prefs.write() = prefs.clone();
+        if let Some(parent) = self.path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let tmp = self.path.with_extension("json.tmp");
+        let data = serde_json::to_vec_pretty(&prefs)?;
+        tokio::fs::write(&tmp, &data).await?;
+        tokio::fs::rename(&tmp, &self.path).await?;
+        info!(
+            path=?self.path,
+            soft_recover_on_io_error = prefs.soft_recover_on_io_error,
+            auto_organize_enabled = prefs.auto_organize_enabled,
+            has_incomplete_extension = prefs.incomplete_extension_str().is_some(),
+            completion_actions = prefs.completion_actions.len(),
+            "saved session preferences"
+        );
+        Ok(())
+    }
+    /// Re-read preferences.json from disk into memory (force-reload).
+    pub async fn reload_from_disk(&self) -> anyhow::Result<SessionPreferences> {
+        let prefs = match tokio::fs::read(&self.path).await {
+            Ok(bytes) => serde_json::from_slice::<SessionPreferences>(&bytes)
+                .map(|p| p.sanitize())
+                .map_err(|e| anyhow::anyhow!("parse preferences.json: {e}"))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => SessionPreferences::default(),
+            Err(e) => return Err(e.into()),
+        };
+        self.soft_recover_on_io_error
+            .store(prefs.soft_recover_on_io_error, Ordering::Relaxed);
+        *self.prefs.write() = prefs.clone();
+        info!(path=?self.path, "reloaded session preferences from disk");
+        Ok(prefs)
+    }
+}
+
+pub fn event_log_cap_bytes(mb: u64) -> u64 {
+    crate::event_log::clamp_cap(mb.clamp(1, 1024) * 1024 * 1024)
+}
+
+/// Build incomplete-extension renames for newly added torrents.
+/// Returns a map of file_id -> relative path with the incomplete suffix appended.
+pub fn apply_incomplete_suffix_to_renames(
+    file_infos: &[(usize, PathBuf, bool)],
+    existing: &std::collections::HashMap<usize, PathBuf>,
+    incomplete_ext: &str,
+) -> std::collections::HashMap<usize, PathBuf> {
+    let mut out = existing.clone();
+    for (file_id, relative, is_padding) in file_infos {
+        if *is_padding {
+            continue;
+        }
+        let base = out
+            .get(file_id)
+            .cloned()
+            .unwrap_or_else(|| relative.clone());
+        let s = base.to_string_lossy();
+        if s.ends_with(incomplete_ext) {
+            continue;
+        }
+        let mut os = base.into_os_string();
+        os.push(incomplete_ext);
+        out.insert(*file_id, PathBuf::from(os));
+    }
+    out
+}
+
+/// Spawn a shell hook without blocking the caller. Failures are logged, never fatal.
+#[allow(dead_code)]
+pub fn spawn_shell_hook(hook: &str, env: &[(&str, String)]) {
+    let hook = hook.to_owned();
+    let env: Vec<(String, String)> = env
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), v.clone()))
+        .collect();
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(move || run_shell_hook_sync(&hook, &env)).await;
+        match result {
+            Ok(Ok(status)) => {
+                if status.success() {
+                    info!(?status, "completion shell action finished successfully");
+                } else {
+                    warn!(?status, "completion shell action exited with non-zero status");
+                }
+            }
+            Ok(Err(e)) => warn!(error=?e, "completion shell action failed to start"),
+            Err(e) => warn!(error=?e, "completion shell action task join error"),
+        }
+    });
+}
+
+/// Run a shell hook and wait for it (used inside the ordered action pipeline).
+pub async fn run_shell_hook_async(hook: &str, env: &[(&str, String)]) {
+    let hook = hook.to_owned();
+    let env: Vec<(String, String)> = env
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), v.clone()))
+        .collect();
+    let result = tokio::task::spawn_blocking(move || run_shell_hook_sync(&hook, &env)).await;
+    match result {
+        Ok(Ok(status)) => {
+            if status.success() {
+                info!(?status, "completion shell action finished successfully");
+            } else {
+                warn!(?status, "completion shell action exited with non-zero status");
+            }
+        }
+        Ok(Err(e)) => warn!(error=?e, "completion shell action failed to start"),
+        Err(e) => warn!(error=?e, "completion shell action task join error"),
+    }
+}
+
+/// Run a shell hook, wait, and fail on a non-zero exit (strict pipeline, e.g. finish-and-remove).
+pub async fn run_shell_hook_checked(hook: &str, env: &[(&str, String)]) -> anyhow::Result<()> {
+    let hook = hook.to_owned();
+    let env: Vec<(String, String)> = env
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), v.clone()))
+        .collect();
+    let status = tokio::task::spawn_blocking(move || run_shell_hook_sync(&hook, &env))
+        .await
+        .map_err(|e| anyhow::anyhow!("shell action task failed: {e}"))?
+        .map_err(|e| anyhow::anyhow!("shell action failed to start: {e}"))?;
+    if !status.success() {
+        anyhow::bail!("shell action exited with {status}");
+    }
+    Ok(())
+}
+
+fn run_shell_hook_sync(
+    hook: &str,
+    env: &[(String, String)],
+) -> std::io::Result<std::process::ExitStatus> {
+    #[cfg(windows)]
+    {
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.arg("/C").arg(hook);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        cmd.status()
+    }
+    #[cfg(not(windows))]
+    {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg(hook);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        cmd.status()
+    }
+}
+
+#[cfg(test)]
+mod remove_pref_tests {
+    use super::*;
+
+    #[test]
+    fn remove_prefs_defaults_and_round_trip() {
+        // Older preferences.json without the fields: confirm on, keep files.
+        let p: SessionPreferences =
+            serde_json::from_str(r#"{"soft_recover_on_io_error": false}"#).unwrap();
+        assert!(p.confirm_remove);
+        assert_eq!(p.remove_policy, RemovePolicy::KEEP);
+        assert_eq!(p, SessionPreferences::default());
+
+        // Migration: legacy delete_files -> delete/delete, legacy field not written back.
+        let p: SessionPreferences = serde_json::from_str::<SessionPreferences>(
+            r#"{"soft_recover_on_io_error": false, "confirm_remove": false,
+                "default_remove_action": "delete_files"}"#,
+        )
+        .unwrap()
+        .sanitize();
+        assert!(!p.confirm_remove);
+        assert_eq!(p.remove_policy, RemovePolicy::DELETE);
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["confirm_remove"], false);
+        assert!(v.get("default_remove_action").is_none());
+        assert_eq!(v["remove_policy"]["complete"], "delete");
+        assert_eq!(v["remove_policy"]["incomplete"], "delete");
+
+        let p: SessionPreferences = serde_json::from_str::<SessionPreferences>(
+            r#"{"default_remove_action": "keep_files",
+                "remove_policy": {"complete": "keep", "incomplete": "finish"}}"#,
+        )
+        .unwrap()
+        .sanitize();
+        assert_eq!(p.remove_policy.incomplete, crate::remove_policy::IncompleteRemoveAction::Finish);
+    }
+}
+
+#[cfg(test)]
+mod move_mode_tests {
+    use super::*;
+
+    #[test]
+    fn move_mode_defaults_to_whole_folder() {
+        let p: SessionPreferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(p.move_mode, MoveMode::Folder);
+        assert_eq!(serde_json::to_value(&p).unwrap()["move_mode"], "folder");
+        let p: SessionPreferences = serde_json::from_str(r#"{"move_mode":"files"}"#).unwrap();
+        assert_eq!(p.move_mode, MoveMode::Files);
+    }
+}

@@ -51,7 +51,7 @@ export const Modal: React.FC<ModalProps> = ({
       className="fixed z-301 top-0 left-0 w-full h-full block overflow-x-hidden overflow-y-auto"
     >
       <div
-        className={`bg-surface-raised shadow-lg my-4 mx-4 sm:my-8 sm:mx-auto sm:max-w-2xl rounded ${className}`}
+        className={`bg-surface-raised shadow-lg my-4 mx-4 sm:my-8 sm:mx-auto rounded ${className ?? "sm:max-w-2xl"}`}
       >
         <ModalHeader onClose={onClose} title={title} />
         {children}

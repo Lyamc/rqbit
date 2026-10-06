@@ -8,6 +8,150 @@
 
 Also has a desktop app built with [Tauri](https://tauri.app/).
 
+> **This is a fork of [ikatson/rqbit](https://github.com/ikatson/rqbit).**
+> Everything upstream still works as documented below. The fork adds server features, a larger web UI and a native/WASM GPUI client; see [Fork additions](#fork-additions).
+> Everything new is either off by default or changes nothing until you use it.
+
+## Fork additions
+
+Server settings added by the fork live in `preferences.json` (and `admin.json`, `queue.json`, `torrent-rules.json`, `events.jsonl`), next to the session persistence data. They are edited in the web UI's **Configure** dialog, the GPUI Preferences panel, or through `GET/POST /torrents/preferences`. `GET /` on the HTTP API lists every endpoint.
+
+### Disk error recovery and repair
+
+- **Soft I/O recovery** (`soft_recover_on_io_error`, off by default): when a disk write fails, only the affected piece is invalidated and downloaded again. Without it, the whole torrent goes to an error state.
+- **Backoff**: automatic retries use exponential backoff with ±20% jitter (`recovery_backoff_base_secs`, `recovery_backoff_cap_secs`). After `recovery_max_attempts` consecutive failures, the piece or file is marked **needs attention**. **Fix errors** retries right away.
+- **Damaged-file repair** (`POST /torrents/{id}/repair_files`, "Repair damaged files" in the UIs) is for files with ranges that return EIO on every read. It scans the file (O_DIRECT when possible) and punches holes over the unreadable ranges. If that isn't possible, it falls back to copy-and-replace: everything readable is copied to a temp file that is atomically renamed over the original. Only the pieces overlapping the zeroed ranges are downloaded again. The original is never removed until the replacement is complete.
+- **Auto-repair** (`auto_repair_damaged_files`, off by default) runs that repair automatically when soft recovery flags a file as damaged.
+- **Torrent actions**: Restart (pause + start), Fix errors (re-initialize an errored torrent while keeping pieces that still verify), and Recheck.
+
+### Completion: event hooks and chainable actions
+
+- `completion_actions` is an ordered pipeline that runs when a torrent finishes. Available actions:
+  - `shell`: run a command with `sh -c` / `cmd /C`, with `RQBIT_TORRENT_ID`, `RQBIT_INFO_HASH`, `RQBIT_NAME` and `RQBIT_OUTPUT_FOLDER` set
+  - `move`: move or copy the torrent to a folder. A multi-file torrent always keeps its own folder: it ends up in `<path>/<TorrentName>/...` with its subfolders, never loose in `<path>`. A single-file torrent's file goes straight into `<path>`.
+  - `organize`: see auto-organize below
+  - `drop_incomplete_ext`: remove the incomplete suffix
+- If the list is empty, the legacy settings are used instead: `on_complete_hook`, `move_completed_path` / `move_completed_copy`, and the organize / incomplete-extension toggles.
+- **How completed torrents move** (`move_mode`, used by the `move` and `organize` actions):
+  - `"folder"` (default, "Move the whole folder at once"): when the torrent finishes, its whole folder moves in one go. On the same file system that is a single rename. Across file systems, every file is copied, fsynced and read back to verify it, the copy is renamed into place, and only then is the original removed.
+  - `"files"` ("Move files individually as they complete"): each file moves to `<destination>/<TorrentName>/<subpath>` as soon as it finishes. The torrent keeps downloading the rest and seeds from both places. When it finishes, the remaining files join them. In this mode the remove dialog doesn't ask about finishing the done files ("finish what's done" just deletes the unfinished files, because the finished ones have already moved).
+  - Moves never overwrite. If the destination folder exists and none of the torrent's files clash, the torrent merges into it. If something clashes, it goes to `Name (2)` (or `file (2).ext` for a single file). The incomplete extension comes off before anything moves. Empty folders are cleaned up only inside the old torrent folder. Moved, Copied and Move failed entries show up in Events.
+- **Live move/rename**, including while a torrent is active:
+  - `POST /torrents/{id}/relocate` `{"destination", "copy", "into"}` moves (or copies) a torrent's data. Seeding continues from the new location with no recheck, and it is persisted. With `"into": true`, `destination` is the folder to put the torrent in (a multi-file torrent goes to `<destination>/<TorrentName>`, which is what both UIs send). Without it, `destination` is the torrent's folder itself. The response describes what happened (`output_folder`, `method`: rename/copy, `whole_folder`, `moved_files`). Reads and writes wait during the move instead of failing.
+  - `POST /torrents/{id}/rename_file` `{"file_id", "new_path"}` renames a file on disk. File ids and the piece mapping stay the same.
+- **Auto-organize** (`auto_organize_enabled`, **off by default**): classifies a completed torrent from its name, file names and extensions (anime, tv, movie, game, porn, music, book, software, other) and moves it to `{auto_organize_root}/{type folder}/{name}`. A Torznab category, if the torrent has one, takes priority. The heuristics can be wrong.
+- **Incomplete extension** (`incomplete_extension`, e.g. `.part` or `.!qB`): files get this suffix on disk while downloading, and it is removed on completion. It applies to torrents added after it is set.
+
+### Configure / Admin (qBittorrent-style preferences)
+
+- The web UI's Configure dialog has the tabs Speed, Connection, BitTorrent, Downloads, Organize, Completion, Automation, Interface and Web UI / Admin.
+- **Admin** settings are saved in `admin.json` and apply on the next start (environment variables and CLI flags take precedence). They cover the HTTP listen address, basic auth, listen/announce ports, DHT / LSD / trackers / uTP / TCP / UPnP, SOCKS proxy, IPv4-only, bind device and peer limit.
+- Admin endpoints: `GET /admin`, `POST /admin/config`, `POST /admin/reload` (re-read `preferences.json`) and `POST /admin/restart`. Restart exits with code 75 so systemd `Restart=on-failure` brings the server back.
+- **Torznab categories**: `POST /torrents?torznab_category=<id>` (Newznab/Torznab ids, e.g. 2000 = Movies, 5070 = Anime) stores the category with the torrent. The category survives restarts and is used by auto-organize.
+
+### Adding torrents
+
+- The web UI's **Add** window has three tabs: **Upload** (.torrent files and .zip archives of them), **URLs** (magnets and http(s) links, one per line) and **Browse server**. Browse server walks the server's filesystem, limited to the download folder plus `RQBIT_FS_BROWSE_ROOTS`, a comma- or colon-separated list of absolute paths. Items are staged in a queue before anything is added, with an optional custom output folder.
+- **Magnets never wait and never fail for missing metadata**: `POST /torrents` checks that a magnet is well formed, queues it and answers at once with its id, info hash and `"resolving": true, "state": "resolving_metadata"`. The metadata is fetched in the background for as long as it takes: an attempt (10 min, or `?magnet_timeout_secs=`) that finds no peers is followed by a backoff (1 min doubling to 30 min, no DHT/tracker queries in between), shown as "Resolving metadata (no peers yet)". Placeholders survive restarts. Only malformed input is an error (400 `invalid_input`: bad scheme, no `xt=urn:btih`, bad hash length/encoding, BTv2-only magnet, unparseable .torrent, a URL that can't be fetched or isn't a .torrent). `?defer_metadata=true` is still accepted (no effect); `?wait_for_metadata=true` restores the old blocking add, but still answers the resolving placeholder instead of an error if the metadata doesn't arrive in time. A `list_only` preview of a magnet needs the metadata: without it the answer is 202 `{"resolving": true, "id": null}` (same for `POST /torrents/resolve_magnet`). Progress of an add can be followed with `?add_job_id=` and `GET /add_jobs/{id}` (`resolving_in_background` = queued).
+- **Paused adds**: `POST /torrents?paused=true` (also add jobs and the watch folder) adds paused, including magnets whose metadata is still resolving: the metadata (a few KB, needed to list and choose files) is still fetched (peer lookup via DHT/trackers, metadata exchange only), then the torrent stays paused with no data downloaded; it shows as "Paused · resolving metadata" until then. Preference `when_added` ("When a torrent is added": `start`, the default, or `paused`) is the default for any add that doesn't pass `paused`; an explicit `paused=` wins.
+- **Start after I finish the Add dialog** (`start_after_add_dialog`, off by default): adds from an Add dialog (web Add window, GPUI Add panel, the magnet-link handler) carry `add_dialog_id`; the server adds them paused and answers `"held": true`. The dialog sends `POST /add_dialog/{id}/heartbeat` every 15 s and `POST /add_dialog/{id}/finish` when it closes (Close/Cancel, Escape, auto-close after success; `navigator.sendBeacon` on tab close), which starts everything it held that is still there (removed ones are skipped; "Add paused" adds are never held). If the dialog vanishes without finishing, the server starts them after 150 s without a heartbeat; holds are persisted and started shortly after a restart. API, anorak and watch-folder adds are unaffected.
+- **Transfer from another client** (`?adopt_foreign_incomplete=auto`) adopts partial files another client left behind (`name.!qB`, `.part`, `.incomplete`, ...) before the first check:
+  - a candidate is used only if it is the unique match for a file and its sampled pieces hash-match (or are all zeros)
+  - matching files are renamed into place
+  - nothing is ever deleted or truncated
+- Magnet links / `#add=<magnet>` URLs: see the GPUI client and Preferences > Interface below.
+
+### Events log
+
+- `events.jsonl` is a persistent, size-capped event log (`event_log_max_mb`, default 10 MB). It records:
+  - repairs and damage
+  - I/O errors, aggregated per 60 s
+  - needs-attention flags, rechecks, adoption renames
+  - magnet metadata resolved (waiting for metadata is never logged as a failure)
+  - rules firing, queue rotation, cleanup scans
+  - every torrent removal
+- **Removal logging**: every path writes a `torrent_removed` entry. That covers `/forget`, `/delete`, `/remove`, bulk actions in either UI, rules, finish-what's-done and placeholder magnets. Each entry has the id and name, whether files were kept or deleted, the trigger (`manual`, `automation` or `library`), the endpoint or rule, and the client IP (from `X-Forwarded-For` / `X-Real-IP` behind a proxy) and user agent.
+- API: `GET /events?kind=&severity=&torrent_id=&info_hash=&since=`, `GET /events/summary` (repair counters and unseen counts), `POST /events/counters/reset`. Both UIs have an Events view and a per-torrent Events tab.
+
+### Queueing and detailed status
+
+- **Queueing** (off by default) works like qBittorrent: limits on active downloads, uploads and torrents in total, optionally ignoring slow torrents. Held torrents start in queue order (`GET /torrents/queue`, `POST /torrents/queue/move`, persisted in `queue.json`).
+- **Detailed status** (`status_detail` in torrent stats) is computed on the server from engine state rather than guessed by the client. Values include: queued for checking / downloading / seeding, checking, resolving metadata, downloading, stalled, seeding, moving, renaming, repairing, waiting to retry, needs attention, finishing removal.
+
+### Remove policies
+
+- `POST /torrents/{id}/remove` follows a policy, set separately for complete and incomplete torrents: complete `keep`/`delete`, incomplete `keep`/`delete`/`finish`. The saved default is `remove_policy`, and the UIs' remove dialog is preset from it.
+  - **Finish what's done** (`finish`): deselects files that aren't fully verified and deletes their partial data, runs the completion actions on the finished files, then forgets the torrent. If an action fails, the torrent is kept and flagged.
+- `GET /torrents/remove_preview?ids=` feeds the dialog.
+- `confirm_remove` (on by default) controls whether removing asks first. Deleting files always asks.
+
+### Automation rules
+
+Rules are configured globally (`rules`) with per-torrent overrides (`GET/POST /torrents/{id}/rules`). Counters survive restarts. All rules are off by default.
+
+- **No-progress timeout (stalled)**: an incomplete torrent with no verified progress for N seconds of running time can be paused, flagged, or removed. Removal can keep files, follow the policy, delete, or finish what's done.
+- **Seeding limits**: stop at a seeding time, uploaded amount or ratio. The torrent is paused or removed.
+- **Full-speed window**: seed uncapped for the first N seconds or bytes after completion, then cap this torrent's upload or stop.
+- **Slot rotation** (`queue_seed_rotation_secs`, needs queueing and a max-uploads limit): when more torrents want to seed than there are slots, each seeds for that long before the torrent that waited longest takes its slot.
+
+### Download order
+
+Download order is set at three levels, from general to specific: global defaults (`download_order`), per torrent, and per file (`GET/POST /torrents/{id}/download_order`). The options are:
+- sequential files vs round-robin
+- file order: name, torrent order, smallest first or largest first
+- sequential pieces within a file
+- first/last piece first, for media previews
+
+Streaming priority still comes first.
+
+### Orphan Cleanup
+
+"Clean up orphaned downloads" finds files and folders in the download locations that no torrent uses any more:
+- The scan is a read-only dry run (`GET /cleanup/scan`). It never follows symlinks, skips hidden/system files, and ignores anything modified in the last 60 minutes (`cleanup_min_age_minutes`).
+- Everything a torrent uses is protected, including renamed and incomplete-suffix variants.
+- Selected items can be moved to `<root>/.rqbit-quarantine/<batch>/` (reversible, `POST /cleanup/restore`) or deleted (explicit confirmation required). Every item is re-validated before anything happens.
+- `cleanup_scan_hours` schedules report-only scans.
+- Extra folders can be added with `cleanup_extra_roots`, as long as they are inside the allowed roots.
+
+### Public IP
+
+`GET /public_ip` returns the public IPv4/IPv6 as seen from the server's own network (useful behind a VPN or network namespace). Results are cached for 30 s; `?refresh=true` re-checks. `RQBIT_PUBLIC_IP_CHECK=false` disables the lookups, which contact third-party services. `RQBIT_PUBLIC_IP_URLS_V4` / `_V6` override the providers.
+
+### GPUI client (native and WebAssembly)
+
+A second UI built on [GPUI](https://gpui.rs), Zed's UI framework. It is a pure client of the HTTP API, so it can run on another machine. It covers:
+- the torrent list, with filters, search, sorting, multi-select and context menus
+- a details pane (overview, files, peers, events)
+- the Add panel (files, URLs, browse server)
+- the Events view, Preferences, and Orphan Cleanup
+
+Details are in [crates/rqbit-gpui/README.md](crates/rqbit-gpui/README.md).
+
+- **Native, inside rqbit**: the optional `gpui` feature adds `rqbit gui`. It is off by default and doesn't change the server build.
+
+      cargo build --release -p rqbit --no-default-features --features rust-tls,webui,prometheus,gpui
+      target/release/rqbit gui --url http://127.0.0.1:3030
+
+- **Native, standalone client**: `cargo build --release -p rqbit-gpui --features rustls`, then `rqbit-gpui --url http://host:3030`. `RQBIT_GUI_URL` sets the default URL.
+  - Linux needs pkg-config, libxkbcommon, wayland, libxcb/libX11, fontconfig, freetype and Vulkan. On NixOS use `crates/rqbit-gpui/shell.nix`.
+  - Windows needs MSVC and the Windows SDK.
+- **Default handler for magnet links and .torrent files**:
+  - Use `rqbit gui --register-handlers` (or `rqbit-gpui --register-handlers`; `--unregister-handlers` undoes it), or Preferences > Interface.
+  - Registration is per user: HKCU on Windows, then confirm in Settings > Default apps. On Linux it writes a `.desktop` file and runs `xdg-mime`.
+  - Passing a magnet/URL/file to a running instance hands it to that window.
+  - Windows packaging: `crates/rqbit-gpui/packaging/windows/register-handlers.ps1` and an Inno Setup installer script, `rqbit-gpui.iss`.
+- **WebAssembly at `/gpui/`**: build it with `crates/rqbit-gpui/web/build.sh`. That is a separate workspace pinned to Rust 1.98.1, and it needs `wasm-bindgen-cli` 0.2.120. Copy `web/dist/*` to `$RQBIT_GPUI_WEB_DIR` (default `~/.local/share/rqbit/gpui-web`); the server serves it at `/gpui/`, same-origin. Browser builds (web UI and `/gpui/`) can register as the magnet handler (`navigator.registerProtocolHandler`, `#add=` prefill).
+
+### Building this fork
+
+- Server as deployed (no OpenSSL / Postgres):
+
+      cargo +stable build --release -p rqbit --no-default-features --features rust-tls,webui,prometheus
+
+  Current dependencies (e.g. sqlx for the `postgres` feature) need a recent stable Rust. The `webui` feature needs npm.
+- Feature flags added by the fork: `gpui` (on `rqbit`: the `rqbit gui` subcommand, off by default) and `rustls` (on `rqbit-gpui`: its HTTP client TLS). Upstream flags (`default-tls` / `rust-tls`, `webui`, `postgres`, `prometheus`, ...) are unchanged.
+- Tests: `cargo +stable test -p librqbit --lib`; web UI: `cd crates/librqbit/webui && npm test`.
+
 ## Usage quick start
 
 ### Optional - start the server
@@ -124,9 +268,44 @@ If you have the Rust toolchain installed then you can use the following.
 cargo install rqbit
 ```
 
-## Docker
+## NixOS
 
-Docker images are published at [ikatson/rqbit](https://hub.docker.com/r/ikatson/rqbit)
+Current NixOS already has `services.rqbit`. Use that. No container is required.
+
+```nix
+services.rqbit = {
+  enable = true;
+  downloadDir = "/var/lib/rqbit/downloads";
+  httpHost = "0.0.0.0";
+  httpPort = 3030;
+  openFirewall = true;
+};
+```
+
+`nix/package.nix` installs the static `v9.0.1` Linux binary if you want this release instead of the nixpkgs build:
+
+```nix
+services.rqbit.package = pkgs.callPackage ./nix/package.nix { };
+```
+
+```bash
+nix-build -E 'with import <nixpkgs> {}; callPackage ./nix/package.nix {}'
+```
+
+To keep torrent traffic off the host route, import `nix/module.nix` and run rqbit inside a network namespace that has no path except a VPN:
+
+```nix
+imports = [ /path/to/rqbit/nix/module.nix ];
+
+services.rqbit = {
+  enable = true;
+  httpHost = "0.0.0.0";
+  networkNamespace = "vpn";
+  namespaceService = "vpn-netns.service";
+};
+```
+
+Create the namespace first, and point `/etc/netns/vpn/resolv.conf` at resolvers reached through the tunnel. Leave `openFirewall` off. From the host, open the web UI on the namespace address and port, for example `http://192.0.2.2:3030/web/`.
 
 ## Build
 

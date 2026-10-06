@@ -19,6 +19,30 @@ use crate::{
     type_aliases::{BF, FileInfos, PeerHandle},
 };
 
+/// Error context naming the torrent file an I/O error happened on. Downcast an
+/// `anyhow::Error` to this to find which file failed.
+#[derive(Debug)]
+pub(crate) struct FileIoError {
+    pub file_id: usize,
+    pub write: bool,
+    pub len: usize,
+    pub path: std::path::PathBuf,
+}
+
+impl std::fmt::Display for FileIoError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.write {
+            write!(f, "error writing to file {} ({:?})", self.file_id, self.path)
+        } else {
+            write!(
+                f,
+                "error reading {} bytes, file_id: {} ({:?})",
+                self.len, self.file_id, self.path
+            )
+        }
+    }
+}
+
 pub fn update_hash_from_file<Sha1: ISha1>(
     file_id: usize,
     file_info: &FileInfo,
@@ -74,6 +98,7 @@ impl<'a> FileOps<'a> {
         &self,
         progress: &AtomicU64,
         pause_requested: &AtomicBool,
+        on_read_error: &mut dyn FnMut(usize, ValidPieceIndex, &anyhow::Error),
     ) -> anyhow::Result<BF> {
         let mut have_pieces =
             BF::from_boxed_slice(vec![0u8; self.torrent.lengths().piece_bitfield_bytes()].into());
@@ -157,6 +182,11 @@ impl<'a> FileOps<'a> {
                         "error reading from file {} ({:?}) at {}: {:#}",
                         current_file.index, current_file.fi.relative_filename, pos, &err
                     );
+                    // A missing or short file (e.g. just created, not sized yet) only means
+                    // its pieces aren't downloaded; real read errors are reported.
+                    if !crate::repair::anyhow_is_missing_data(&err) {
+                        on_read_error(current_file.index, piece_info.piece_index, &err);
+                    }
                     current_file.is_broken = true;
                     some_files_broken = true;
                 }
@@ -218,11 +248,11 @@ impl<'a> FileOps<'a> {
                 &mut buf,
                 to_read_in_file,
             )
-            .with_context(|| {
-                format!(
-                    "error reading {to_read_in_file} bytes, file_id: {file_idx} (\"{:?}\")",
-                    fi.relative_filename
-                )
+            .with_context(|| FileIoError {
+                file_id: file_idx,
+                write: false,
+                len: to_read_in_file,
+                path: fi.relative_filename.clone(),
             })?;
 
             piece_remaining_bytes -= to_read_in_file;
@@ -342,11 +372,11 @@ impl<'a> FileOps<'a> {
                 let written = self
                     .files
                     .pwrite_all_vectored(file_idx, absolute_offset, slices)
-                    .with_context(|| {
-                        format!(
-                            "error writing to file {file_idx} (\"{:?}\")",
-                            file_info.relative_filename
-                        )
+                    .with_context(|| FileIoError {
+                        file_id: file_idx,
+                        write: true,
+                        len: to_write,
+                        path: file_info.relative_filename.clone(),
                     })?;
                 debug_assert_eq!(written, to_write);
             }
@@ -359,5 +389,200 @@ impl<'a> FileOps<'a> {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::{
+        fs::File,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicBool, AtomicU64},
+    };
+
+    use buffers::ByteBufOwned;
+    use clone_to_owned::CloneToOwned;
+    use librqbit_core::torrent_metainfo::{ValidatedTorrentMetaV1Info, torrent_from_bytes};
+    use sha1w::{ISha1, Sha1};
+
+    use super::FileOps;
+    use crate::{
+        file_info::FileInfo,
+        storage::TorrentStorage,
+        torrent_state::{ManagedTorrentShared, TorrentMetadata},
+        type_aliases::FileInfos,
+    };
+
+    const PIECE_LEN: usize = 16384;
+    // One big file, then tiny trailing files that all share the last piece.
+    const FILES: &[(&str, usize)] = &[
+        ("a.bin", 20000),
+        ("t1.txt", 300),
+        ("t2.txt", 90),
+        ("t3.txt", 60),
+        ("t4.txt", 50),
+        ("t5.txt", 40),
+    ];
+
+    /// Reads real files with the same syscall as the filesystem storage; can inject EIO.
+    struct TestStorage {
+        files: Vec<File>,
+        eio_file: Option<usize>,
+    }
+
+    impl TorrentStorage for TestStorage {
+        fn init(&mut self, _: &ManagedTorrentShared, _: &TorrentMetadata) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn pread_exact(&self, file_id: usize, offset: u64, buf: &mut [u8]) -> anyhow::Result<()> {
+            use std::os::unix::fs::FileExt;
+            if self.eio_file == Some(file_id) {
+                return Err(std::io::Error::from_raw_os_error(libc::EIO).into());
+            }
+            Ok(self.files[file_id].read_exact_at(buf, offset)?)
+        }
+        fn pwrite_all(&self, _: usize, _: u64, _: &[u8]) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        fn remove_file(&self, _: usize, _: &Path) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn remove_directory_if_empty(&self, _: &Path) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn ensure_file_length(&self, _: usize, _: u64) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn take(&self) -> anyhow::Result<Box<dyn TorrentStorage>> {
+            unimplemented!()
+        }
+    }
+
+    fn bstr(b: &[u8]) -> Vec<u8> {
+        let mut v = format!("{}:", b.len()).into_bytes();
+        v.extend_from_slice(b);
+        v
+    }
+
+    fn content(len: usize, seed: u8) -> Vec<u8> {
+        (0..len).map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed)).collect()
+    }
+
+    fn make_torrent() -> (ValidatedTorrentMetaV1Info<ByteBufOwned>, FileInfos, Vec<Vec<u8>>) {
+        let datas: Vec<Vec<u8>> = FILES
+            .iter()
+            .enumerate()
+            .map(|(i, (_, l))| content(*l, i as u8))
+            .collect();
+        let all: Vec<u8> = datas.concat();
+        let mut pieces = Vec::new();
+        for chunk in all.chunks(PIECE_LEN) {
+            let mut h = Sha1::new();
+            h.update(chunk);
+            pieces.extend_from_slice(&h.finish());
+        }
+        let mut info = b"d5:filesl".to_vec();
+        for (name, len) in FILES {
+            info.extend_from_slice(format!("d6:lengthi{len}e4:pathl").as_bytes());
+            info.extend(bstr(name.as_bytes()));
+            info.extend_from_slice(b"ee");
+        }
+        info.extend_from_slice(b"e4:name");
+        info.extend(bstr(b"Tiny.Trailing.Pack"));
+        info.extend_from_slice(format!("12:piece lengthi{PIECE_LEN}e6:pieces").as_bytes());
+        info.extend(bstr(&pieces));
+        info.extend_from_slice(b"e");
+        let mut torrent = b"d4:info".to_vec();
+        torrent.extend(info);
+        torrent.extend_from_slice(b"e");
+
+        let t = torrent_from_bytes(&torrent).unwrap();
+        let info = t.info.data.clone_to_owned(None).validate().unwrap();
+        let file_infos = info
+            .iter_file_details_ext()
+            .map(|fd| FileInfo {
+                relative_filename: fd.details.filename.to_pathbuf(),
+                offset_in_torrent: fd.offset,
+                piece_range: fd.pieces,
+                len: fd.details.len,
+                attrs: fd.details.attrs(),
+            })
+            .collect();
+        (info, file_infos, datas)
+    }
+
+    /// Writes each file with the given length (None = full content) and opens them.
+    fn write_files(dir: &Path, datas: &[Vec<u8>], lens: &[Option<usize>]) -> Vec<File> {
+        datas
+            .iter()
+            .zip(lens)
+            .enumerate()
+            .map(|(i, (d, l))| {
+                let p: PathBuf = dir.join(FILES[i].0);
+                std::fs::write(&p, &d[..l.unwrap_or(d.len())]).unwrap();
+                File::open(&p).unwrap()
+            })
+            .collect()
+    }
+
+    fn check(
+        info: &ValidatedTorrentMetaV1Info<ByteBufOwned>,
+        fi: &FileInfos,
+        storage: &TestStorage,
+    ) -> (Vec<bool>, Vec<(usize, u32)>) {
+        let mut errors = Vec::new();
+        let have = FileOps::new(info, storage, fi)
+            .initial_check(
+                &AtomicU64::new(0),
+                &AtomicBool::new(false),
+                &mut |file_id, piece, _e| errors.push((file_id, piece.get())),
+            )
+            .unwrap();
+        let have = (0..info.lengths().total_pieces() as usize)
+            .map(|i| have[i])
+            .collect();
+        (have, errors)
+    }
+
+    #[test]
+    fn initial_check_fresh_and_short_files_are_not_read_errors() {
+        let (info, fi, datas) = make_torrent();
+        assert_eq!(info.lengths().total_pieces(), 2);
+        let dir = tempfile::tempdir().unwrap();
+
+        // Complete data: everything verified, no errors.
+        let files = write_files(dir.path(), &datas, &[None; 6]);
+        let (have, errors) = check(&info, &fi, &TestStorage { files, eio_file: None });
+        assert_eq!(have, vec![true, true]);
+        assert!(errors.is_empty());
+
+        // Fresh add: every file just created with length 0.
+        let files = write_files(dir.path(), &datas, &[Some(0); 6]);
+        let (have, errors) = check(&info, &fi, &TestStorage { files, eio_file: None });
+        assert_eq!(have, vec![false, false]);
+        assert!(errors.is_empty(), "fresh files reported as read errors: {errors:?}");
+
+        // Partially downloaded: one tiny trailing file short, another empty.
+        let mut lens = [None; 6];
+        lens[3] = Some(10);
+        lens[5] = Some(0);
+        let files = write_files(dir.path(), &datas, &lens);
+        let (have, errors) = check(&info, &fi, &TestStorage { files, eio_file: None });
+        assert_eq!(have, vec![true, false]);
+        assert!(errors.is_empty(), "short files reported as read errors: {errors:?}");
+    }
+
+    #[test]
+    fn initial_check_reports_real_disk_errors() {
+        let (info, fi, datas) = make_torrent();
+        let dir = tempfile::tempdir().unwrap();
+        let files = write_files(dir.path(), &datas, &[None; 6]);
+        let storage = TestStorage {
+            files,
+            eio_file: Some(3),
+        };
+        let (have, errors) = check(&info, &fi, &storage);
+        assert_eq!(have, vec![true, false]);
+        assert_eq!(errors, vec![(3, 1)]);
     }
 }

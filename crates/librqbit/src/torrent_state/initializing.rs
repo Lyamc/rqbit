@@ -33,6 +33,8 @@ pub struct TorrentStateInitializing {
     pub(crate) checked_bytes: AtomicU64,
     pause_requested: AtomicBool,
     check_running: AtomicBool,
+    /// Holds an init slot (past the concurrent-init semaphore) and is checking.
+    checking: AtomicBool,
     previously_errored: bool,
 }
 
@@ -52,6 +54,7 @@ impl TorrentStateInitializing {
             checked_bytes: AtomicU64::new(0),
             pause_requested: AtomicBool::new(false),
             check_running: AtomicBool::new(false),
+            checking: AtomicBool::new(false),
             previously_errored,
         }
     }
@@ -80,7 +83,21 @@ impl TorrentStateInitializing {
     }
 
     pub(crate) fn finish_check(&self) {
+        self.checking.store(false, Ordering::Release);
         self.check_running.store(false, Ordering::Release);
+    }
+
+    pub(crate) fn mark_checking(&self) {
+        self.checking.store(true, Ordering::Release);
+    }
+
+    pub fn is_checking(&self) -> bool {
+        self.checking.load(Ordering::Acquire)
+    }
+
+    /// A check task was started (it may still be waiting for an init slot).
+    pub fn is_check_requested(&self) -> bool {
+        self.check_running.load(Ordering::Acquire)
     }
 
     async fn validate_fastresume(
@@ -154,7 +171,19 @@ impl TorrentStateInitializing {
                     })
                     .enumerate()
                 {
-                    if fo.check_piece(piece_id).is_err() {
+                    if let Err(e) = fo.check_piece(piece_id) {
+                        if let Some(f) = e.downcast_ref::<crate::file_ops::FileIoError>() {
+                            self.shared.note_check_read_error(
+                                f.file_id,
+                                piece_id.get(),
+                                &e,
+                                self.metadata.info.name().map(|n| n.to_string()),
+                                self.metadata
+                                    .file_infos
+                                    .get(f.file_id)
+                                    .map(|fi| fi.relative_filename.clone()),
+                            );
+                        }
                         return true;
                     }
 
@@ -217,8 +246,21 @@ impl TorrentStateInitializing {
                     .shared
                     .spawner
                     .block_in_place_with_semaphore(|| {
+                        let name = self.metadata.info.name().map(|n| n.to_string());
+                        let mut on_err = |file_id: usize, piece: librqbit_core::lengths::ValidPieceIndex, e: &anyhow::Error| {
+                            self.shared.note_check_read_error(
+                                file_id,
+                                piece.get(),
+                                e,
+                                name.clone(),
+                                self.metadata
+                                    .file_infos
+                                    .get(file_id)
+                                    .map(|fi| fi.relative_filename.clone()),
+                            )
+                        };
                         FileOps::new(&self.metadata.info, &self.files, &self.metadata.file_infos)
-                            .initial_check(&self.checked_bytes, &self.pause_requested)
+                            .initial_check(&self.checked_bytes, &self.pause_requested, &mut on_err)
                     })
                     .await?;
                 bitv_factory

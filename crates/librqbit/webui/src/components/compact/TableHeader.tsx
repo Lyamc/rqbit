@@ -1,6 +1,7 @@
 import { SortIcon } from "../SortIcon";
 import { TableSortColumn } from "./TorrentTable";
 import { SortDirection } from "../../helper/torrentFilters";
+import { TORRENT_TABLE_CELL_PAD } from "./torrentTableLayout";
 
 interface TableHeaderProps {
   column: TableSortColumn;
@@ -29,8 +30,9 @@ export const TableHeader: React.FC<TableHeaderProps> = ({
         : "text-left";
 
   return (
-    <th
-      className={`px-2 py-2 text-secondary cursor-pointer hover:text-text select-none whitespace-nowrap ${alignClass} ${className}`}
+    <div
+      role="columnheader"
+      className={`${TORRENT_TABLE_CELL_PAD} py-2 text-secondary cursor-pointer hover:text-text select-none whitespace-nowrap ${alignClass} ${className}`}
       onClick={() => onSort(column)}
     >
       {label}
@@ -39,6 +41,6 @@ export const TableHeader: React.FC<TableHeaderProps> = ({
         sortColumn={sortColumn}
         sortDirection={sortDirection}
       />
-    </th>
+    </div>
   );
 };

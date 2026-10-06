@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+import { StatusBadge } from "../StatusBadge";
 import {
   TorrentListItem,
   STATE_INITIALIZING,
@@ -8,6 +10,9 @@ import { formatBytes } from "../../helper/formatBytes";
 import { getCompletionETA } from "../../helper/getCompletionETA";
 import { PlaylistLink } from "../buttons/PlaylistButton";
 import { PiecesCanvas } from "./PiecesCanvas";
+import { DamagedFilesNotice } from "../DamagedFilesNotice";
+import { TorrentEventsSection } from "../events/TorrentEventsSection";
+import { floorPercent, formatProgress } from "../../helper/progress";
 
 interface OverviewTabProps {
   torrent: TorrentListItem | null;
@@ -27,6 +32,10 @@ const LV: React.FC<{
 
 export const OverviewTab: React.FC<OverviewTabProps> = ({ torrent }) => {
   const statsResponse = torrent?.stats ?? null;
+  // Pieces we have, counted from the haves bitmap (the live snapshot's
+  // counter only covers this session).
+  const [havePieces, setHavePieces] = useState<number | null>(null);
+  useEffect(() => setHavePieces(null), [torrent?.id]);
 
   if (!torrent || !statsResponse) {
     return <div className="p-3 text-tertiary">Loading...</div>;
@@ -43,16 +52,16 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ torrent }) => {
 
   const totalPieces = torrent.total_pieces ?? 0;
   const downloadedPieces =
-    statsResponse.live?.snapshot.downloaded_and_checked_pieces ?? 0;
+    havePieces ??
+    (statsResponse.finished
+      ? totalPieces
+      : (statsResponse.live?.snapshot.downloaded_and_checked_pieces ?? 0));
   const pieceSize = totalPieces > 0 ? totalBytes / totalPieces : 0;
 
   const totalUploadedBytes = statsResponse.live?.snapshot.uploaded_bytes ?? 0;
 
-  const progressPct = error
-    ? 100
-    : totalBytes === 0
-      ? 100
-      : (progressBytes / totalBytes) * 100;
+  // Floored at one decimal: 99.99% shows 99.9%, never 100.0% early.
+  const progressPct = floorPercent(progressBytes, totalBytes, 1);
 
   const downSpeed = statsResponse.live?.download_speed?.human_readable ?? "-";
   const upSpeed = statsResponse.live?.upload_speed?.human_readable ?? "-";
@@ -83,9 +92,20 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ torrent }) => {
         <span className="truncate font-medium flex-1" title={name}>
           {name}
         </span>
-        <span className={`shrink-0 ${stateDisplay.color}`}>
-          {stateDisplay.text}
-        </span>
+        {statsResponse.status_detail ? (
+          <span className="shrink-0 flex items-center gap-2">
+            {statsResponse.queue_position ? (
+              <span className="text-tertiary" data-testid="detail-queue-position">
+                Queue #{statsResponse.queue_position}
+              </span>
+            ) : null}
+            <StatusBadge stats={statsResponse} className="text-sm" />
+          </span>
+        ) : (
+          <span className={`shrink-0 ${stateDisplay.color}`}>
+            {stateDisplay.text}
+          </span>
+        )}
       </div>
       {/* Pieces visualization */}
       {totalPieces > 0 && (
@@ -94,6 +114,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ torrent }) => {
             torrentId={torrent.id}
             totalPieces={totalPieces}
             stats={statsResponse}
+            onHaveCount={setHavePieces}
           />
         </div>
       )}
@@ -101,7 +122,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ torrent }) => {
       {/* Main stats line */}
       <div className="flex flex-wrap gap-x-4 gap-y-1">
         <span>
-          <LV label="Progress" value={`${progressPct.toFixed(1)}%`} />
+          <LV label="Progress" value={`${formatProgress(progressBytes, totalBytes, 1)}%`} />
           <span className="text-tertiary">
             {" "}
             ({formatBytes(progressBytes)}/{formatBytes(totalBytes)})
@@ -173,6 +194,8 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ torrent }) => {
 
       {/* Error */}
       {error && <div className="text-error">{error}</div>}
+      <DamagedFilesNotice torrent={torrent} />
+      <TorrentEventsSection torrent={torrent} />
     </div>
   );
 };

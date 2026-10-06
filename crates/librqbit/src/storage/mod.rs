@@ -33,7 +33,7 @@ pub mod middleware;
 use std::{
     any::{Any, TypeId},
     io::IoSlice,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use librqbit_core::lengths::ValidPieceIndex;
@@ -172,6 +172,57 @@ pub trait TorrentStorage: Send + Sync {
     /// This is used to make the underlying object useless when e.g. pausing the torrent.
     fn take(&self) -> anyhow::Result<Box<dyn TorrentStorage>>;
 
+
+    /// Rename a file on-disk path while keeping the same file_id / piece mapping.
+    /// Default: not supported.
+    fn rename_file(
+        &self,
+        _shared: &ManagedTorrentShared,
+        _metadata: &TorrentMetadata,
+        _file_id: usize,
+        _new_relative_path: &Path,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("rename_file not supported by this storage")
+    }
+
+    /// Close every file, run `f` (which moves the files on disk, see
+    /// [`crate::relocate::execute`]), then reopen every file where the outcome says it is.
+    /// Default: not supported.
+    fn relocate_files(
+        &self,
+        _shared: &ManagedTorrentShared,
+        _metadata: &TorrentMetadata,
+        _f: &mut dyn FnMut() -> crate::relocate::Outcome,
+    ) -> anyhow::Result<crate::relocate::Outcome> {
+        anyhow::bail!("moving files is not supported by this storage")
+    }
+
+    /// Close only `file_id`, run `f` (moves that one file and returns its new absolute
+    /// path), reopen it there; on error it is reopened where it was.
+    /// Default: not supported.
+    fn move_one_file(
+        &self,
+        _shared: &ManagedTorrentShared,
+        _metadata: &TorrentMetadata,
+        _file_id: usize,
+        _f: &mut dyn FnMut(&Path) -> anyhow::Result<PathBuf>,
+    ) -> anyhow::Result<PathBuf> {
+        anyhow::bail!("moving files is not supported by this storage")
+    }
+
+    /// Close the handle to `file_id`, run `f` (which may replace the file on disk at the
+    /// same path), then reopen it. The file is reopened even if `f` fails.
+    /// Default: not supported.
+    fn replace_file(
+        &self,
+        _shared: &ManagedTorrentShared,
+        _metadata: &TorrentMetadata,
+        _file_id: usize,
+        _f: &mut dyn FnMut() -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("replace_file not supported by this storage")
+    }
+
     /// Callback called every time a piece has completed and has been validated.
     /// Default implementation does nothing, but can be override in trait implementations.
     fn on_piece_completed(&self, _piece_index: ValidPieceIndex) -> anyhow::Result<()> {
@@ -219,6 +270,46 @@ impl<U: TorrentStorage + ?Sized> TorrentStorage for Box<U> {
         metadata: &TorrentMetadata,
     ) -> anyhow::Result<()> {
         (**self).init(shared, metadata)
+    }
+
+
+    fn rename_file(
+        &self,
+        shared: &ManagedTorrentShared,
+        metadata: &TorrentMetadata,
+        file_id: usize,
+        new_relative_path: &Path,
+    ) -> anyhow::Result<()> {
+        (**self).rename_file(shared, metadata, file_id, new_relative_path)
+    }
+
+    fn relocate_files(
+        &self,
+        shared: &ManagedTorrentShared,
+        metadata: &TorrentMetadata,
+        f: &mut dyn FnMut() -> crate::relocate::Outcome,
+    ) -> anyhow::Result<crate::relocate::Outcome> {
+        (**self).relocate_files(shared, metadata, f)
+    }
+
+    fn move_one_file(
+        &self,
+        shared: &ManagedTorrentShared,
+        metadata: &TorrentMetadata,
+        file_id: usize,
+        f: &mut dyn FnMut(&Path) -> anyhow::Result<PathBuf>,
+    ) -> anyhow::Result<PathBuf> {
+        (**self).move_one_file(shared, metadata, file_id, f)
+    }
+
+    fn replace_file(
+        &self,
+        shared: &ManagedTorrentShared,
+        metadata: &TorrentMetadata,
+        file_id: usize,
+        f: &mut dyn FnMut() -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        (**self).replace_file(shared, metadata, file_id, f)
     }
 
     fn on_piece_completed(&self, piece_id: ValidPieceIndex) -> anyhow::Result<()> {

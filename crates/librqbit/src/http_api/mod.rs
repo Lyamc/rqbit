@@ -20,7 +20,9 @@ use crate::api::Api;
 use crate::ApiError;
 use crate::api::Result;
 
+mod gpui_web;
 mod handlers;
+mod public_ip;
 mod timeout;
 #[cfg(feature = "webui")]
 mod webui;
@@ -29,6 +31,7 @@ mod webui;
 pub struct HttpApi {
     api: Api,
     opts: HttpApiOptions,
+    public_ip: Arc<public_ip::PublicIpMonitor>,
 }
 
 #[derive(Debug, Default)]
@@ -82,6 +85,7 @@ impl HttpApi {
         Self {
             api,
             opts: opts.unwrap_or_default(),
+            public_ip: public_ip::PublicIpMonitor::from_env(),
         }
     }
 
@@ -107,6 +111,17 @@ impl HttpApi {
             let webui_router = webui::make_webui_router();
             main_router = main_router.nest("/web/", webui_router);
             main_router = main_router.route("/web", get(|| async { Redirect::permanent("./web/") }))
+        }
+
+        // Browser build of the GPUI client (static files from a directory).
+        {
+            use axum::response::Redirect;
+
+            main_router = main_router.nest("/gpui/", gpui_web::make_gpui_web_router());
+            main_router = main_router.route(
+                "/gpui",
+                axum::routing::get(|| async { Redirect::permanent("./gpui/") }),
+            );
         }
 
         #[cfg(feature = "prometheus")]
@@ -202,7 +217,9 @@ impl HttpApi {
             )
             .into_make_service_with_connect_info::<librqbit_dualstack_sockets::WrappedSocketAddr>();
 
+        let public_ip = state.public_ip.clone();
         async move {
+            public_ip.spawn();
             axum::serve(listener, app)
                 .await
                 .context("error running HTTP API")

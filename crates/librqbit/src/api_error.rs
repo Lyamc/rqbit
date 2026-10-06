@@ -86,6 +86,14 @@ impl ApiError {
         }
     }
 
+    /// Malformed input (400, `error_kind: "invalid_input"`).
+    pub fn invalid_input(e: anyhow::Error) -> Self {
+        Self {
+            status: Some(StatusCode::BAD_REQUEST),
+            kind: ApiErrorKind::InvalidInput(e),
+        }
+    }
+
     pub fn status(&self) -> StatusCode {
         self.status.unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
     }
@@ -101,6 +109,8 @@ pub enum ApiErrorKind {
     Unauthorized,
     #[error("{0}")]
     Text(&'static str),
+    #[error("{0:#}")]
+    InvalidInput(anyhow::Error),
 
     // TODO: consider just boxing all other errors into anyhow
     #[error(transparent)]
@@ -140,6 +150,7 @@ impl Serialize for ApiError {
                 ApiErrorKind::OtherError(_) => "internal_error",
                 ApiErrorKind::OtherCore(_) => "internal_error",
                 ApiErrorKind::Text(_) => "internal_error",
+                ApiErrorKind::InvalidInput(_) => "invalid_input",
             },
             human_readable: format!("{self}"),
             status: self.status().as_u16(),

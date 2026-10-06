@@ -30,6 +30,13 @@ pub struct SerializedTorrent {
     output_folder: PathBuf,
     only_files: Option<Vec<usize>>,
     is_paused: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file_renames: Option<std::collections::HashMap<usize, PathBuf>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    torznab_category: Option<u32>,
+    /// "Move files individually as they complete": the torrent folder being filled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    move_dest: Option<PathBuf>,
 }
 
 impl SerializedTorrent {
@@ -59,6 +66,10 @@ impl SerializedTorrent {
             ),
             only_files: self.only_files,
             overwrite: true,
+            file_renames: self.file_renames,
+            torznab_category: self.torznab_category,
+            restored: true,
+            move_dest: self.move_dest,
             ..Default::default()
         };
 

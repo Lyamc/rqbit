@@ -6,6 +6,9 @@ import { Speed } from "./Speed";
 import { formatBytes } from "../helper/formatBytes";
 import { getCompletionETA } from "../helper/getCompletionETA";
 import { StatusIcon } from "./StatusIcon";
+import { DamagedFilesNotice } from "./DamagedFilesNotice";
+import { StatusBadge } from "./StatusBadge";
+import { floorPercent } from "../helper/progress";
 
 export const TorrentCardContent: React.FC<{
   torrent: TorrentListItem;
@@ -17,11 +20,11 @@ export const TorrentCardContent: React.FC<{
   const totalBytes = statsResponse?.total_bytes ?? 1;
   const progressBytes = statsResponse?.progress_bytes ?? 0;
   const finished = statsResponse?.finished || false;
-  const progressPercentage = error
-    ? 100
-    : totalBytes == 0
-      ? 100
-      : (progressBytes / totalBytes) * 100;
+  const noMetadata =
+    (torrent.total_pieces ?? 0) === 0 && !finished && totalBytes === 0;
+  const progressPercentage = noMetadata
+    ? 0
+    : floorPercent(progressBytes, totalBytes, 2);
 
   const formatPeersString = () => {
     let peer_stats = statsResponse?.live?.snapshot.peer_stats;
@@ -56,7 +59,9 @@ export const TorrentCardContent: React.FC<{
             <div className="text-left text-sm sm:text-base lg:text-lg text-ellipsis break-all line-clamp-2 sm:line-clamp-none">
               {torrent.name}
             </div>
+            <StatusBadge stats={statsResponse} className="shrink-0" />
           </div>
+          <DamagedFilesNotice torrent={torrent} />
           {error ? (
             <p className="text-error">
               <strong>Error:</strong> {error}

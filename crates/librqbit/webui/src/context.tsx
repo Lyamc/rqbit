@@ -17,6 +17,18 @@ export const APIContext = createContext<RqbitAPI>({
   uploadTorrent: () => {
     throw new Error("Function not implemented.");
   },
+  uploadTorrentFromServerPath: () => {
+    throw new Error("Function not implemented.");
+  },
+  fsRoots: () => {
+    throw new Error("Function not implemented.");
+  },
+  fsList: () => {
+    throw new Error("Function not implemented.");
+  },
+  extractUpload: () => {
+    throw new Error("Function not implemented.");
+  },
   updateOnlyFiles: () => {
     throw new Error("Function not implemented.");
   },
@@ -24,6 +36,12 @@ export const APIContext = createContext<RqbitAPI>({
     throw new Error("Function not implemented.");
   },
   start: () => {
+    throw new Error("Function not implemented.");
+  },
+  restart: () => {
+    throw new Error("Function not implemented.");
+  },
+  fixErrors: () => {
     throw new Error("Function not implemented.");
   },
   forget: () => {
@@ -51,6 +69,30 @@ export const APIContext = createContext<RqbitAPI>({
     throw new Error("Function not implemented.");
   },
   setLimits: function (limits: LimitsConfig): Promise<void> {
+    throw new Error("Function not implemented.");
+  },
+  getPreferences: function () {
+    throw new Error("Function not implemented.");
+  },
+  renameFile: function () {
+    return Promise.reject(new Error("API not set"));
+  },
+  relocateTorrent: function () {
+    return Promise.reject(new Error("API not set"));
+  },
+  setPreferences: function () {
+    throw new Error("Function not implemented.");
+  },
+  getAdminStatus: function () {
+    throw new Error("Function not implemented.");
+  },
+  updateAdminConfig: function () {
+    throw new Error("Function not implemented.");
+  },
+  reloadPreferences: function () {
+    throw new Error("Function not implemented.");
+  },
+  restartProcess: function () {
     throw new Error("Function not implemented.");
   },
 });

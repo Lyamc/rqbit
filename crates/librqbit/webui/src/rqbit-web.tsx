@@ -9,6 +9,8 @@ import { useTorrentStore } from "./stores/torrentStore";
 import { useErrorStore } from "./stores/errorStore";
 import { AlertModal } from "./components/modal/AlertModal";
 import { useStatsStore } from "./stores/statsStore";
+import { useUIStore } from "./stores/uiStore";
+import { usePrefsStore } from "./stores/prefsStore";
 import { Footer } from "./components/Footer";
 import { SettingsButtons } from "./components/SettingsButtons";
 
@@ -45,6 +47,10 @@ export const RqbitWebUI = (props: {
     try {
       const response = await API.listTorrents({ withStats: true });
       setTorrents(response.torrents);
+      // Keep the selection across polls; drop torrents that went away.
+      useUIStore
+        .getState()
+        .pruneSelection(new Set(response.torrents.map((t) => t.id)));
       setOtherError(null);
 
       // Determine polling interval based on torrent states
@@ -68,6 +74,15 @@ export const RqbitWebUI = (props: {
   useEffect(() => {
     setRefreshTorrents(refreshTorrents as unknown as () => void);
   }, []);
+
+  // Preferences the UI itself uses (remove/delete behaviour); refreshed when
+  // the window regains focus in case another client changed them.
+  useEffect(() => {
+    const load = () => usePrefsStore.getState().loadPreferences(API);
+    load();
+    window.addEventListener("focus", load);
+    return () => window.removeEventListener("focus", load);
+  }, [API]);
 
   useEffect(() => {
     return customSetInterval(async () => refreshTorrents(), 0);

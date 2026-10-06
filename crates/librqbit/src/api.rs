@@ -1,4 +1,4 @@
-use std::{collections::HashSet, marker::PhantomData, net::SocketAddr, str::FromStr, sync::Arc};
+use std::{collections::HashSet, marker::PhantomData, net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc};
 
 use anyhow::Context;
 use buffers::ByteBufOwned;
@@ -41,6 +41,7 @@ pub struct Api {
     rust_log_reload_tx: Option<UnboundedSender<String>>,
     #[cfg(feature = "tracing-subscriber-utils")]
     line_broadcast: Option<LineBroadcast>,
+    restart_tx: Option<UnboundedSender<()>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -175,6 +176,20 @@ pub struct ApiTorrentListOpts {
     pub with_stats: bool,
 }
 
+
+#[derive(serde::Serialize)]
+pub struct AdminStatusResponse {
+    pub version: String,
+    pub preferences_path: String,
+    pub admin_path: String,
+    pub effective_http_listen_addr: Option<String>,
+    pub env_http_listen_addr: Option<String>,
+    pub env_basic_auth_set: bool,
+    pub persisted: crate::AdminConfigPublic,
+    pub restart_supported: bool,
+    pub notes: Vec<String>,
+}
+
 impl Api {
     pub fn new(
         session: Arc<Session>,
@@ -184,13 +199,27 @@ impl Api {
         Self {
             session,
             rust_log_reload_tx,
+            restart_tx: None,
             #[cfg(feature = "tracing-subscriber-utils")]
             line_broadcast,
         }
     }
 
+    pub fn with_restart_tx(mut self, tx: UnboundedSender<()>) -> Self {
+        self.restart_tx = Some(tx);
+        self
+    }
+
     pub fn session(&self) -> &Arc<Session> {
         &self.session
+    }
+
+    /// `idx` names a magnet still resolving metadata (and not a regular torrent).
+    fn pending_id(&self, idx: TorrentIdOrHash) -> Option<usize> {
+        if self.session.get(idx).is_some() {
+            return None;
+        }
+        self.session.pending.resolve_idx(idx)
     }
 
     pub fn mgr_handle(&self, idx: TorrentIdOrHash) -> Result<ManagedTorrentHandle> {
@@ -218,12 +247,11 @@ impl Api {
                         info_hash: mgr.shared().info_hash.as_string(),
                         name: mgr.name(),
                         output_folder: mgr
-                            .shared()
-                            .options
-                            .output_folder
+                            .output_folder()
                             .to_string_lossy()
                             .into_owned(),
                         total_pieces,
+                        torznab_category: mgr.torznab_category(),
 
                         // These will be filled in /details and /stats endpoints
                         files: None,
@@ -234,30 +262,52 @@ impl Api {
                     }
                     r
                 })
-                .collect()
+                .collect::<Vec<_>>()
         });
+        let mut items = items;
+        // Magnets still resolving metadata (reserved ids, no files yet).
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        for pm in self.session.pending.list() {
+            if items.iter().any(|t| t.id == Some(pm.id) || t.info_hash == pm.info_hash) {
+                continue;
+            }
+            items.push(pending_details(&pm, opts.with_stats.then(|| pm.stats(now))));
+        }
         TorrentListResponse { torrents: items }
     }
 
     pub fn api_torrent_details(&self, idx: TorrentIdOrHash) -> Result<TorrentDetailsResponse> {
+        if self.session.get(idx).is_none()
+            && let Some(pm) = self.session.pending.resolve_idx(idx).and_then(|id| self.session.pending.get(id))
+        {
+            let mut d = pending_details(&pm, None);
+            d.files = Some(vec![]);
+            return Ok(d);
+        }
         let handle = self.mgr_handle(idx)?;
         let info_hash = handle.shared().info_hash;
         let only_files = handle.only_files();
         let output_folder = handle
-            .shared()
-            .options
-            .output_folder
+            .output_folder()
             .to_string_lossy()
             .into_owned()
             .to_string();
-        make_torrent_details(
-            Some(handle.id()),
-            &info_hash,
-            handle.metadata.load().as_ref().map(|r| &r.info),
-            handle.name().as_deref(),
-            only_files.as_deref(),
-            output_folder,
-        )
+        {
+            let renames = handle.file_renames();
+            make_torrent_details(
+                Some(handle.id()),
+                &info_hash,
+                handle.metadata.load().as_ref().map(|r| &r.info),
+                handle.name().as_deref(),
+                only_files.as_deref(),
+                output_folder,
+                &renames,
+                handle.torznab_category(),
+            )
+        }
     }
 
     pub fn api_session_stats(&self) -> SessionStatsSnapshot {
@@ -292,6 +342,10 @@ impl Api {
         &self,
         idx: TorrentIdOrHash,
     ) -> Result<EmptyJsonResponse> {
+        if let Some(id) = self.pending_id(idx) {
+            self.session.pending_pause(id);
+            return Ok(Default::default());
+        }
         let handle = self.mgr_handle(idx)?;
         self.session()
             .pause(&handle)
@@ -304,6 +358,10 @@ impl Api {
         &self,
         idx: TorrentIdOrHash,
     ) -> Result<EmptyJsonResponse> {
+        if let Some(id) = self.pending_id(idx) {
+            self.session.pending_start(id);
+            return Ok(Default::default());
+        }
         let handle = self.mgr_handle(idx)?;
         self.session
             .unpause(&handle)
@@ -312,12 +370,194 @@ impl Api {
         Ok(Default::default())
     }
 
-    pub async fn api_torrent_action_forget(
+    pub async fn api_torrent_action_restart(
         &self,
         idx: TorrentIdOrHash,
     ) -> Result<EmptyJsonResponse> {
+        let handle = self.mgr_handle(idx)?;
+        let _ = self.session().pause(&handle).await;
         self.session
-            .delete(idx, false)
+            .unpause(&handle)
+            .await
+            .with_status(StatusCode::BAD_REQUEST)?;
+        Ok(Default::default())
+    }
+
+    /// Soft-recover torrents in error: re-init with previously_errored=true so bitfield is
+    /// cleared and a full recheck keeps good pieces while bad ones are redownloaded.
+    pub async fn api_torrent_action_fix_errors(
+        &self,
+        idx: TorrentIdOrHash,
+    ) -> Result<EmptyJsonResponse> {
+        let handle = self.mgr_handle(idx)?;
+        // Manual fix always runs now: reset automatic-recovery backoff and requeue pieces
+        // that were held back (or given up on) after I/O errors.
+        let requeued = handle
+            .manual_recovery_reset()
+            .with_status(StatusCode::INTERNAL_SERVER_ERROR)?;
+        if handle.live().is_some() {
+            tracing::info!(id = handle.id(), requeued, "fix errors: recovery counters reset");
+            return Ok(Default::default());
+        }
+        self.session
+            .unpause(&handle)
+            .await
+            .with_status(StatusCode::BAD_REQUEST)?;
+        Ok(Default::default())
+    }
+
+    /// Force a full recheck (re-verify every piece; unreadable data marks files damaged).
+    pub async fn api_torrent_action_recheck(
+        &self,
+        idx: TorrentIdOrHash,
+    ) -> Result<EmptyJsonResponse> {
+        let handle = self.mgr_handle(idx)?;
+        self.session
+            .force_recheck(&handle)
+            .await
+            .with_status(StatusCode::BAD_REQUEST)?;
+        Ok(Default::default())
+    }
+
+    /// Move torrents in the queue (multi-select): up / down / top / bottom.
+    pub fn api_queue_move(&self, req: QueueMoveRequest) -> Result<QueueOrderResponse> {
+        self.session
+            .queue_move(&req.ids, req.action)
+            .with_status(StatusCode::BAD_REQUEST)?;
+        Ok(self.api_queue_order())
+    }
+
+    pub fn api_queue_order(&self) -> QueueOrderResponse {
+        QueueOrderResponse {
+            order: self.session.queue_order(),
+        }
+    }
+
+    /// Start repairing damaged files (unreadable ranges) of a torrent in the background.
+    /// Progress/result appear in the torrent stats under `damage.repair`.
+    pub fn api_torrent_action_repair_files(
+        &self,
+        idx: TorrentIdOrHash,
+        req: crate::repair::RepairRequest,
+    ) -> Result<crate::repair::RepairStartResponse> {
+        let handle = self.mgr_handle(idx)?;
+        self.session
+            .start_repair_files(&handle, req)
+            .with_status(StatusCode::BAD_REQUEST)
+    }
+
+    pub async fn api_torrent_action_rename_file(
+        &self,
+        idx: TorrentIdOrHash,
+        file_id: usize,
+        new_path: String,
+    ) -> Result<EmptyJsonResponse> {
+        let handle = self.mgr_handle(idx)?;
+        self.session
+            .rename_file(&handle, file_id, PathBuf::from(new_path))
+            .await
+            .map_err(|e| ApiError::from((StatusCode::BAD_REQUEST, e)))?;
+        Ok(Default::default())
+    }
+
+    pub async fn api_torrent_action_relocate(
+        &self,
+        idx: TorrentIdOrHash,
+        destination: String,
+        copy: bool,
+        into: bool,
+    ) -> Result<crate::torrent_state::RelocateReport> {
+        let handle = self.mgr_handle(idx)?;
+        self.session
+            .relocate_torrent(&handle, PathBuf::from(destination), copy, into)
+            .await
+            .map_err(|e| ApiError::from((StatusCode::BAD_REQUEST, e)))
+    }
+
+    pub fn api_get_preferences(&self) -> crate::SessionPreferences {
+        self.session().preferences()
+    }
+
+    pub async fn api_set_preferences(
+        &self,
+        prefs: crate::SessionPreferences,
+    ) -> Result<EmptyJsonResponse> {
+        self.session()
+            .update_preferences(prefs)
+            .await
+            .context("error saving preferences")
+            .with_status(StatusCode::BAD_REQUEST)?;
+        Ok(Default::default())
+    }
+
+    pub async fn api_reload_preferences(&self) -> Result<crate::SessionPreferences> {
+        self.session()
+            .reload_preferences()
+            .await
+            .context("error reloading preferences")
+            .with_status(StatusCode::BAD_REQUEST)
+    }
+
+    pub fn api_admin_status(&self, listen_addr: Option<std::net::SocketAddr>) -> AdminStatusResponse {
+        let admin = self.session().admin_config();
+        let env_listen = std::env::var("RQBIT_HTTP_API_LISTEN_ADDR").ok();
+        let env_auth = std::env::var("RQBIT_HTTP_BASIC_AUTH_USERPASS").ok();
+        AdminStatusResponse {
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            preferences_path: self.session().preferences_path().display().to_string(),
+            admin_path: self.session().admin_path().display().to_string(),
+            effective_http_listen_addr: listen_addr.map(|a| a.to_string()),
+            env_http_listen_addr: env_listen,
+            env_basic_auth_set: env_auth.is_some(),
+            persisted: admin.public_view(),
+            restart_supported: self.restart_tx.is_some(),
+            notes: vec![
+                "Live: rate limits (limits.json), soft-recover, incomplete extension, organize/completion actions, and default peer limit (preferences.json).".into(),
+                "Restart required (admin.json, env overrides file): listen/announce ports, DHT/LSD/trackers, TCP/uTP, SOCKS proxy, UPnP forward, timeouts, block/allow lists, fastresume, HTTP listen/auth.".into(),
+                "Not in engine yet (no fake toggles): protocol encryption, seeding ratio/time limits, sequential-download default, disk preallocation toggle, PeX disable.".into(),
+                "Queueing (max active downloads/uploads/torrents) is live (preferences.json, off by default); queue order is persisted in queue.json.".into(),
+                "Process restart exits with code 75 so systemd Restart=on-failure can bring the service back.".into(),
+            ],
+        }
+    }
+
+    pub async fn api_update_admin(
+        &self,
+        patch: crate::AdminConfigUpdate,
+    ) -> Result<crate::AdminConfigPublic> {
+        let cfg = self
+            .session()
+            .update_admin_config(patch)
+            .await
+            .context("error saving admin config")
+            .with_status(StatusCode::BAD_REQUEST)?;
+        Ok(cfg.public_view())
+    }
+
+    pub fn api_request_restart(&self) -> Result<EmptyJsonResponse> {
+        let tx = self
+            .restart_tx
+            .as_ref()
+            .ok_or_else(|| ApiError::from((StatusCode::NOT_IMPLEMENTED, anyhow::anyhow!("process restart is not enabled in this build/runtime"))))?;
+        tx.send(())
+            .context("failed to signal restart")
+            .with_status(StatusCode::INTERNAL_SERVER_ERROR)?;
+        Ok(Default::default())
+    }
+
+
+    pub async fn api_torrent_action_forget(
+        &self,
+        idx: TorrentIdOrHash,
+        origin: crate::remove_policy::RemoveOrigin,
+    ) -> Result<EmptyJsonResponse> {
+        if let Some(id) = self.pending_id(idx) {
+            self.session.pending_forget(id, &origin).await;
+            return Ok(Default::default());
+        }
+        self.mgr_handle(idx)?;
+        self.session
+            .delete_logged(idx, false, &origin)
             .await
             .context("error forgetting torrent")?;
         Ok(Default::default())
@@ -326,12 +566,97 @@ impl Api {
     pub async fn api_torrent_action_delete(
         &self,
         idx: TorrentIdOrHash,
+        origin: crate::remove_policy::RemoveOrigin,
     ) -> Result<EmptyJsonResponse> {
+        if let Some(id) = self.pending_id(idx) {
+            self.session.pending_forget(id, &origin).await;
+            return Ok(Default::default());
+        }
+        self.mgr_handle(idx)?;
         self.session
-            .delete(idx, true)
+            .delete_logged(idx, true, &origin)
             .await
             .context("error deleting torrent with files")?;
         Ok(Default::default())
+    }
+
+    /// Remove following a remove policy (explicit or the saved default).
+    pub async fn api_torrent_remove(
+        &self,
+        idx: TorrentIdOrHash,
+        req: crate::remove_policy::RemoveRequest,
+        wait: bool,
+        origin: crate::remove_policy::RemoveOrigin,
+    ) -> Result<crate::remove_policy::RemoveOutcome> {
+        if let Some(id) = self.pending_id(idx) {
+            // Still resolving metadata: there are no files, whatever the policy.
+            let pm = self.session.pending.get(id);
+            self.session.pending_forget(id, &origin).await;
+            return Ok(crate::remove_policy::RemoveOutcome {
+                id,
+                name: pm.map(|p| p.display_name()).unwrap_or_default(),
+                policy: req.policy.unwrap_or(self.session.preferences.get().remove_policy),
+                result: "removed_before_metadata".into(),
+                ..Default::default()
+            });
+        }
+        self.mgr_handle(idx)?;
+        let out = self
+            .session
+            .remove_with_policy(idx, req.policy, &origin, wait)
+            .await
+            .with_status(StatusCode::CONFLICT)?;
+        Ok(out)
+    }
+
+    pub fn api_remove_preview(&self, ids: &[TorrentId]) -> crate::remove_policy::RemovePreview {
+        self.session.remove_preview(ids)
+    }
+
+    pub fn api_download_order(
+        &self,
+        idx: TorrentIdOrHash,
+    ) -> Result<crate::download_order::DownloadOrderView> {
+        let h = self.mgr_handle(idx)?;
+        self.session
+            .download_order_view(&h)
+            .with_status(StatusCode::CONFLICT)
+    }
+
+    pub fn api_set_download_order(
+        &self,
+        idx: TorrentIdOrHash,
+        patch: crate::download_order::DownloadOrderPatch,
+    ) -> Result<crate::download_order::DownloadOrderView> {
+        let h = self.mgr_handle(idx)?;
+        self.session
+            .set_download_order(&h, &patch)
+            .with_status(StatusCode::BAD_REQUEST)
+    }
+
+    pub fn api_torrent_rules(
+        &self,
+        idx: TorrentIdOrHash,
+    ) -> Result<crate::torrent_rules::TorrentRulesView> {
+        let h = self.mgr_handle(idx)?;
+        Ok(self.session.torrent_rules_view(&h))
+    }
+
+    pub fn api_set_torrent_rules(
+        &self,
+        idx: TorrentIdOrHash,
+        req: crate::torrent_rules::SetRulesOverride,
+    ) -> Result<crate::torrent_rules::TorrentRulesView> {
+        let h = self.mgr_handle(idx)?;
+        let o = req.override_.map(|o| crate::torrent_rules::RulesOverride {
+            stalled: o.stalled,
+            seeding: o.seeding,
+            speed_window: o.speed_window,
+        });
+        self.session
+            .rules
+            .set_override(&h.info_hash().as_string(), o);
+        Ok(self.session.torrent_rules_view(&h))
     }
 
     pub async fn api_torrent_action_update_only_files(
@@ -373,15 +698,206 @@ impl Api {
             .context("line_rx wasn't set")?)
     }
 
+    /// `POST /torrents`. Magnets are queued at once (reserved id, metadata resolved in
+    /// the background, see [`crate::pending_magnets`]); nothing waits on peers or DHT
+    /// unless `wait_for_metadata` is set. Only malformed input is an error; a magnet's
+    /// metadata not having arrived yet never is.
     pub async fn api_add_torrent(
         &self,
         add: AddTorrent<'_>,
         opts: Option<AddTorrentOptions>,
     ) -> Result<ApiAddTorrentResponse> {
-        let response = match self
+        self.api_add_torrent_with_deadline(add, opts, None).await
+    }
+
+    /// Like [`Self::api_add_torrent`]; `deadline` is the HTTP request timeout. A magnet
+    /// add that waits (`wait_for_metadata`, or a `list_only` preview) stops waiting just
+    /// before it: an add is then queued as a resolving placeholder, a preview answers
+    /// "metadata not available yet" (`resolving: true`, no id). Neither is an error.
+    pub async fn api_add_torrent_with_deadline(
+        &self,
+        add: AddTorrent<'_>,
+        opts: Option<AddTorrentOptions>,
+        deadline: Option<std::time::Duration>,
+    ) -> Result<ApiAddTorrentResponse> {
+        use crate::pending_magnets::{is_magnet_like, is_metadata_wait};
+        let mut opts = opts.unwrap_or_default();
+        let magnet_url = match &add {
+            AddTorrent::Url(url) if is_magnet_like(url.trim()) => Some(url.trim().to_string()),
+            _ => None,
+        };
+        let Some(url) = magnet_url else {
+            return self.api_add_torrent_blocking(add, opts).await;
+        };
+        let magnet = validate_magnet(&url)?;
+
+        if !opts.list_only && !opts.wait_for_metadata {
+            let job = match opts.add_job_id.take() {
+                Some(id) => Some(
+                    self.session
+                        .add_jobs
+                        .register(id)
+                        .with_status(StatusCode::BAD_REQUEST)?,
+                ),
+                None => None,
+            };
+            return self.api_queue_magnet(&url, opts, job).await;
+        }
+
+        // Waiting for metadata: explicit wait_for_metadata, or a list_only preview.
+        let list_only = opts.list_only;
+        let placeholder = (!list_only).then(|| placeholder_opts(&opts));
+        if let Some(d) = deadline {
+            let cap = d
+                .saturating_sub(std::time::Duration::from_secs(2))
+                .max(std::time::Duration::from_secs(1));
+            opts.magnet_resolve_timeout =
+                Some(opts.magnet_resolve_timeout.map_or(cap, |t| t.min(cap)));
+        }
+        let job_id = opts.add_job_id.clone();
+        let fut = self.session.add_torrent(AddTorrent::Url(url.clone().into()), Some(opts));
+        let res = match deadline {
+            Some(d) => match tokio::time::timeout(d, fut).await {
+                Ok(r) => r,
+                Err(_) => Err(crate::pending_magnets::MetadataNotReady(format!(
+                    "no metadata within the {}s request timeout",
+                    d.as_secs()
+                ))
+                .into()),
+            },
+            None => fut.await,
+        };
+        match res {
+            Err(e) if is_metadata_wait(&e) => match placeholder {
+                Some(popts) => {
+                    tracing::info!(
+                        info_hash = ?magnet.as_id20(),
+                        "no metadata yet ({e:#}); queued to keep resolving in the background"
+                    );
+                    let job = job_id.and_then(|id| self.session.add_jobs.job(&id));
+                    self.api_queue_magnet(&url, popts, job).await
+                }
+                None => {
+                    // list_only preview: there is nothing to list without metadata.
+                    let info_hash = magnet.as_id20().map(|h| h.as_string()).unwrap_or_default();
+                    Ok(ApiAddTorrentResponse {
+                        id: None,
+                        info_hash: info_hash.clone(),
+                        details: TorrentDetailsResponse {
+                            id: None,
+                            info_hash,
+                            name: magnet.name.clone(),
+                            output_folder: String::new(),
+                            total_pieces: 0,
+                            torznab_category: None,
+                            files: Some(vec![]),
+                            stats: None,
+                        },
+                        output_folder: String::new(),
+                        seen_peers: None,
+                        resolving: true,
+                        already_managed: false,
+                        state: AddState::ResolvingMetadata,
+                        held: false,
+                    })
+                }
+            },
+            res => self.add_response(res),
+        }
+    }
+
+    /// Queue a (validated) magnet as a resolving placeholder and answer at once.
+    async fn api_queue_magnet(
+        &self,
+        url: &str,
+        opts: AddTorrentOptions,
+        job: Option<Arc<crate::add_job::AddJob>>,
+    ) -> Result<ApiAddTorrentResponse> {
+        use crate::add_job::AddJobStage;
+        use crate::pending_magnets::DeferredAdd;
+        let res = self
             .session
-            .add_torrent(add, opts)
+            .add_magnet_deferred(url, opts)
             .await
+            .context("error adding torrent")
+            .with_status(StatusCode::BAD_REQUEST);
+        let d = match res {
+            Ok(d) => d,
+            Err(e) => {
+                if let Some(j) = &job {
+                    j.finish(AddJobStage::Failed {
+                        error: format!("{e}"),
+                    });
+                }
+                return Err(e);
+            }
+        };
+        match d {
+            d @ (DeferredAdd::Resolving(_) | DeferredAdd::AlreadyResolving(_)) => {
+                let (pm, already_managed) = match d {
+                    DeferredAdd::Resolving(pm) => (pm, false),
+                    DeferredAdd::AlreadyResolving(pm) => (pm, true),
+                    DeferredAdd::AlreadyManaged(_) => unreachable!(),
+                };
+                if let Some(j) = &job {
+                    j.finish(AddJobStage::ResolvingInBackground { torrent_id: pm.id });
+                }
+                let mut details = pending_details(&pm, None);
+                details.files = Some(vec![]);
+                Ok(ApiAddTorrentResponse {
+                    id: Some(pm.id),
+                    info_hash: pm.info_hash.clone(),
+                    output_folder: details.output_folder.clone(),
+                    details,
+                    seen_peers: None,
+                    resolving: true,
+                    already_managed,
+                    state: AddState::ResolvingMetadata,
+                    held: false,
+                })
+            }
+            DeferredAdd::AlreadyManaged(id) => {
+                if let Some(j) = &job {
+                    j.finish(AddJobStage::AlreadyManaged { torrent_id: id });
+                }
+                let handle = self.mgr_handle(TorrentIdOrHash::Id(id))?;
+                let details = self.api_torrent_details(TorrentIdOrHash::Id(id))?;
+                Ok(ApiAddTorrentResponse {
+                    id: Some(id),
+                    info_hash: details.info_hash.clone(),
+                    details,
+                    seen_peers: None,
+                    output_folder: handle.output_folder().to_string_lossy().into_owned(),
+                    resolving: false,
+                    already_managed: true,
+                    state: AddState::AlreadyManaged,
+                    held: false,
+                })
+            }
+        }
+    }
+
+    /// .torrent bytes / http(s) URLs (full metadata): the normal add.
+    async fn api_add_torrent_blocking(
+        &self,
+        add: AddTorrent<'_>,
+        opts: AddTorrentOptions,
+    ) -> Result<ApiAddTorrentResponse> {
+        let res = self.session.add_torrent(add, Some(opts)).await;
+        self.add_response(res)
+    }
+
+    fn add_response(
+        &self,
+        res: anyhow::Result<AddTorrentResponse>,
+    ) -> Result<ApiAddTorrentResponse> {
+        let res = match res {
+            Err(e) if e.downcast_ref::<crate::session::InvalidAddInput>().is_some() => {
+                return Err(ApiError::invalid_input(e));
+            }
+            r => r,
+        };
+        let response = match res
             .context("error adding torrent")
             .with_status(StatusCode::BAD_REQUEST)?
         {
@@ -393,21 +909,24 @@ impl Api {
                     handle.name().as_deref(),
                     handle.only_files().as_deref(),
                     handle
-                        .shared()
-                        .options
-                        .output_folder
+                        .output_folder()
                         .to_string_lossy()
                         .into_owned(),
+                    &handle.file_renames(),
+                    handle.torznab_category(),
                 )
                 .context("error making torrent details")?;
                 ApiAddTorrentResponse {
                     id: Some(id),
+                    info_hash: details.info_hash.clone(),
                     details,
                     seen_peers: None,
+                    resolving: false,
+                    already_managed: false,
+                    state: AddState::AlreadyManaged,
+                    held: false,
                     output_folder: handle
-                        .shared()
-                        .options
-                        .output_folder
+                        .output_folder()
                         .to_string_lossy()
                         .into_owned(),
                 }
@@ -421,8 +940,13 @@ impl Api {
                 ..
             }) => ApiAddTorrentResponse {
                 id: None,
+                info_hash: info_hash.as_string(),
                 output_folder: output_folder.to_string_lossy().into_owned(),
                 seen_peers: Some(seen_peers),
+                resolving: false,
+                already_managed: false,
+                state: AddState::ListOnly,
+                held: false,
                 details: make_torrent_details(
                     None,
                     &info_hash,
@@ -430,6 +954,8 @@ impl Api {
                     None,
                     only_files.as_deref(),
                     output_folder.to_string_lossy().into_owned().to_string(),
+                    &Default::default(),
+                    None,
                 )
                 .context("error making torrent details")?,
             },
@@ -441,21 +967,24 @@ impl Api {
                     handle.name().as_deref(),
                     handle.only_files().as_deref(),
                     handle
-                        .shared()
-                        .options
-                        .output_folder
+                        .output_folder()
                         .to_string_lossy()
                         .into_owned(),
+                    &handle.file_renames(),
+                    handle.torznab_category(),
                 )
                 .context("error making torrent details")?;
                 ApiAddTorrentResponse {
                     id: Some(id),
+                    info_hash: details.info_hash.clone(),
                     details,
                     seen_peers: None,
+                    resolving: false,
+                    already_managed: false,
+                    state: AddState::Added,
+                    held: false,
                     output_folder: handle
-                        .shared()
-                        .options
-                        .output_folder
+                        .output_folder()
                         .to_string_lossy()
                         .into_owned(),
                 }
@@ -494,6 +1023,13 @@ impl Api {
     }
 
     pub fn api_stats_v1(&self, idx: TorrentIdOrHash) -> Result<TorrentStats> {
+        if let Some(pm) = self.pending_id(idx).and_then(|id| self.session.pending.get(id)) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            return Ok(pm.stats(now));
+        }
         let mgr = self.mgr_handle(idx)?;
         Ok(mgr.stats())
     }
@@ -545,6 +1081,10 @@ pub struct TorrentDetailsResponse {
     #[serde(default)]
     pub total_pieces: u32,
 
+    /// Newznab/Torznab category id if supplied at add time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub torznab_category: Option<u32>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub files: Option<Vec<TorrentDetailsResponseFile>>,
     #[serde(skip_serializing_if = "Option::is_none", skip_deserializing)]
@@ -557,6 +1097,85 @@ pub struct ApiAddTorrentResponse {
     pub details: TorrentDetailsResponse,
     pub output_folder: String,
     pub seen_peers: Option<Vec<SocketAddr>>,
+    /// Magnet accepted with `defer_metadata`: metadata is being resolved in the
+    /// background (the torrent is listed as "Resolving metadata").
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resolving: bool,
+    /// Deferred magnet add whose info hash was already in rqbit (or resolving).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub already_managed: bool,
+    /// Info hash (hex), same as `details.info_hash`.
+    #[serde(default)]
+    pub info_hash: String,
+    /// What happened: `resolving_metadata` (queued, metadata still being fetched; the
+    /// torrent is listed with id `id`, or for a `list_only` preview `id` is null),
+    /// `added`, `already_managed` or `list_only`.
+    #[serde(default)]
+    pub state: AddState,
+    /// Added paused by an Add dialog ("Start after I finish the Add dialog"); started
+    /// when the dialog finishes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AddState {
+    ResolvingMetadata,
+    #[default]
+    Added,
+    AlreadyManaged,
+    ListOnly,
+}
+
+/// The magnet checks `POST /torrents` answers 400 for: scheme, `xt=urn:btih` /
+/// `urn:btmh`, info hash length / encoding. rqbit needs a BTv1 hash, so a BTv2-only
+/// (btmh) magnet is refused too.
+fn validate_magnet(url: &str) -> Result<librqbit_core::magnet::Magnet> {
+    let bad = |e: anyhow::Error| ApiError::invalid_input(e);
+    let magnet = librqbit_core::magnet::Magnet::parse(url)
+        .context("provided path is not a valid magnet URL")
+        .map_err(bad)?;
+    if magnet.as_id20().is_none() {
+        return Err(bad(anyhow::anyhow!(
+            "magnet link has only a BTv2 (urn:btmh) info hash; rqbit needs a BTv1 (urn:btih) one"
+        )));
+    }
+    Ok(magnet)
+}
+
+/// Options a resolving placeholder keeps (see `PendingMagnet`).
+fn placeholder_opts(o: &AddTorrentOptions) -> AddTorrentOptions {
+    AddTorrentOptions {
+        overwrite: o.overwrite,
+        output_folder: o.output_folder.clone(),
+        sub_folder: o.sub_folder.clone(),
+        only_files: o.only_files.clone(),
+        only_files_regex: o.only_files_regex.clone(),
+        paused: o.paused,
+        initial_peers: o.initial_peers.clone(),
+        trackers: o.trackers.clone(),
+        torznab_category: o.torznab_category,
+        adopt_foreign_incomplete: o.adopt_foreign_incomplete.clone(),
+        magnet_resolve_timeout: o.magnet_resolve_timeout,
+        ..Default::default()
+    }
+}
+
+fn pending_details(
+    pm: &crate::pending_magnets::PendingMagnet,
+    stats: Option<TorrentStats>,
+) -> TorrentDetailsResponse {
+    TorrentDetailsResponse {
+        id: Some(pm.id),
+        info_hash: pm.info_hash.clone(),
+        name: Some(pm.display_name()),
+        output_folder: pm.output_folder.clone().unwrap_or_default(),
+        total_pieces: 0,
+        torznab_category: pm.torznab_category,
+        files: None,
+        stats,
+    }
 }
 
 fn make_torrent_details(
@@ -566,14 +1185,30 @@ fn make_torrent_details(
     name: Option<&str>,
     only_files: Option<&[usize]>,
     output_folder: String,
+    renames: &std::collections::HashMap<usize, PathBuf>,
+    torznab_category: Option<u32>,
 ) -> Result<TorrentDetailsResponse> {
     let files = match info {
         Some(info) => info
             .iter_file_details()
             .enumerate()
             .map(|(idx, d)| {
-                let name = d.filename.to_string();
-                let components = d.filename.to_vec();
+                let (name, components) = if let Some(renamed) = renames.get(&idx) {
+                    let name = renamed.to_string_lossy().into_owned();
+                    // Moved individually (absolute path, "Move files individually as
+                    // they complete"): the tree keeps the torrent's own layout.
+                    let components = if renamed.is_absolute() {
+                        d.filename.to_vec()
+                    } else {
+                        renamed
+                            .components()
+                            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                            .collect::<Vec<_>>()
+                    };
+                    (name, components)
+                } else {
+                    (d.filename.to_string(), d.filename.to_vec())
+                };
                 let included = only_files.map(|o| o.contains(&idx)).unwrap_or(true);
                 TorrentDetailsResponseFile {
                     name,
@@ -596,6 +1231,7 @@ fn make_torrent_details(
         files: Some(files),
         output_folder,
         total_pieces,
+        torznab_category,
         stats: None,
     })
 }
@@ -617,4 +1253,16 @@ fn torrent_file_mime_type(
             StatusCode::INTERNAL_SERVER_ERROR,
             "cannot determine mime type for file",
         ))?)
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct QueueMoveRequest {
+    pub ids: Vec<TorrentIdOrHash>,
+    pub action: crate::torrent_queue::QueueMove,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct QueueOrderResponse {
+    /// Torrent ids in queue order (first = position 1).
+    pub order: Vec<TorrentId>,
 }

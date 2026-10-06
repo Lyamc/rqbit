@@ -1,5 +1,15 @@
 import { useContext, useState, useCallback, useMemo } from "react";
-import { FaPause, FaPlay, FaTrash } from "react-icons/fa";
+import {
+  FaPause,
+  FaPlay,
+  FaTrash,
+  FaRedo,
+  FaWrench,
+  FaAngleUp,
+  FaAngleDown,
+  FaAngleDoubleUp,
+  FaAngleDoubleDown,
+} from "react-icons/fa";
 import { GoSearch, GoX } from "react-icons/go";
 import debounce from "lodash.debounce";
 import { APIContext } from "../../context";
@@ -10,11 +20,18 @@ import { DeleteTorrentModal } from "../modal/DeleteTorrentModal";
 import { useKeyboardShortcuts } from "../../hooks/useKeyboardShortcuts";
 import {
   ErrorDetails,
+  QueueMoveAction,
+  STATE_ERROR,
   STATE_LIVE,
   STATE_PAUSED,
   TorrentListItem,
 } from "../../api-types";
 import { Button } from "../buttons/Button";
+import {
+  hasDamagedFiles,
+  hasRecoveryIssues,
+  isRepairRunning,
+} from "../../helper/damage";
 import {
   StatusFilter,
   STATUS_FILTER_LABELS,
@@ -27,6 +44,7 @@ interface ActionBarProps {
 
 export const ActionBar: React.FC<ActionBarProps> = ({ hideFilters }) => {
   const selectedTorrentIds = useUIStore((state) => state.selectedTorrentIds);
+  const clearSelection = useUIStore((state) => state.clearSelection);
   const searchQuery = useUIStore((state) => state.searchQuery);
   const setSearchQuery = useUIStore((state) => state.setSearchQuery);
   const statusFilter = useUIStore((state) => state.statusFilter);
@@ -107,6 +125,7 @@ export const ActionBar: React.FC<ActionBarProps> = ({ hideFilters }) => {
           });
         }
       }
+      clearSelection();
     } finally {
       setDisabled(false);
     }
@@ -116,6 +135,67 @@ export const ActionBar: React.FC<ActionBarProps> = ({ hideFilters }) => {
     runBulkAction((id) => API.pause(id), STATE_PAUSED, "pausing");
   const resumeSelected = () =>
     runBulkAction((id) => API.start(id), STATE_LIVE, "starting");
+  const restartSelected = () =>
+    runBulkAction((id) => API.restart(id), "", "restarting");
+  // Fix errors: torrents with damaged files get "Repair damaged files" (which also
+  // resumes them); other torrents in error state get the normal soft re-check.
+  const fixErrorsSelected = async () => {
+    setDisabled(true);
+    try {
+      for (const id of selectedTorrentIds) {
+        const torrent = getTorrentById(id);
+        const damaged = hasDamagedFiles(torrent?.stats?.damage);
+        if (damaged && isRepairRunning(torrent?.stats?.damage)) continue;
+        const held = hasRecoveryIssues(torrent?.stats?.damage);
+        if (!damaged && !held && torrent?.stats?.state !== STATE_ERROR)
+          continue;
+        try {
+          if (damaged && API.repairFiles) {
+            await API.repairFiles(id);
+          } else {
+            await API.fixErrors(id);
+          }
+          refreshTorrents();
+        } catch (e) {
+          setCloseableError({
+            text: `Error fixing errors on torrent id=${id}`,
+            details: e as ErrorDetails,
+          });
+        }
+      }
+      clearSelection();
+    } finally {
+      setDisabled(false);
+    }
+  };
+
+  // Queue order (multi-select keeps relative order). Positions are persisted server-side.
+  const moveQueue = async (action: QueueMoveAction) => {
+    if (!API.queueMove) return;
+    setDisabled(true);
+    try {
+      await API.queueMove(Array.from(selectedTorrentIds), action);
+      refreshTorrents();
+    } catch (e) {
+      setCloseableError({
+        text: `Error moving torrents in queue`,
+        details: e as ErrorDetails,
+      });
+    } finally {
+      setDisabled(false);
+    }
+  };
+
+  const queueButtons: [QueueMoveAction, string, React.ReactNode][] = [
+    ["top", "Move to top of queue", <FaAngleDoubleUp className="w-3 h-3" />],
+    ["up", "Move up in queue", <FaAngleUp className="w-3 h-3" />],
+    ["down", "Move down in queue", <FaAngleDown className="w-3 h-3" />],
+    [
+      "bottom",
+      "Move to bottom of queue",
+      <FaAngleDoubleDown className="w-3 h-3" />,
+    ],
+  ];
 
   return (
     <div className="flex items-center gap-1.5 px-3 py-1.5 bg-surface-raised border-b border-divider">
@@ -135,6 +215,37 @@ export const ActionBar: React.FC<ActionBarProps> = ({ hideFilters }) => {
         <FaPause className="w-2.5 h-2.5" />
         Pause
       </Button>
+      <Button
+        onClick={restartSelected}
+        disabled={disabled || !hasSelection}
+        variant="secondary"
+      >
+        <FaRedo className="w-2.5 h-2.5" />
+        Restart
+      </Button>
+      <Button
+        onClick={fixErrorsSelected}
+        disabled={disabled || !hasSelection}
+        variant="secondary"
+      >
+        <FaWrench className="w-2.5 h-2.5" />
+        Fix errors
+      </Button>
+      {API.queueMove && (
+        <div className="flex items-center gap-0.5" data-testid="queue-buttons">
+          {queueButtons.map(([action, title, icon]) => (
+            <Button
+              key={action}
+              onClick={() => moveQueue(action)}
+              disabled={disabled || !hasSelection}
+              variant="secondary"
+              title={title}
+            >
+              {icon}
+            </Button>
+          ))}
+        </div>
+      )}
       <Button
         onClick={openDeleteModal}
         disabled={disabled || !hasSelection}

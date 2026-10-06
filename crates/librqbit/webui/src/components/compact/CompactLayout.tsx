@@ -3,6 +3,8 @@ import { TorrentListItem } from "../../api-types";
 import { ActionBar } from "./ActionBar";
 import { TorrentTable } from "./TorrentTable";
 import { DetailPane } from "./DetailPane";
+import { TorrentDetailsModal } from "../modal/TorrentDetailsModal";
+import { useUIStore } from "../../stores/uiStore";
 
 const DETAIL_PANE_MIN_HEIGHT = 100;
 const DETAIL_PANE_MAX_HEIGHT = 600;
@@ -22,6 +24,8 @@ export const CompactLayout: React.FC<CompactLayoutProps> = ({
   );
   const [isDragging, setIsDragging] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const detailsModalTorrentId = useUIStore((s) => s.detailsModalTorrentId);
+  const closeDetailsModal = useUIStore((s) => s.closeDetailsModal);
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -80,6 +84,13 @@ export const CompactLayout: React.FC<CompactLayoutProps> = ({
             <DetailPane />
           </div>
         </>
+      )}
+      {detailsModalTorrentId !== null && (
+        <TorrentDetailsModal
+          torrentId={detailsModalTorrentId}
+          isOpen
+          onClose={closeDetailsModal}
+        />
       )}
     </div>
   );

@@ -248,6 +248,19 @@ impl ChunkTracker {
             .filter_map(|id| self.lengths.validate_piece_index(id))
     }
 
+    /// Queued pieces following an explicit piece order (see `download_order`).
+    pub(crate) fn iter_queued_in_order<'a>(
+        &'a self,
+        order: &'a [usize],
+    ) -> impl Iterator<Item = ValidPieceIndex> + 'a {
+        order
+            .iter()
+            .copied()
+            .filter(|id| self.queue_pieces.get(*id).map(|b| *b).unwrap_or(false))
+            .filter_map(|id| id.try_into().ok())
+            .filter_map(|id| self.lengths.validate_piece_index(id))
+    }
+
     pub(crate) fn is_piece_have(&self, id: ValidPieceIndex) -> bool {
         self.have.as_slice()[id.get() as usize]
     }
@@ -267,6 +280,41 @@ impl ChunkTracker {
         if let Some(s) = self.chunk_status.get_mut(self.lengths.chunk_range(index)) {
             s.fill(false);
         }
+    }
+
+    /// Hold a piece back after an I/O error: forget its written chunks but do NOT queue it;
+    /// it is requeued later by the recovery backoff scheduler.
+    pub fn mark_piece_deferred(&mut self, index: ValidPieceIndex) {
+        let id = index.get() as usize;
+        if self.have.as_slice().get(id).map(|r| *r).unwrap_or_default() {
+            return;
+        }
+        self.queue_pieces.set(id, false);
+        if let Some(s) = self.chunk_status.get_mut(self.lengths.chunk_range(index)) {
+            s.fill(false);
+        }
+    }
+
+    /// Forget pieces (e.g. their data was zeroed by a repair): clear have/chunk status and
+    /// queue them again if selected. Returns how many of them were previously "have".
+    pub fn mark_pieces_missing(&mut self, pieces: &[ValidPieceIndex], file_infos: &FileInfos) -> usize {
+        let mut invalidated = 0;
+        for idx in pieces {
+            let id = idx.get() as usize;
+            if self.have.as_slice()[id] {
+                self.have.as_slice_mut().set(id, false);
+                invalidated += 1;
+            }
+            if let Some(s) = self.chunk_status.get_mut(self.lengths.chunk_range(*idx)) {
+                s.fill(false);
+            }
+            if self.selected[id] {
+                self.queue_pieces.set(id, true);
+            }
+        }
+        self.recalculate_per_file_bytes(file_infos);
+        self.hns = self.calc_hns();
+        invalidated
     }
 
     pub fn mark_piece_downloaded(&mut self, idx: ValidPieceIndex) {

@@ -82,6 +82,18 @@ pub struct TorrentStats {
     pub total_bytes: u64,
     pub finished: bool,
     pub live: Option<LiveStats>,
+    /// Damaged files (unrecoverable I/O errors) and repair status. Omitted when none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub damage: Option<crate::repair::DamageStats>,
+    /// Detailed, human-oriented status derived from engine state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_detail: Option<crate::torrent_status::StatusDetail>,
+    /// 1-based queue position (queueing order; persisted).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_position: Option<usize>,
+    /// Repair runs on this torrent since the counters were last reset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repair_count: Option<u64>,
 }
 
 impl std::fmt::Display for TorrentStats {
@@ -114,8 +126,13 @@ impl TorrentStats {
                 if self.total == 0 {
                     return write!(f, "N/A");
                 }
-                let pct = self.progress as f64 / self.total as f64 * 100f64;
-                write!(f, "{pct:.2}%")
+                // Floored at 2 decimals; 100.00% only when complete.
+                let units = if self.progress >= self.total {
+                    10_000
+                } else {
+                    (self.progress as u128 * 10_000 / self.total as u128).min(9_999)
+                };
+                write!(f, "{}.{:02}%", units / 100, units % 100)
             }
         }
         Percents {
@@ -155,6 +172,10 @@ mod tests {
             total_bytes: 100,
             finished: false,
             live: None,
+            damage: None,
+            status_detail: None,
+            queue_position: None,
+            repair_count: None,
         }
     }
 

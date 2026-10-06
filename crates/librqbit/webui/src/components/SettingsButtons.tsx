@@ -4,6 +4,9 @@ import { IconButton } from "./buttons/IconButton";
 import { ViewModeToggle } from "./ViewModeToggle";
 import { DarkMode } from "../helper/darkMode";
 import { ConfigModal } from "./config/ConfigModal";
+import { EventsButton } from "./events/EventsButton";
+import { MdCleaningServices } from "react-icons/md";
+import { CleanupModal } from "./cleanup/CleanupModal";
 
 interface SettingsButtonsProps {
   onLogsClick: () => void;
@@ -16,6 +19,7 @@ export const SettingsButtons: React.FC<SettingsButtonsProps> = ({
 }) => {
   const [isDark, setIsDark] = useState(DarkMode.isDark());
   const [configOpen, setConfigOpen] = useState(false);
+  const [cleanupOpen, setCleanupOpen] = useState(false);
 
   const handleDarkModeToggle = () => {
     DarkMode.toggle();
@@ -41,6 +45,16 @@ export const SettingsButtons: React.FC<SettingsButtonsProps> = ({
             onClose={() => setConfigOpen(false)}
           />
         </>
+      )}
+      <EventsButton />
+      <IconButton
+        onClick={() => setCleanupOpen(true)}
+        title="Clean up orphaned downloads"
+      >
+        <MdCleaningServices />
+      </IconButton>
+      {cleanupOpen && (
+        <CleanupModal isOpen onClose={() => setCleanupOpen(false)} />
       )}
       <IconButton onClick={onLogsClick} title="View logs">
         <BsBodyText />
