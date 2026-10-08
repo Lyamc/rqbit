@@ -156,6 +156,12 @@ pub struct PendingMagnet {
     pub trackers: Option<Vec<String>>,
     #[serde(default)]
     pub torznab_category: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_id: Option<String>,
     /// Per-attempt resolve window (`magnet_timeout_secs`); after it the placeholder
     /// backs off and retries (it never fails).
     #[serde(default)]
@@ -193,6 +199,9 @@ impl PendingMagnet {
             initial_peers: self.initial_peers.clone(),
             trackers: self.trackers.clone(),
             torznab_category: self.torznab_category,
+            category: self.category.clone(),
+            category_source: self.category_source.clone(),
+            category_id: self.category_id.clone(),
             adopt_foreign_incomplete: self.adopt_foreign_incomplete.clone(),
             preferred_id: Some(self.id),
             magnet_resolve_timeout: Some(self.attempt_window()),
@@ -206,6 +215,22 @@ impl PendingMagnet {
             .filter(|s| *s > 0)
             .map(Duration::from_secs)
             .unwrap_or(DEFAULT_ATTEMPT_WINDOW)
+    }
+
+    pub fn category(&self) -> crate::source_category::TorrentCategory {
+        crate::source_category::TorrentCategory {
+            name: self.category.clone(),
+            source: self.category_source.clone(),
+            id: self.category_id.clone(),
+            torznab: self.torznab_category,
+        }
+    }
+
+    pub fn set_category(&mut self, c: crate::source_category::TorrentCategory) {
+        self.category = c.name;
+        self.category_source = c.source;
+        self.category_id = c.id;
+        self.torznab_category = c.torznab;
     }
 
     pub fn display_name(&self) -> String {
@@ -506,6 +531,9 @@ impl Session {
                 initial_peers: opts.initial_peers.clone(),
                 trackers: opts.trackers.clone(),
                 torznab_category: opts.torznab_category,
+                category: opts.category.clone(),
+                category_source: opts.category_source.clone(),
+                category_id: opts.category_id.clone(),
                 timeout_secs: opts.magnet_resolve_timeout.map(|d| d.as_secs()),
                 adopt_foreign_incomplete: opts.adopt_foreign_incomplete.clone(),
                 added_unix: now,
@@ -621,8 +649,17 @@ impl Session {
     ) {
         match res {
             Ok(AddTorrentResponse::Added(tid, h)) => {
-                // Paused / started while this attempt ran: follow the latest choice.
-                let want_paused = self.pending.get(id).map(|m| m.paused);
+                // Paused / started / category edited while this attempt ran: follow
+                // the latest choice.
+                let latest = self.pending.get(id);
+                let want_paused = latest.as_ref().map(|m| m.paused);
+                if let Some(c) = latest.map(|m| m.category())
+                    && c != h.category()
+                {
+                    h.set_category(c);
+                    let (s, h2) = (self.clone(), h.clone());
+                    tokio::spawn(async move { s.persist_category(&h2).await });
+                }
                 self.pending.remove(id);
                 if let Some(want) = want_paused
                     && want != h.is_paused()
@@ -713,6 +750,16 @@ impl Session {
     /// the files) and is then added paused. Returns false if `id` isn't pending.
     pub fn pending_pause(&self, id: usize) -> bool {
         self.pending.update(id, |m| m.paused = true)
+    }
+
+    /// Set a pending magnet's category (carried to the torrent once the metadata
+    /// arrives). Returns false if `id` isn't pending.
+    pub fn pending_set_category(
+        &self,
+        id: usize,
+        c: crate::source_category::TorrentCategory,
+    ) -> bool {
+        self.pending.update(id, |m| m.set_category(c))
     }
 
     /// Clear the paused flag without restarting the resolve (Add dialog finished):
@@ -834,6 +881,9 @@ mod tests {
             initial_peers: None,
             trackers: None,
             torznab_category: None,
+            category: None,
+            category_source: None,
+            category_id: None,
             timeout_secs: None,
             adopt_foreign_incomplete: None,
             added_unix: 0,
@@ -857,6 +907,48 @@ mod tests {
         assert_eq!(s2.ids(), vec![3]);
         assert_eq!(s2.find_hash(&format!("{:040x}", 3)), Some(3));
         assert_eq!(s2.max_id(), Some(3));
+    }
+
+    #[test]
+    fn category_persists_and_reaches_the_add() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("pending-magnets.json");
+        let s = PendingMagnets::load(p.clone());
+        let mut m = pm(4, PendingState::Resolving);
+        m.set_category(crate::source_category::TorrentCategory {
+            name: None,
+            source: Some("nyaa".into()),
+            id: Some("1_2".into()),
+            torznab: None,
+        });
+        s.map.lock().insert(4, m);
+        s.save();
+        let raw = std::fs::read_to_string(&p).unwrap();
+        assert!(raw.contains("\"category_source\": \"nyaa\""), "{raw}");
+        assert!(!raw.contains("\"category\":"), "unset parts aren't written: {raw}");
+        let m = PendingMagnets::load(p).get(4).unwrap();
+        assert_eq!(m.category().effective_torznab(), Some(5070));
+        let o = m.add_options();
+        assert_eq!(o.category_source.as_deref(), Some("nyaa"));
+        assert_eq!(o.category_id.as_deref(), Some("1_2"));
+        assert_eq!(o.category, None);
+    }
+
+    #[test]
+    fn old_pending_file_without_category_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("pending-magnets.json");
+        let hash = "a".repeat(40);
+        std::fs::write(
+            &p,
+            format!(
+                r#"{{"magnets":[{{"id":2,"info_hash":"{hash}","url":"magnet:?xt=urn:btih:{hash}","torznab_category":2000,"added_unix":0,"state":"resolving"}}]}}"#
+            ),
+        )
+        .unwrap();
+        let m = PendingMagnets::load(p).get(2).unwrap();
+        let c = m.category();
+        assert_eq!((c.name, c.source, c.id, c.torznab), (None, None, None, Some(2000)));
     }
 
     #[test]

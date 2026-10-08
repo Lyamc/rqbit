@@ -1025,6 +1025,7 @@ impl DetailsPanel {
             )
             .child(lv("Hash", t.info_hash.clone()))
             .child(lv("Output", t.output_folder.clone()))
+            .child(lv("Category", super::category::details_text(&t)))
             .child(lv("Playlist", playlist))
             .when_some(hooks, |d, h| d.child(lv("On completion", h)))
             .when_some(s.error.clone(), |d, e| {

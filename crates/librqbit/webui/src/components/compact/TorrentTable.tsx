@@ -15,6 +15,7 @@ import { Spinner } from "../Spinner";
 import { TableHeader } from "./TableHeader";
 import { statusSortValue } from "../../helper/status";
 import { isTorrentVisible, SortDirection } from "../../helper/torrentFilters";
+import { categorySortValue } from "../../helper/category";
 import { Nav } from "../../helper/selection";
 import {
   TORRENT_TABLE_CELL_PAD,
@@ -44,7 +45,8 @@ export type TableSortColumn =
   | "eta"
   | "peers"
   | "queue"
-  | "status";
+  | "status"
+  | "category";
 
 const DEFAULT_SORT_COLUMN: TableSortColumn = "id";
 const DEFAULT_SORT_DIRECTION: SortDirection = "desc";
@@ -86,6 +88,8 @@ function getTableSortValue(
       return t.stats?.queue_position ?? Infinity;
     case "status":
       return statusSortValue(t.stats);
+    case "category":
+      return categorySortValue(t);
   }
 }
 
@@ -111,6 +115,7 @@ export const TorrentTable: React.FC<TorrentTableProps> = ({
   const clearSelection = useUIStore((state) => state.clearSelection);
   const searchQuery = useUIStore((state) => state.searchQuery);
   const statusFilter = useUIStore((state) => state.statusFilter);
+  const categoryFilter = useUIStore((state) => state.categoryFilter);
 
   const normalizedQuery = searchQuery.toLowerCase().trim();
 
@@ -135,7 +140,9 @@ export const TorrentTable: React.FC<TorrentTableProps> = ({
     if (!torrents) return null;
 
     return [...torrents]
-      .filter((t) => isTorrentVisible(t, normalizedQuery, statusFilter))
+      .filter((t) =>
+        isTorrentVisible(t, normalizedQuery, statusFilter, categoryFilter),
+      )
       .sort((a, b) => {
         const aVal = getTableSortValue(a, sortColumn);
         const bVal = getTableSortValue(b, sortColumn);
@@ -145,7 +152,14 @@ export const TorrentTable: React.FC<TorrentTableProps> = ({
             : (aVal as number) - (bVal as number);
         return sortDirection === "asc" ? cmp : -cmp;
       });
-  }, [torrents, normalizedQuery, statusFilter, sortColumn, sortDirection]);
+  }, [
+    torrents,
+    normalizedQuery,
+    statusFilter,
+    categoryFilter,
+    sortColumn,
+    sortDirection,
+  ]);
 
   const visibleTorrentIds = useMemo(() => {
     if (!filteredTorrents) return [];
@@ -378,6 +392,14 @@ export const TorrentTable: React.FC<TorrentTableProps> = ({
           <TableHeader
             column="status"
             label="Status"
+            sortColumn={sortColumn}
+            sortDirection={sortDirection}
+            onSort={handleSort}
+            align="left"
+          />
+          <TableHeader
+            column="category"
+            label="Category"
             sortColumn={sortColumn}
             sortDirection={sortDirection}
             onSort={handleSort}

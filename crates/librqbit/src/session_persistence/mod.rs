@@ -34,6 +34,12 @@ pub struct SerializedTorrent {
     file_renames: Option<std::collections::HashMap<usize, PathBuf>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     torznab_category: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    category: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    category_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    category_id: Option<String>,
     /// "Move files individually as they complete": the torrent folder being filled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     move_dest: Option<PathBuf>,
@@ -68,12 +74,49 @@ impl SerializedTorrent {
             overwrite: true,
             file_renames: self.file_renames,
             torznab_category: self.torznab_category,
+            category: self.category,
+            category_source: self.category_source,
+            category_id: self.category_id,
             restored: true,
             move_dest: self.move_dest,
             ..Default::default()
         };
 
         Ok((add_torrent, opts))
+    }
+}
+
+#[cfg(test)]
+mod category_tests {
+    use super::*;
+
+    fn st(json: &str) -> SerializedTorrent {
+        serde_json::from_str(json).unwrap()
+    }
+
+    const OLD: &str = r#"{"info_hash":"0000000000000000000000000000000000000001","trackers":[],"output_folder":"/tmp/x","only_files":null,"is_paused":false,"torznab_category":5070}"#;
+
+    #[test]
+    fn old_entries_load_without_category() {
+        let (_, o) = st(OLD).into_add_torrent().unwrap();
+        assert_eq!(o.torznab_category, Some(5070));
+        assert_eq!((o.category, o.category_source, o.category_id), (None, None, None));
+    }
+
+    #[test]
+    fn category_round_trips_and_is_only_written_when_set() {
+        let mut t = st(OLD);
+        let v = serde_json::to_value(&t).unwrap();
+        assert!(v.get("category").is_none() && v.get("category_source").is_none());
+        t.category = Some("Anime - Raw".into());
+        t.category_source = Some("nyaa".into());
+        t.category_id = Some("1_4".into());
+        let back = st(&serde_json::to_string(&t).unwrap());
+        let (_, o) = back.into_add_torrent().unwrap();
+        assert_eq!(o.category.as_deref(), Some("Anime - Raw"));
+        assert_eq!(o.category_source.as_deref(), Some("nyaa"));
+        assert_eq!(o.category_id.as_deref(), Some("1_4"));
+        assert_eq!(o.torznab_category, Some(5070));
     }
 }
 

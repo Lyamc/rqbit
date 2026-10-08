@@ -203,8 +203,8 @@ pub struct ManagedTorrentShared {
     /// Serializes moves of this torrent's files.
     pub(crate) move_lock: parking_lot::Mutex<()>,
 
-    /// Optional Newznab/Torznab category id supplied at add time.
-    pub(crate) torznab_category: Option<u32>,
+    /// Category (name, source, source id, Torznab number); set at add, editable.
+    pub(crate) category: RwLock<crate::source_category::TorrentCategory>,
 
     // "dn" from magnet link
     pub(crate) magnet_name: Option<String>,
@@ -372,8 +372,17 @@ impl ManagedTorrent {
         self.shared.file_renames.read().clone()
     }
 
+    /// The Torznab number given at add or edited (not the one derived from the table).
     pub fn torznab_category(&self) -> Option<u32> {
-        self.shared.torznab_category
+        self.shared.category.read().torznab
+    }
+
+    pub fn category(&self) -> crate::source_category::TorrentCategory {
+        self.shared.category.read().clone()
+    }
+
+    pub fn set_category(&self, c: crate::source_category::TorrentCategory) {
+        *self.shared.category.write() = c;
     }
 
     /// Rename a single file (or its relative path including folders) while the torrent

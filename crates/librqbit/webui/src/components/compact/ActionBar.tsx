@@ -27,6 +27,7 @@ import {
   TorrentListItem,
 } from "../../api-types";
 import { Button } from "../buttons/Button";
+import { CategoryFilterSelect } from "../CategoryFilterSelect";
 import {
   hasDamagedFiles,
   hasRecoveryIssues,
@@ -265,6 +266,8 @@ export const ActionBar: React.FC<ActionBarProps> = ({ hideFilters }) => {
 
           {/* Spacer */}
           <div className="flex-1" />
+
+          <CategoryFilterSelect className="py-1 px-2 text-sm bg-surface border border-divider rounded focus:outline-none focus:border-primary max-w-[12rem]" />
 
           {/* Status filter */}
           <select

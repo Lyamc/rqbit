@@ -27,7 +27,7 @@ Server settings added by the fork live in `preferences.json` (and `admin.json`, 
 ### Completion: event hooks and chainable actions
 
 - `completion_actions` is an ordered pipeline that runs when a torrent finishes. Available actions:
-  - `shell`: run a command with `sh -c` / `cmd /C`, with `RQBIT_TORRENT_ID`, `RQBIT_INFO_HASH`, `RQBIT_NAME` and `RQBIT_OUTPUT_FOLDER` set
+  - `shell`: run a command with `sh -c` / `cmd /C`, with `RQBIT_TORRENT_ID`, `RQBIT_INFO_HASH`, `RQBIT_NAME`, `RQBIT_OUTPUT_FOLDER`, `RQBIT_CATEGORY` (the category label), `RQBIT_CATEGORY_SOURCE`, `RQBIT_CATEGORY_ID` and `RQBIT_TORZNAB_CATEGORY` (the Torznab number auto-organize uses) set; unset values are empty
   - `move`: move or copy the torrent to a folder. A multi-file torrent always keeps its own folder: it ends up in `<path>/<TorrentName>/...` with its subfolders, never loose in `<path>`. A single-file torrent's file goes straight into `<path>`.
   - `organize`: see auto-organize below
   - `drop_incomplete_ext`: remove the incomplete suffix
@@ -39,7 +39,8 @@ Server settings added by the fork live in `preferences.json` (and `admin.json`, 
 - **Live move/rename**, including while a torrent is active:
   - `POST /torrents/{id}/relocate` `{"destination", "copy", "into"}` moves (or copies) a torrent's data. Seeding continues from the new location with no recheck, and it is persisted. With `"into": true`, `destination` is the folder to put the torrent in (a multi-file torrent goes to `<destination>/<TorrentName>`, which is what both UIs send). Without it, `destination` is the torrent's folder itself. The response describes what happened (`output_folder`, `method`: rename/copy, `whole_folder`, `moved_files`). Reads and writes wait during the move instead of failing.
   - `POST /torrents/{id}/rename_file` `{"file_id", "new_path"}` renames a file on disk. File ids and the piece mapping stay the same.
-- **Auto-organize** (`auto_organize_enabled`, **off by default**): classifies a completed torrent from its name, file names and extensions (anime, tv, movie, game, porn, music, book, software, other) and moves it to `{auto_organize_root}/{type folder}/{name}`. A Torznab category, if the torrent has one, takes priority. The heuristics can be wrong.
+  - `POST /torrents/{id}/category` `{"category", "category_source", "category_id", "torznab_category"}` edits a torrent's category (also of a magnet still resolving its metadata). A missing key is left alone and `null` clears it. The change is saved, logged as a `category_changed` event and only affects future organizing; nothing is moved. Returns the torrent's details.
+- **Auto-organize** (`auto_organize_enabled`, **off by default**): classifies a completed torrent from its name, file names and extensions (anime, tv, movie, game, porn, music, book, software, other) and moves it to `{auto_organize_root}/{type folder}/{name}`. A category takes priority: first the torrent's Torznab number, then the number looked up from its category source and id (see below), then the heuristics. The heuristics can be wrong.
 - **Incomplete extension** (`incomplete_extension`, e.g. `.part` or `.!qB`): files get this suffix on disk while downloading, and it is removed on completion. It applies to torrents added after it is set.
 
 ### Configure / Admin (qBittorrent-style preferences)
@@ -47,7 +48,13 @@ Server settings added by the fork live in `preferences.json` (and `admin.json`, 
 - The web UI's Configure dialog has the tabs Speed, Connection, BitTorrent, Downloads, Organize, Completion, Automation, Interface and Web UI / Admin.
 - **Admin** settings are saved in `admin.json` and apply on the next start (environment variables and CLI flags take precedence). They cover the HTTP listen address, basic auth, listen/announce ports, DHT / LSD / trackers / uTP / TCP / UPnP, SOCKS proxy, IPv4-only, bind device and peer limit.
 - Admin endpoints: `GET /admin`, `POST /admin/config`, `POST /admin/reload` (re-read `preferences.json`) and `POST /admin/restart`. Restart exits with code 75 so systemd `Restart=on-failure` brings the server back.
-- **Torznab categories**: `POST /torrents?torznab_category=<id>` (Newznab/Torznab ids, e.g. 2000 = Movies, 5070 = Anime) stores the category with the torrent. The category survives restarts and is used by auto-organize.
+- **Categories**: `POST /torrents` takes optional category parameters, stored with the torrent (also while a magnet is resolving), kept across restarts and used by auto-organize:
+  - `torznab_category=<number>`: Newznab/Torznab id, e.g. 2000 = Movies, 5070 = Anime, 6000 = Adult. Numbers only; anything else is a 400.
+  - `category=<text>`: display name, e.g. `Anime - English-translated` (trimmed, at most 100 characters, no control characters).
+  - `category_source=<source>` and `category_id=<id>`: where the category comes from and that source's own id, e.g. `nyaa` and `1_2` (source: 1-32 characters of `a-z 0-9 _ -`, stored lowercase; id: 1-32 characters of `A-Z a-z 0-9 _ . -`). Invalid values are a 400 `invalid_input`.
+  - Without a Torznab number, auto-organize looks `(category_source, category_id)` up in a built-in table (`crates/librqbit/src/source_category.rs`, currently `nyaa` and `sukebei`; an unknown `X_n` id falls back to its parent `X_0`). Torznab 8000 (Other, e.g. pictures) has no folder of its own and falls back to the heuristics.
+  - Torrent lists and details return `torznab_category`, `category`, `category_source`, `category_id` and `category_label`: the name, else the table name, else `source id`, else the Torznab name (e.g. 5070 is `Anime`). Fields that aren't set are left out.
+  - Both UIs show a sortable Category column, a category filter and a Category row in the details, and edit categories of one or more selected torrents from the right-click menu ("Set category…").
 
 ### Adding torrents
 

@@ -1,6 +1,7 @@
 // Shared torrent filtering and sorting utilities
 
 import { TorrentListItem } from "../api-types";
+import { CATEGORY_FILTER_ALL, matchesCategory } from "./category";
 
 // Sort types
 export type TorrentSortColumn =
@@ -150,6 +151,11 @@ export function isTorrentVisible(
   t: TorrentListItem,
   searchQuery: string,
   statusFilter: StatusFilter,
+  categoryFilter: string = CATEGORY_FILTER_ALL,
 ): boolean {
-  return matchesSearch(t.name, searchQuery) && matchesStatus(t, statusFilter);
+  return (
+    matchesSearch(t.name, searchQuery) &&
+    matchesStatus(t, statusFilter) &&
+    matchesCategory(t, categoryFilter)
+  );
 }

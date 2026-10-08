@@ -17,6 +17,8 @@ import {
   toggleSelect,
 } from "../helper/selection";
 
+import { CATEGORY_FILTER_ALL } from "../helper/category";
+
 const LARGE_SCREEN_BREAKPOINT = 1024;
 
 function getDefaultViewMode(): "full" | "compact" {
@@ -33,6 +35,10 @@ export interface UIStore {
 
   statusFilter: StatusFilter;
   setStatusFilter: (filter: StatusFilter) => void;
+
+  /** Category label, or CATEGORY_FILTER_ALL / CATEGORY_FILTER_NONE. */
+  categoryFilter: string;
+  setCategoryFilter: (filter: string) => void;
 
   selectedTorrentIds: Set<number>;
   /** Range anchor. */
@@ -88,6 +94,11 @@ export const useUIStore = create<UIStore>((set, get) => ({
 
   searchQuery: "",
   setSearchQuery: (query) => set({ searchQuery: query }),
+
+  categoryFilter: CATEGORY_FILTER_ALL,
+  setCategoryFilter: (filter) => {
+    set({ categoryFilter: filter });
+  },
 
   statusFilter: "all",
   setStatusFilter: (filter) => {

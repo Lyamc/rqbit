@@ -15,6 +15,7 @@ import {
   RequestOptions,
   SessionStats,
   TorrentDetails,
+  CategoryUpdate,
   TorrentStats,
   FsRootsResponse,
   FsListResponse,
@@ -515,6 +516,12 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
       file_id: fileId,
       new_path: newPath,
     });
+  },
+  setCategory: (
+    index: number,
+    update: CategoryUpdate,
+  ): Promise<TorrentDetails> => {
+    return makeRequest("POST", `/torrents/${index}/category`, update, true);
   },
   relocateTorrent: (
     index: number,

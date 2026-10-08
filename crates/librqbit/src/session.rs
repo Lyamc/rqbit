@@ -347,6 +347,15 @@ pub struct AddTorrentOptions {
     /// Optional Newznab/Torznab category id from indexer (survives session restore).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub torznab_category: Option<u32>,
+    /// Category display name, e.g. "Anime - English-translated".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    /// Where the category comes from, e.g. "nyaa".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_source: Option<String>,
+    /// The source's own category id, e.g. "1_2".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_id: Option<String>,
 
     /// Adopt data left by another client in `output_folder` ("transfer from
     /// other client"): `"auto"` (`"qbit"` is accepted as an alias). Before the
@@ -393,6 +402,29 @@ pub struct InvalidAddInput(pub &'static str);
 impl std::fmt::Display for InvalidAddInput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.0)
+    }
+}
+
+impl AddTorrentOptions {
+    /// The category from `category`, `category_source`, `category_id` and
+    /// `torznab_category`, validated and normalized.
+    pub fn torrent_category(&self) -> anyhow::Result<crate::source_category::TorrentCategory> {
+        crate::source_category::TorrentCategory::from_parts(
+            self.category.as_deref(),
+            self.category_source.as_deref(),
+            self.category_id.as_deref(),
+            self.torznab_category,
+        )
+    }
+
+    /// Validate the category parts and store them normalized (trimmed, empty as none,
+    /// lowercase source).
+    pub fn normalize_category(&mut self) -> anyhow::Result<()> {
+        let c = self.torrent_category()?;
+        self.category = c.name;
+        self.category_source = c.source;
+        self.category_id = c.id;
+        Ok(())
     }
 }
 
@@ -1583,6 +1615,14 @@ impl Session {
 
         trace!("Torrent metadata: {:#?}", &metadata.info.info());
 
+        let category = opts.torrent_category().unwrap_or_else(|e| {
+            warn!("ignoring invalid category: {e:#}");
+            crate::source_category::TorrentCategory {
+                torznab: opts.torznab_category,
+                ..Default::default()
+            }
+        });
+
         let only_files = compute_only_files(
             &metadata.info,
             opts.only_files,
@@ -1841,7 +1881,7 @@ impl Session {
                 file_renames: RwLock::new(file_renames),
                 move_dest: RwLock::new(opts.move_dest.clone()),
                 move_lock: Default::default(),
-                torznab_category: opts.torznab_category,
+                category: RwLock::new(category),
                 damage: Default::default(),
                 runtime: Default::default(),
             });
@@ -2819,6 +2859,60 @@ impl Session {
         )
     }
 
+    /// Write a torrent's category to the session store.
+    pub(crate) async fn persist_category(&self, handle: &ManagedTorrentHandle) {
+        self.try_update_persistence_metadata(handle).await
+    }
+
+    /// Edit a torrent's category (`POST /torrents/{id}/category`). Only future
+    /// organizing / completion actions see the change; nothing is moved now.
+    pub async fn set_category(
+        &self,
+        handle: &ManagedTorrentHandle,
+        update: &crate::source_category::CategoryUpdate,
+    ) -> anyhow::Result<crate::source_category::TorrentCategory> {
+        let old = handle.category();
+        let new = update.apply(&old)?;
+        if new == old {
+            return Ok(new);
+        }
+        handle.set_category(new.clone());
+        self.try_update_persistence_metadata(handle).await;
+        self.emit_category_event(handle.shared.torrent_ref(handle.name()), &old, &new);
+        Ok(new)
+    }
+
+    pub(crate) fn emit_category_event(
+        &self,
+        tref: crate::event_log::TorrentRef,
+        old: &crate::source_category::TorrentCategory,
+        new: &crate::source_category::TorrentCategory,
+    ) {
+        use crate::event_log::{NewEvent, Severity, kind};
+        let show = |c: &crate::source_category::TorrentCategory| {
+            let label = c.label().unwrap_or_else(|| "none".to_owned());
+            match c.effective_torznab() {
+                Some(n) => format!("{label} (Torznab {n})"),
+                None => label,
+            }
+        };
+        self.events.emit(
+            NewEvent::new(
+                kind::CATEGORY_CHANGED,
+                Severity::Info,
+                format!("Category changed: {} -> {}", show(old), show(new)),
+            )
+            .details(serde_json::json!({
+                "old": old,
+                "new": new,
+                "old_label": old.label(),
+                "new_label": new.label(),
+                "effective_torznab": new.effective_torznab(),
+            }))
+            .torrent(tref),
+        );
+    }
+
     async fn try_update_persistence_metadata(&self, handle: &ManagedTorrentHandle) {
         if let Some(p) = self.persistence.as_ref()
             && let Err(e) = p.update_metadata(handle.id(), handle).await
@@ -2942,6 +3036,8 @@ impl Session {
         for action in actions {
             // Refresh folder each step — prior actions may have relocated.
             let output_folder = handle.output_folder();
+            let category = handle.category();
+            let opt = |v: Option<String>| v.unwrap_or_default();
             let env = [
                 ("RQBIT_TORRENT_ID", id.to_string()),
                 ("RQBIT_INFO_HASH", info_hash.clone()),
@@ -2949,6 +3045,13 @@ impl Session {
                 (
                     "RQBIT_OUTPUT_FOLDER",
                     output_folder.to_string_lossy().into_owned(),
+                ),
+                ("RQBIT_CATEGORY", opt(category.label())),
+                ("RQBIT_CATEGORY_SOURCE", opt(category.source.clone())),
+                ("RQBIT_CATEGORY_ID", opt(category.id.clone())),
+                (
+                    "RQBIT_TORZNAB_CATEGORY",
+                    opt(category.effective_torznab().map(|n| n.to_string())),
                 ),
             ];
             let (label, result): (String, anyhow::Result<()>) = match action {
@@ -3552,9 +3655,13 @@ fn organize_base(
         })
         .unwrap_or_default();
 
-    let (media, from_torznab) = match handle.torznab_category().and_then(
-        crate::media_classify::media_type_from_torznab_category,
-    ) {
+    // Torznab number given at add (or edited), else from the (source, id) table,
+    // else name heuristics.
+    let category = handle.category();
+    let (media, from_torznab) = match category
+        .effective_torznab()
+        .and_then(crate::media_classify::media_type_from_torznab_category)
+    {
         Some(m) => (m, true),
         None => (
             crate::media_classify::classify_media(&name, &file_paths),
@@ -3573,7 +3680,8 @@ fn organize_base(
         id = handle.id(),
         media = media.as_str(),
         from_torznab,
-        torznab_category = ?handle.torznab_category(),
+        torznab_category = ?category.effective_torznab(),
+        category = ?category.label(),
         type_folder = %type_folder,
         ?base,
         "auto-organize classification"

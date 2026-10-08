@@ -1,7 +1,7 @@
 //! The torrent list: column layout, header and rows.
 //!
 //! Columns follow the web UI's compact table (select, ID, queue #, Name,
-//! Status, Size, Progress, ↓, ↑, Received, Sent, ETA, Peers). Widths are
+//! Status, Category, Size, Progress, ↓, ↑, Received, Sent, ETA, Peers). Widths are
 //! shared by header and rows so they can't drift. Click selects, Ctrl/Cmd+
 //! click toggles, Shift+click extends, double click opens details; the
 //! checkbox toggles. Clicking a header sorts (again: reverse).
@@ -19,6 +19,7 @@ const W_CHECK: f32 = 30.;
 const W_ID: f32 = 44.;
 const W_QUEUE: f32 = 36.;
 const W_STATUS: f32 = 170.;
+const W_CATEGORY: f32 = 120.;
 const W_SIZE: f32 = 80.;
 const W_PROGRESS: f32 = 130.;
 const W_SPEED: f32 = 92.;
@@ -130,6 +131,13 @@ pub fn header(h: HeaderState, cx: &mut Context<RqbitWindow>) -> impl IntoElement
             "Status",
             SortColumn::Status,
             cell(W_STATUS),
+            false,
+        ))
+        .child(sortable(
+            "hdr-category",
+            "Category",
+            SortColumn::Category,
+            cell(W_CATEGORY),
             false,
         ))
         .child(sortable(
@@ -302,6 +310,7 @@ pub fn row(
     };
     let error: Option<SharedString> = stats.and_then(|s| s.error.clone()).map(Into::into);
     let damage = damage_short_text(t);
+    let category: SharedString = t.category_text().into();
     // Magnet still resolving metadata: the size isn't known yet.
     let size = stats
         .map(|s| {
@@ -446,6 +455,20 @@ pub fn row(
                     .text_color(theme::status_color(&status_kind))
                     .tooltip(widgets::text_tooltip(status_tooltip))
                     .child(status_label),
+            ),
+        )
+        .child(
+            cell(W_CATEGORY).child(
+                div()
+                    .id(("category", id))
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate()
+                    .text_color(theme::text_muted())
+                    .when(!category.is_empty(), |d| {
+                        d.tooltip(widgets::text_tooltip(category.clone()))
+                    })
+                    .child(category),
             ),
         )
         .child(

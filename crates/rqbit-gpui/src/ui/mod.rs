@@ -6,6 +6,7 @@
 //! `events.rs`) with any new endpoints going into `crate::api`.
 
 mod add_panel;
+mod category;
 mod context_menu;
 mod details;
 mod cleanup_panel;
@@ -91,6 +92,16 @@ struct RowMenu {
     order: Option<api::DownloadOrderView>,
 }
 
+/// "Set category…" for the right-clicked torrents.
+struct CategoryDialog {
+    ids: Vec<usize>,
+    init: [category::FieldInit; 4],
+    inputs: Vec<Entity<TextInput>>,
+    error: Option<String>,
+    busy: bool,
+    _subs: Vec<Subscription>,
+}
+
 struct DeleteDialog {
     items: Vec<(usize, SharedString)>,
     policy: api::RemovePolicy,
@@ -143,6 +154,9 @@ pub struct RqbitWindow {
     list_scroll: UniformListScrollHandle,
     filter: StatusFilter,
     filter_menu_open: bool,
+    category_filter: category::CategoryFilter,
+    category_menu_open: bool,
+    category_dialog: Option<CategoryDialog>,
     sort: SortColumn,
     sort_dir: SortDir,
     search_input: Entity<TextInput>,
@@ -213,6 +227,9 @@ impl RqbitWindow {
             list_scroll: UniformListScrollHandle::new(),
             filter: StatusFilter::All,
             filter_menu_open: false,
+            category_filter: Default::default(),
+            category_menu_open: false,
+            category_dialog: None,
             sort: SortColumn::Id,
             sort_dir: SortDir::Desc,
             search_input,
@@ -293,6 +310,7 @@ impl RqbitWindow {
         self.last_update = None;
         self.action_error = None;
         self.confirm_delete = None;
+        self.category_dialog = None;
         self.selection.clear();
         self.details = None;
         self.poll_task = None;
@@ -811,6 +829,7 @@ impl RqbitWindow {
                 }
             }
             R::Remove => self.ask_delete(cx),
+            R::SetCategory => self.open_category_dialog(ids, cx),
             R::Order(patch) => {
                 let Some(client) = self.client.clone() else {
                     return;
@@ -839,6 +858,184 @@ impl RqbitWindow {
             }
         }
         cx.notify();
+    }
+
+    fn open_category_dialog(&mut self, ids: Vec<usize>, cx: &mut Context<Self>) {
+        let items: Vec<&TorrentListItem> = ids
+            .iter()
+            .filter_map(|id| self.torrents.iter().find(|t| t.id == *id))
+            .collect();
+        if items.is_empty() {
+            return;
+        }
+        let ids: Vec<usize> = items.iter().map(|t| t.id).collect();
+        let init = category::initial_form(&items);
+        let mut subs = Vec::new();
+        let inputs = category::CategoryField::ALL
+            .iter()
+            .zip(init.iter())
+            .map(|(f, i)| {
+                let placeholder = if i.mixed { "(mixed, unchanged)" } else { f.placeholder() };
+                let input = cx.new(|cx| TextInput::new(i.value.clone(), placeholder, cx));
+                subs.push(cx.subscribe(&input, |this, _, ev: &TextInputEvent, cx| match ev {
+                    TextInputEvent::Submit(_) => this.apply_category(false, cx),
+                    TextInputEvent::Changed => {}
+                }));
+                input
+            })
+            .collect();
+        self.category_dialog = Some(CategoryDialog {
+            ids,
+            init,
+            inputs,
+            error: None,
+            busy: false,
+            _subs: subs,
+        });
+        cx.notify();
+    }
+
+    /// Save the dialog (`clear`: clear every part) for each torrent.
+    fn apply_category(&mut self, clear: bool, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let Some(d) = self.category_dialog.as_mut() else {
+            return;
+        };
+        if d.busy {
+            return;
+        }
+        let update = if clear {
+            category::clear_update()
+        } else {
+            let current: [String; 4] =
+                std::array::from_fn(|i| d.inputs[i].read(cx).text().to_owned());
+            match category::build_update(&d.init, &current) {
+                Ok(u) => u,
+                Err(e) => {
+                    d.error = Some(e);
+                    cx.notify();
+                    return;
+                }
+            }
+        };
+        if update.as_object().is_some_and(|m| m.is_empty()) {
+            self.category_dialog = None;
+            cx.notify();
+            return;
+        }
+        d.busy = true;
+        d.error = None;
+        let ids = d.ids.clone();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let mut errors = Vec::new();
+            for id in ids {
+                let r = cx
+                    .background_executor()
+                    .spawn(client.set_category(id, &update))
+                    .await;
+                if let Err(e) = r {
+                    errors.push(format!("#{id}: {e:#}"));
+                }
+            }
+            this.update(cx, |this, cx| {
+                if errors.is_empty() {
+                    this.category_dialog = None;
+                } else if let Some(d) = this.category_dialog.as_mut() {
+                    d.busy = false;
+                    d.error = Some(errors.join("\n"));
+                }
+                this.refresh_now(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn render_category_dialog(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let d = self.category_dialog.as_ref()?;
+        let n = d.ids.len();
+        let title = if n > 1 {
+            format!("Set category ({n} torrents)")
+        } else {
+            "Set category".to_owned()
+        };
+        let busy = d.busy;
+        let rows: Vec<_> = category::CategoryField::ALL
+            .iter()
+            .zip(d.inputs.iter())
+            .map(|(f, input)| {
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(div().w(px(120.)).text_sm().child(f.label()))
+                    .child(div().flex_1().child(input.clone()))
+            })
+            .collect();
+        Some(
+            div()
+                .id("category-overlay")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(theme::overlay())
+                .occlude()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .w(px(520.))
+                        .p_4()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(theme::border())
+                        .bg(theme::surface())
+                        .text_color(theme::text())
+                        .child(div().font_weight(gpui::FontWeight::BOLD).child(title))
+                        .children(rows)
+                        .child(div().text_xs().text_color(theme::text_muted()).child(
+                            "Only changed fields are saved; an emptied field is cleared. Without a Torznab number, auto-organize looks the source and id up. Affects future organizing only; nothing is moved now.",
+                        ))
+                        .when_some(d.error.clone(), |el, e| {
+                            el.child(div().text_xs().text_color(theme::error()).child(e))
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .gap_2()
+                                .child(
+                                    widgets::button("category-clear", "Clear category", !busy).when(!busy, |b| {
+                                        b.on_click(cx.listener(|this, _, _, cx| this.apply_category(true, cx)))
+                                    }),
+                                )
+                                .child(div().flex_1())
+                                .child(widgets::button("category-cancel", "Cancel", true).on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        this.category_dialog = None;
+                                        cx.notify();
+                                    }),
+                                ))
+                                .child(
+                                    widgets::button("category-save", "Save", !busy)
+                                        .border_color(theme::primary())
+                                        .when(!busy, |b| {
+                                            b.on_click(cx.listener(|this, _, _, cx| this.apply_category(false, cx)))
+                                        }),
+                                ),
+                        ),
+                ),
+        )
     }
 
     fn render_row_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
@@ -934,8 +1131,9 @@ impl RqbitWindow {
         // (and only that), wherever focus is.
         if ev.keystroke.key == "escape" {
             // The remove dialog is also cancelled by Escape (never confirmed).
-            let mut closed =
-                self.row_menu.take().is_some() || self.confirm_delete.take().is_some();
+            let mut closed = self.row_menu.take().is_some()
+                || self.confirm_delete.take().is_some()
+                || self.category_dialog.take().is_some();
             if let Some((panel, _)) = &self.details {
                 closed |= panel.update(cx, |p, cx| p.close_menu(cx));
             }
@@ -1712,6 +1910,67 @@ impl RqbitWindow {
             )
             .with_priority(1)
         });
+        let category_label = format!("Category: {}", self.category_filter.label());
+        let category_menu = self.category_menu_open.then(|| {
+            let mut options = vec![category::CategoryFilter::All, category::CategoryFilter::None];
+            options.extend(
+                category::category_options(&self.torrents)
+                    .into_iter()
+                    .map(category::CategoryFilter::Label),
+            );
+            if !options.contains(&self.category_filter) {
+                options.push(self.category_filter.clone());
+            }
+            deferred(
+                div()
+                    .id("category-menu")
+                    .absolute()
+                    .top(px(28.))
+                    .right_0()
+                    .w(px(260.))
+                    .max_h(px(420.))
+                    .overflow_y_scroll()
+                    .py_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(theme::border())
+                    .bg(theme::surface())
+                    .shadow_lg()
+                    .occlude()
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.category_menu_open = false;
+                        cx.notify();
+                    }))
+                    .children(options.into_iter().enumerate().map(|(i, f)| {
+                        let count = self.torrents.iter().filter(|t| f.matches(t)).count();
+                        let label = f.label();
+                        let current = f == self.category_filter;
+                        div()
+                            .id(("category-opt", i))
+                            .flex()
+                            .flex_row()
+                            .px_3()
+                            .py_1()
+                            .text_sm()
+                            .cursor_pointer()
+                            .when(current, |d| d.text_color(theme::primary()))
+                            .hover(|s| s.bg(theme::surface_hover()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.category_filter = f.clone();
+                                this.category_menu_open = false;
+                                cx.notify();
+                            }))
+                            .child(div().flex_1().truncate().child(label))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::text_muted())
+                                    .child(count.to_string()),
+                            )
+                    })),
+            )
+            .with_priority(1)
+        });
         let search_has_text = !self.search_input.read(cx).text().is_empty();
         div()
             .flex()
@@ -1759,6 +2018,22 @@ impl RqbitWindow {
                 )))
             })
             .child(div().flex_1())
+            .child(
+                div()
+                    .relative()
+                    .child(
+                        widgets::button("category-filter-btn", category_label, true)
+                            .when(self.category_filter != category::CategoryFilter::All, |b| {
+                                b.border_color(theme::primary())
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.category_menu_open = !this.category_menu_open;
+                                this.filter_menu_open = false;
+                                cx.notify();
+                            })),
+                    )
+                    .children(category_menu),
+            )
             .child(
                 div()
                     .relative()
@@ -2174,10 +2449,11 @@ fn public_ip_label(p: Option<&api::PublicIp>) -> (String, String) {
 impl Render for RqbitWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let query = self.search_input.read(cx).text().to_owned();
-        self.visible = list_state::visible_rows(
+        self.visible = list_state::visible_rows_in(
             &self.torrents,
             &query,
             self.filter,
+            &self.category_filter,
             self.sort,
             self.sort_dir,
         );
@@ -2290,6 +2566,7 @@ impl Render for RqbitWindow {
                 |d, p| d.child(widgets::modal("cleanup-overlay", 1000., p)),
             )
             .children(self.render_confirm(cx))
+            .children(self.render_category_dialog(cx))
             .children(self.render_row_menu(window, cx));
         #[cfg(not(target_family = "wasm"))]
         let root = root.on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _, cx| {

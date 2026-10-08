@@ -13,6 +13,7 @@ import { PiecesCanvas } from "./PiecesCanvas";
 import { DamagedFilesNotice } from "../DamagedFilesNotice";
 import { TorrentEventsSection } from "../events/TorrentEventsSection";
 import { floorPercent, formatProgress } from "../../helper/progress";
+import { categoryDetail, categoryLabel } from "../../helper/category";
 
 interface OverviewTabProps {
   torrent: TorrentListItem | null;
@@ -183,6 +184,26 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ torrent }) => {
         </div>
         <div className="truncate">
           <LV label="Output" value={torrent.output_folder} mono />
+        </div>
+        <div className="truncate" data-testid="category-row">
+          <LV
+            label="Category"
+            value={
+              categoryLabel(torrent) ? (
+                <>
+                  {categoryLabel(torrent)}
+                  {categoryDetail(torrent) && (
+                    <span className="text-tertiary">
+                      {" "}
+                      ({categoryDetail(torrent)})
+                    </span>
+                  )}
+                </>
+              ) : (
+                <span className="text-tertiary">None</span>
+              )
+            }
+          />
         </div>
         <div className="truncate">
           <LV

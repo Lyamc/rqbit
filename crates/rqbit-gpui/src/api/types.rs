@@ -23,6 +23,14 @@ pub struct TorrentListItem {
     pub output_folder: String,
     pub total_pieces: u32,
     pub stats: Option<TorrentStats>,
+    /// Newznab/Torznab number, e.g. 5070 = Anime.
+    pub torznab_category: Option<u32>,
+    /// Category name, source (e.g. "nyaa") and the source's id (e.g. "1_2").
+    pub category: Option<String>,
+    pub category_source: Option<String>,
+    pub category_id: Option<String>,
+    /// What to show (server-computed).
+    pub category_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -285,6 +293,19 @@ pub struct AdminStatus {
 }
 
 impl TorrentListItem {
+    /// The category to show ("" = none). Mirrors the web UI's `categoryLabel`.
+    pub fn category_text(&self) -> String {
+        let nonempty = |v: &Option<String>| v.clone().filter(|s| !s.is_empty());
+        if let Some(l) = nonempty(&self.category_label).or_else(|| nonempty(&self.category)) {
+            return l;
+        }
+        match (nonempty(&self.category_source), nonempty(&self.category_id)) {
+            (Some(s), Some(i)) => format!("{s} {i}"),
+            (Some(s), None) => s,
+            _ => String::new(),
+        }
+    }
+
     pub fn display_name(&self) -> String {
         self.name
             .clone()

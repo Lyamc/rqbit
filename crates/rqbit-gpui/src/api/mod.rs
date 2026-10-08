@@ -317,6 +317,11 @@ impl ApiClient {
         )
     }
 
+    /// `POST /torrents/{id}/category`: a missing key is unchanged, null clears it.
+    pub fn set_category(&self, id: usize, update: &serde_json::Value) -> ApiFuture<()> {
+        self.post_json_unit(&format!("torrents/{id}/category"), update)
+    }
+
     pub fn rename_file(&self, id: usize, file_id: usize, new_path: &str) -> ApiFuture<()> {
         self.post_json_unit(
             &format!("torrents/{id}/rename_file"),

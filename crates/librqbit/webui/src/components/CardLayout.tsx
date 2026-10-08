@@ -6,6 +6,7 @@ import { TorrentListItem } from "../api-types";
 import { Spinner } from "./Spinner";
 import { TorrentCard } from "./TorrentCard";
 import { TorrentDetailsModal } from "./modal/TorrentDetailsModal";
+import { CategoryFilterSelect } from "./CategoryFilterSelect";
 import { useUIStore } from "../stores/uiStore";
 import {
   TorrentSortColumn,
@@ -28,6 +29,7 @@ export const CardLayout = (props: {
   const searchQuery = useUIStore((state) => state.searchQuery);
   const setSearchQuery = useUIStore((state) => state.setSearchQuery);
   const statusFilter = useUIStore((state) => state.statusFilter);
+  const categoryFilter = useUIStore((state) => state.categoryFilter);
   const setStatusFilter = useUIStore((state) => state.setStatusFilter);
 
   // Keyboard shortcuts (Ctrl+A, Ctrl+F, Escape)
@@ -76,12 +78,15 @@ export const CardLayout = (props: {
   const filteredTorrents = useMemo(() => {
     if (!props.torrents) return null;
     return [...props.torrents]
-      .filter((t) => isTorrentVisible(t, normalizedQuery, statusFilter))
+      .filter((t) =>
+        isTorrentVisible(t, normalizedQuery, statusFilter, categoryFilter),
+      )
       .sort((a, b) => compareTorrents(a, b, sortColumn, sortDirection));
   }, [
     props.torrents,
     normalizedQuery,
     statusFilter,
+    categoryFilter,
     sortColumn,
     sortDirection,
   ]);
@@ -122,6 +127,8 @@ export const CardLayout = (props: {
             </button>
           )}
         </div>
+
+        <CategoryFilterSelect className="py-1.5 sm:py-2 px-2 sm:px-3 text-sm bg-surface border border-divider rounded-lg focus:outline-none focus:border-primary max-w-[10rem]" />
 
         {/* Status filter */}
         <select

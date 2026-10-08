@@ -19,8 +19,30 @@ export interface TorrentFileAttributes {
   executable: boolean;
 }
 
+/** Category fields of a torrent (all optional; unset ones are left out). */
+export interface TorrentCategoryFields {
+  /** Newznab/Torznab number, e.g. 5070 = Anime. */
+  torznab_category?: number | null;
+  /** Display name, e.g. "Anime - English-translated". */
+  category?: string | null;
+  /** Where the category comes from, e.g. "nyaa". */
+  category_source?: string | null;
+  /** The source's own id, e.g. "1_2". */
+  category_id?: string | null;
+  /** What to show: name, table name, "source id" or the Torznab name. */
+  category_label?: string | null;
+}
+
+/** `POST /torrents/{id}/category`: a missing key is unchanged, null clears it. */
+export interface CategoryUpdate {
+  category?: string | null;
+  category_source?: string | null;
+  category_id?: string | null;
+  torznab_category?: number | null;
+}
+
 // Interface for the Torrent Details API response (with files, from individual endpoint)
-export interface TorrentDetails {
+export interface TorrentDetails extends TorrentCategoryFields {
   name: string | null;
   info_hash: string;
   files: Array<TorrentFile>;
@@ -30,7 +52,7 @@ export interface TorrentDetails {
 
 // Interface for torrent list item (from bulk /torrents?with_stats=true endpoint)
 // This matches TorrentDetailsResponse from the backend, but files are not included in the list
-export interface TorrentListItem {
+export interface TorrentListItem extends TorrentCategoryFields {
   id: number;
   info_hash: string;
   name: string | null;
@@ -928,6 +950,8 @@ export interface RqbitAPI {
   pause: (index: number) => Promise<void>;
   updateOnlyFiles: (index: number, files: number[]) => Promise<void>;
   renameFile: (index: number, fileId: number, newPath: string) => Promise<void>;
+  /** Edit the category (affects future organizing only). */
+  setCategory?: (index: number, update: CategoryUpdate) => Promise<TorrentDetails>;
   /** Move/copy the torrent. `into`: `destination` is the folder to put it in (a
    * multi-file torrent goes to `<destination>/<TorrentName>`). */
   relocateTorrent: (
