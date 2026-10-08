@@ -100,14 +100,39 @@ pub fn resume_threshold(remaining_bytes: u64, piece_len: u64) -> u64 {
 }
 
 /// Mount point from `/proc/self/mountinfo` text: the longest mount point that is a path
-/// prefix of `path` (component-wise).
+/// prefix of `path` (component-wise). A bind mount of a subfolder (e.g. a systemd
+/// `ReadWritePaths=` sandbox) is followed up to its parent mount of the same filesystem,
+/// so the name is the filesystem's real mount point.
 pub fn mount_point_from_mountinfo(mountinfo: &str, path: &Path) -> Option<PathBuf> {
-    mountinfo
+    struct E<'a> {
+        id: &'a str,
+        parent: &'a str,
+        dev: &'a str,
+        mount: PathBuf,
+    }
+    let entries: Vec<E> = mountinfo
         .lines()
-        .filter_map(|l| l.split(' ').nth(4))
-        .map(|m| PathBuf::from(unescape_mount(m)))
-        .filter(|m| path.starts_with(m))
-        .max_by_key(|m| m.components().count())
+        .filter_map(|l| {
+            let mut f = l.split(' ');
+            Some(E {
+                id: f.next()?,
+                parent: f.next()?,
+                dev: f.next()?,
+                mount: PathBuf::from(unescape_mount(f.nth(1)?)),
+            })
+        })
+        .collect();
+    let mut best = entries
+        .iter()
+        .filter(|e| path.starts_with(&e.mount))
+        .max_by_key(|e| e.mount.components().count())?;
+    while let Some(p) = entries
+        .iter()
+        .find(|p| p.id == best.parent && p.dev == best.dev && best.mount.starts_with(&p.mount))
+    {
+        best = p;
+    }
+    Some(best.mount.clone())
 }
 
 /// mountinfo escapes space, tab, newline and backslash as `\ooo`.
@@ -215,6 +240,14 @@ mod tests {
         assert_eq!(m("/media/usb disk/x"), PathBuf::from("/media/usb disk"));
         assert_eq!(m("/media/usbx"), PathBuf::from("/"));
         assert_eq!(m("/home"), PathBuf::from("/"));
+        // Sandbox bind mount of a subfolder → the filesystem's mount point.
+        let mi = "1663 1 259:7 / / rw - ext4 /dev/root rw\n\
+                  2697 1663 8:33 / /media/data ro - bcachefs /dev/sdc1 rw\n\
+                  3681 2697 8:33 /Downloads/t /media/data/Downloads/t rw - bcachefs /dev/sdc1 rw\n";
+        assert_eq!(
+            mount_point_from_mountinfo(mi, Path::new("/media/data/Downloads/t/x")).unwrap(),
+            PathBuf::from("/media/data")
+        );
     }
 
     #[cfg(unix)]
