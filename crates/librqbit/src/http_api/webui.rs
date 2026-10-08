@@ -29,12 +29,13 @@ pub fn make_webui_router() -> Router {
                 )
             }),
         )
+        // Old pages linked the logo as their icon; the same file as favicon.svg.
         .route(
             "/assets/logo.svg",
             get(|| async {
                 (
                     [("Content-Type", "image/svg+xml")],
-                    include_str!("../../webui/dist/assets/logo.svg"),
+                    include_str!("favicon/favicon.svg"),
                 )
             }),
         )
