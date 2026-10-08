@@ -944,6 +944,24 @@ pub struct RepairStatus {
     pub error: Option<String>,
 }
 
+/// Writes failed because the disk is full: downloading is paused until enough space is
+/// free (checked periodically), then resumes by itself. Not counted as recovery attempts.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DiskFullStats {
+    /// When the torrent first hit the full disk (this episode).
+    pub since: String,
+    /// Pieces held back until space is free.
+    pub pieces_waiting: usize,
+    /// Free space at the last check, and the mount it was measured on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<crate::disk_space::DiskSpace>,
+    /// Downloading resumes once at least this much is free.
+    pub resume_at_free_bytes: u64,
+    /// e.g. "Disk full: downloading paused until space is freed (0.4 GB free on /mnt)".
+    pub message: String,
+    pub last_error: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct DamageStats {
     pub damaged_files: Vec<DamagedFileStats>,
@@ -954,6 +972,17 @@ pub struct DamageStats {
     /// Automatic recovery gave up on something; a manual Fix errors is needed.
     #[serde(default)]
     pub needs_attention: bool,
+    /// Downloading paused because the disk is full.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_full: Option<DiskFullStats>,
+}
+
+struct DiskFullState {
+    since: String,
+    pieces: BTreeSet<u32>,
+    space: Option<crate::disk_space::DiskSpace>,
+    resume_at_free_bytes: u64,
+    last_error: String,
 }
 
 struct DamagedFileState {
@@ -976,6 +1005,7 @@ struct DamageInner {
     /// Automatic repairs, per file.
     file_backoff: Backoff<usize>,
     max_attempts: u32,
+    disk_full: Option<DiskFullState>,
 }
 
 #[derive(Default)]
@@ -983,6 +1013,8 @@ pub struct DamageTracker {
     inner: Mutex<DamageInner>,
     /// Fast path for the per-piece success hook.
     any_piece_backoff: std::sync::atomic::AtomicBool,
+    /// Fast path for piece selection: downloading paused, the disk is full.
+    disk_full: std::sync::atomic::AtomicBool,
 }
 
 fn secs_until(t: SystemTime, now: SystemTime) -> u64 {
@@ -1088,27 +1120,91 @@ impl DamageTracker {
             .take_due(SystemTime::now(), limit)
     }
 
-    /// Pieces currently held back (waiting or given up), which are not in the queue.
+    /// Pieces currently held back (waiting, given up, or waiting for disk space), which
+    /// are not in the queue.
     pub fn held_back_pieces(&self) -> Vec<u32> {
-        self.inner
-            .lock()
+        let g = self.inner.lock();
+        let mut out: BTreeSet<u32> = g
             .piece_backoff
             .iter()
             .filter(|(_, e)| e.pending_requeue || e.gave_up)
             .map(|(k, _)| *k)
-            .collect()
+            .collect();
+        if let Some(d) = &g.disk_full {
+            out.extend(d.pieces.iter().copied());
+        }
+        out.into_iter().collect()
     }
 
-    /// Manual Fix errors / manual repair: reset all counters. Returns pieces that were held
-    /// back, so the caller can requeue them immediately.
+    /// Manual Fix errors / manual repair: reset all counters (and stop waiting for disk
+    /// space). Returns pieces that were held back, so the caller can requeue them
+    /// immediately.
     pub fn manual_reset(&self) -> Vec<u32> {
         let mut g = self.inner.lock();
         g.file_backoff.reset_all();
         g.piece_failures.clear();
-        let pieces = g.piece_backoff.reset_all();
+        let mut pieces: BTreeSet<u32> = g.piece_backoff.reset_all().into_iter().collect();
+        if let Some(d) = g.disk_full.take() {
+            pieces.extend(d.pieces);
+        }
+        self.disk_full
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         self.any_piece_backoff
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        pieces
+        pieces.into_iter().collect()
+    }
+
+    /// A write of `piece` failed because the disk is full: hold the piece back without
+    /// counting a recovery attempt, and pause downloading. Returns true when this starts
+    /// a new disk-full episode.
+    pub fn piece_disk_full(&self, piece: u32, error: &str) -> bool {
+        let mut g = self.inner.lock();
+        let newly = g.disk_full.is_none();
+        let d = g.disk_full.get_or_insert_with(|| DiskFullState {
+            since: crate::adopt::rfc3339_now(),
+            pieces: BTreeSet::new(),
+            space: None,
+            resume_at_free_bytes: 0,
+            last_error: String::new(),
+        });
+        d.pieces.insert(piece);
+        d.last_error = error.chars().take(400).collect();
+        self.disk_full
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        newly
+    }
+
+    /// Downloading is paused because the disk is full.
+    pub fn is_disk_full(&self) -> bool {
+        self.disk_full.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Latest free-space measurement while waiting (for the status and the UIs).
+    pub fn set_disk_space(&self, space: Option<crate::disk_space::DiskSpace>, resume_at: u64) {
+        if let Some(d) = self.inner.lock().disk_full.as_mut() {
+            d.space = space;
+            d.resume_at_free_bytes = resume_at;
+        }
+    }
+
+    /// Free space at the last check, while waiting.
+    pub fn disk_full_space(&self) -> Option<crate::disk_space::DiskSpace> {
+        self.inner
+            .lock()
+            .disk_full
+            .as_ref()
+            .and_then(|d| d.space.clone())
+    }
+
+    /// Enough space again: stop waiting. Returns the held-back pieces to requeue.
+    pub fn clear_disk_full(&self) -> Vec<u32> {
+        let mut g = self.inner.lock();
+        self.disk_full
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        g.disk_full
+            .take()
+            .map(|d| d.pieces.into_iter().collect())
+            .unwrap_or_default()
     }
 
     /// Damaged files for which an automatic repair may run now. Records the attempt
@@ -1275,7 +1371,8 @@ impl DamageTracker {
             .iter()
             .filter(|(_, e)| e.attempts > 0)
             .collect();
-        if g.files.is_empty() && g.repair.is_none() && affected.is_empty() {
+        if g.files.is_empty() && g.repair.is_none() && affected.is_empty() && g.disk_full.is_none()
+        {
             return None;
         }
         let recovery = (!affected.is_empty()).then(|| RecoveryStats {
@@ -1328,11 +1425,20 @@ impl DamageTracker {
                 .as_ref()
                 .map(|r| r.pieces_needing_attention > 0)
                 .unwrap_or(false);
+        let disk_full = g.disk_full.as_ref().map(|d| DiskFullStats {
+            since: d.since.clone(),
+            pieces_waiting: d.pieces.len(),
+            space: d.space.clone(),
+            resume_at_free_bytes: d.resume_at_free_bytes,
+            message: crate::disk_space::waiting_message(d.space.as_ref()),
+            last_error: d.last_error.clone(),
+        });
         Some(DamageStats {
             damaged_files,
             repair: g.repair.clone(),
             recovery,
             needs_attention,
+            disk_full,
         })
     }
 }

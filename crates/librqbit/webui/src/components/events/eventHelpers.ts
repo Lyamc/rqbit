@@ -8,6 +8,8 @@ export const KIND_LABELS: Record<string, string> = {
   piece_retry_scheduled: "Retry",
   needs_attention: "Needs attention",
   io_error: "I/O error",
+  disk_full: "Disk full",
+  disk_space_available: "Disk space OK",
   damage_detected: "Damaged",
   adoption: "Adoption",
   torrent_error: "Torrent error",
@@ -18,7 +20,8 @@ export const KIND_FILTERS: { label: string; value: string }[] = [
   { label: "All types", value: "" },
   { label: "Repairs", value: "repair_run,repair_file" },
   { label: "Repair runs", value: "repair_run" },
-  { label: "Errors", value: "io_error,torrent_error" },
+  { label: "Errors", value: "io_error,torrent_error,disk_full" },
+  { label: "Disk full", value: "disk_full,disk_space_available" },
   {
     label: "Recovery",
     value: "damage_detected,piece_retry_scheduled,needs_attention",

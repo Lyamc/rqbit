@@ -40,6 +40,9 @@ pub enum StatusKind {
     WaitingToRetry,
     /// Automatic recovery gave up; manual Fix errors needed.
     NeedsAttention,
+    /// Writes failed because the disk is full: downloading paused until space is free
+    /// (resumes by itself).
+    DiskFull,
     Moving,
     Renaming,
     /// Held by queue limits (max active downloads / torrents).
@@ -131,6 +134,9 @@ pub struct StatusInputs<'a> {
     pub retry: Option<RetryView>,
     pub live: Option<LiveView>,
     pub error: Option<&'a str>,
+    /// Waiting for disk space: the message to show
+    /// ("Disk full: downloading paused until space is freed (0.4 GB free on /mnt)").
+    pub disk_full: Option<&'a str>,
 }
 
 /// Per-torrent runtime flags used for status derivation and queueing.
@@ -232,15 +238,23 @@ pub fn derive_status(i: &StatusInputs<'_>) -> StatusDetail {
     };
 
     if matches!(i.engine, EngineState::Error) {
-        let short: String = i
-            .error
-            .unwrap_or("error")
-            .lines()
-            .next()
-            .unwrap_or("")
-            .chars()
-            .take(80)
-            .collect();
+        let err = i.error.unwrap_or("error");
+        if crate::disk_space::is_disk_full_text(err) {
+            // "Disk full: torrent stopped (0.4 GB free on /mnt): error writing ..." → the
+            // part before the cause.
+            // (or "...\n\nCaused by: ..." in the Debug format).
+            let first = err.lines().next().unwrap_or(err);
+            let label = if first.starts_with("Disk full") {
+                first
+                    .find(": error")
+                    .map_or(first, |n| &first[..n])
+                    .to_owned()
+            } else {
+                "Disk full: torrent stopped".to_owned()
+            };
+            return mk(StatusKind::Error, label);
+        }
+        let short: String = err.lines().next().unwrap_or("").chars().take(80).collect();
         return mk(StatusKind::Error, format!("Error: {short}"));
     }
     if let Some(op) = i.active_op {
@@ -260,6 +274,9 @@ pub fn derive_status(i: &StatusInputs<'_>) -> StatusDetail {
         let mut s = mk(StatusKind::Repairing, format!("Repairing {}", pct(r.progress)));
         s.progress = Some(r.progress.clamp(0.0, 1.0));
         return s;
+    }
+    if let (Some(msg), EngineState::Live) = (i.disk_full, i.engine) {
+        return mk(StatusKind::DiskFull, msg.to_owned());
     }
     if i.needs_attention {
         return mk(
@@ -392,11 +409,47 @@ mod tests {
                 secs_since_data: 1,
             }),
             error: None,
+            disk_full: None,
         }
     }
 
     fn kind(i: &StatusInputs<'_>) -> StatusKind {
         derive_status(i).kind
+    }
+
+    #[test]
+    fn disk_full_status() {
+        let mut i = base();
+        let msg = "Disk full: downloading paused until space is freed (0.4 GB free on /mnt/data)";
+        i.disk_full = Some(msg);
+        i.needs_attention = true;
+        let s = derive_status(&i);
+        assert_eq!(s.kind, StatusKind::DiskFull);
+        assert_eq!(s.label, msg);
+        // A user pause wins.
+        i.needs_attention = false;
+        i.engine = EngineState::Paused;
+        assert_eq!(kind(&i), StatusKind::Paused);
+        // Without soft recovery the torrent stops with an error that says so.
+        i.engine = EngineState::Error;
+        i.error = Some(
+            "Disk full: torrent stopped (0.4 GB free on /mnt/data): error writing to file 0 (\"a\"): error calling pwritev: ENOSPC: No space left on device",
+        );
+        let s = derive_status(&i);
+        assert_eq!(s.kind, StatusKind::Error);
+        assert_eq!(
+            s.label,
+            "Disk full: torrent stopped (0.4 GB free on /mnt/data)"
+        );
+        i.error = Some(
+            "Disk full: torrent stopped (0.4 GB free on /mnt/data)\n\nCaused by:\n    0: error writing",
+        );
+        assert_eq!(
+            derive_status(&i).label,
+            "Disk full: torrent stopped (0.4 GB free on /mnt/data)"
+        );
+        i.error = Some("error creating files: No space left on device (os error 28)");
+        assert_eq!(derive_status(&i).label, "Disk full: torrent stopped");
     }
 
     #[test]

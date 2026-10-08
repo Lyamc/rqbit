@@ -16,6 +16,7 @@ export const STATUS_KIND_CLASS: Record<StatusKind, string> = {
   repairing: "bg-warning-bg/20 text-warning",
   waiting_to_retry: "bg-warning-bg/20 text-warning",
   needs_attention: "bg-error-bg/20 text-error",
+  disk_full: "bg-error-bg/20 text-error",
   moving: "bg-primary-bg/20 text-primary",
   renaming: "bg-primary-bg/20 text-primary",
   queued_for_downloading: "bg-surface-sunken text-tertiary",
@@ -49,6 +50,7 @@ export const statusClass = (d: StatusDetail | null): string =>
 /** Sort key: groups similar states together. */
 const STATUS_ORDER: StatusKind[] = [
   "error",
+  "disk_full",
   "needs_attention",
   "repairing",
   "queued_for_repair",

@@ -1720,6 +1720,8 @@ pub fn kind_label(kind: &str) -> String {
         "piece_retry_scheduled" => "Retry",
         "needs_attention" => "Needs attention",
         "io_error" => "I/O error",
+        "disk_full" => "Disk full",
+        "disk_space_available" => "Disk space OK",
         "damage_detected" => "Damaged",
         "adoption" => "Adoption",
         "torrent_error" => "Torrent error",

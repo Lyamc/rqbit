@@ -121,7 +121,7 @@ axum-extra = { workspace = true, features = ["query"] }
 zip = { version = "2.2", default-features = false, features = ["deflate"], optional = true }
 librqbit-dualstack-sockets = { workspace = true, features = ["axum"] }
 socket2.workspace = true
-nix = { workspace = true, features = ["uio"] }
+nix = { workspace = true, features = ["uio", "fs"] }
 libc.workspace = true
 thiserror.workspace = true
 

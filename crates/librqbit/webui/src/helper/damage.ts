@@ -6,7 +6,18 @@ export const hasDamagedFiles = (d?: DamageStats | null): boolean =>
 
 /** Pieces held back / given up after I/O errors, or files whose auto repair gave up. */
 export const hasRecoveryIssues = (d?: DamageStats | null): boolean =>
-  !!d && (!!d.recovery || !!d.needs_attention);
+  !!d && (!!d.recovery || !!d.needs_attention || !!d.disk_full);
+
+/** "Disk full: downloading paused until space is freed (0.4 GB free on /mnt)", or null. */
+export const diskFullText = (d?: DamageStats | null): string | null =>
+  d?.disk_full?.message ?? null;
+
+/** "Resumes by itself once 1.1 GB is free; 3 piece(s) waiting." */
+export const diskFullDetail = (d?: DamageStats | null): string | null => {
+  const f = d?.disk_full;
+  if (!f) return null;
+  return `Resumes by itself once ${formatBytes(f.resume_at_free_bytes)} is free (checked every 15s); ${f.pieces_waiting} piece(s) waiting. Seeding continues. Fix errors retries now.`;
+};
 
 export const formatDuration = (secs: number): string => {
   if (secs < 60) return `${Math.max(0, Math.round(secs))}s`;
@@ -91,6 +102,9 @@ export const damageShortText = (d?: DamageStats | null): string | null => {
       ? Math.floor((r.scanned_bytes / r.total_bytes) * 100)
       : 0;
     return `Repairing damaged files… ${pct}% scanned (${r.files_done}/${r.files_total} files)`;
+  }
+  if (d.disk_full) {
+    return `${d.disk_full.message} — resumes by itself, Fix errors retries now`;
   }
   const rec = recoveryText(d);
   const attention = d.needs_attention ? "Needs attention: " : "";

@@ -20,7 +20,8 @@ pub const KIND_FILTERS: &[(&str, &str)] = &[
     ("All types", ""),
     ("Repairs", "repair_run,repair_file"),
     ("Repair runs", "repair_run"),
-    ("Errors", "io_error,torrent_error"),
+    ("Errors", "io_error,torrent_error,disk_full"),
+    ("Disk full", "disk_full,disk_space_available"),
     (
         "Recovery",
         "damage_detected,piece_retry_scheduled,needs_attention",
@@ -642,12 +643,17 @@ mod tests {
 
     #[test]
     fn filters_match_web_ui() {
-        assert_eq!(KIND_FILTERS.len(), 7);
+        assert_eq!(KIND_FILTERS.len(), 8);
         assert_eq!(KIND_FILTERS[0].1, "");
         assert!(
             KIND_FILTERS
                 .iter()
-                .any(|(_, v)| *v == "io_error,torrent_error")
+                .any(|(_, v)| *v == "io_error,torrent_error,disk_full")
+        );
+        assert!(
+            KIND_FILTERS
+                .iter()
+                .any(|(_, v)| *v == "disk_full,disk_space_available")
         );
         assert_eq!(SEVERITY_FILTERS[2].1, "error");
     }
