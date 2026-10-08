@@ -1,5 +1,6 @@
 import { JSX, useContext, useEffect, useState } from "react";
-import { ErrorDetails as ApiErrorDetails } from "./api-types";
+import { ErrorDetails as ApiErrorDetails, TorrentListItem } from "./api-types";
+import { TorrentFeed, browserInflater } from "./helper/torrentFeed";
 import { APIContext } from "./context";
 import { RootContent } from "./components/RootContent";
 import { customSetInterval } from "./helper/customSetInterval";
@@ -42,23 +43,26 @@ export const RqbitWebUI = (props: {
     (state) => state.setRefreshTorrents,
   );
 
+  /** Stores a fresh list; returns the update interval it calls for. */
+  const applyTorrents = (torrents: TorrentListItem[]): number => {
+    setTorrents(torrents);
+    // Keep the selection across polls; drop torrents that went away.
+    useUIStore.getState().pruneSelection(new Set(torrents.map((t) => t.id)));
+    setOtherError(null);
+
+    // Fast updates (1s) if any torrent is live/initializing, slow (5s) otherwise
+    const hasActiveTorrents = torrents.some(
+      (t) => t.stats?.state === "live" || t.stats?.state === "initializing",
+    );
+    return hasActiveTorrents ? 1000 : 5000;
+  };
+
+  /** Plain polling, for API implementations without the list stream. */
   const refreshTorrents = async (): Promise<number> => {
     setTorrentsLoading(true);
     try {
       const response = await API.listTorrents({ withStats: true });
-      setTorrents(response.torrents);
-      // Keep the selection across polls; drop torrents that went away.
-      useUIStore
-        .getState()
-        .pruneSelection(new Set(response.torrents.map((t) => t.id)));
-      setOtherError(null);
-
-      // Determine polling interval based on torrent states
-      // Fast poll (1s) if any torrent is live/initializing, slow poll (5s) otherwise
-      const hasActiveTorrents = response.torrents.some(
-        (t) => t.stats?.state === "live" || t.stats?.state === "initializing",
-      );
-      return hasActiveTorrents ? 1000 : 5000;
+      return applyTorrents(response.torrents);
     } catch (e) {
       setOtherError({ text: "Error refreshing torrents", details: e as any });
       console.error(e);
@@ -70,9 +74,45 @@ export const RqbitWebUI = (props: {
 
   const setStats = useStatsStore((state) => state.setStats);
 
-  // Register the refresh callback
+  // Keep the torrent list current: the server's list stream (WebSocket with deltas,
+  // falling back to delta polling) where available, else plain polling.
   useEffect(() => {
-    setRefreshTorrents(refreshTorrents as unknown as () => void);
+    const wsUrl = API.getTorrentListStreamUrl?.() ?? null;
+    const poll = API.pollTorrentList;
+    if (!poll) {
+      setRefreshTorrents(refreshTorrents as unknown as () => void);
+      return customSetInterval(async () => refreshTorrents(), 0);
+    }
+    setTorrentsLoading(true);
+    const feed: TorrentFeed = new TorrentFeed(
+      {
+        wsUrl,
+        poll,
+        WebSocket: typeof WebSocket === "function" ? (WebSocket as any) : null,
+        makeInflater: browserInflater(),
+        setTimeout: (f, ms) => window.setTimeout(f, ms),
+        clearTimeout: (t) => window.clearTimeout(t as number),
+        now: () => Date.now(),
+      },
+      {
+        onTorrents: (torrents) => {
+          setTorrentsLoading(false);
+          feed.setTickMs(applyTorrents(torrents));
+        },
+        onError: (e) => {
+          if (e === null) return;
+          setTorrentsLoading(false);
+          setOtherError({
+            text: "Error refreshing torrents",
+            details: e as any,
+          });
+          console.error(e);
+        },
+      },
+    );
+    setRefreshTorrents(() => feed.refresh());
+    feed.start();
+    return () => feed.stop();
   }, []);
 
   // Preferences the UI itself uses (remove/delete behaviour); refreshed when
@@ -83,10 +123,6 @@ export const RqbitWebUI = (props: {
     window.addEventListener("focus", load);
     return () => window.removeEventListener("focus", load);
   }, [API]);
-
-  useEffect(() => {
-    return customSetInterval(async () => refreshTorrents(), 0);
-  }, []);
 
   useEffect(() => {
     return customSetInterval(

@@ -46,6 +46,7 @@ async fn h_api_root(parts: Parts) -> impl IntoResponse {
             "GET /dht/stats": "DHT stats",
             "GET /dht/table": "DHT routing table",
             "GET /torrents": "List torrents",
+            "GET /stream/torrents": "Torrent list for UIs: WebSocket (snapshot, then deltas; ?tick_ms=, ?enc=deflate) or, without Upgrade, a delta since ?since=<seq>&epoch=<epoch> (else a snapshot)",
             "GET /torrents/playlist": "Generate M3U8 playlist for all files in all torrents",
             "GET /stats": "Global session stats",
             "GET /public_ip": "Public IPv4/IPv6 as seen from the server's network (?refresh=true re-checks, cached 30s)",
@@ -113,6 +114,10 @@ pub fn make_api_router(state: ApiState) -> Router {
         .route("/stats", get(torrents::h_session_stats))
         .route("/public_ip", get(other::h_public_ip))
         .route("/torrents", get(torrents::h_torrents_list))
+        .route(
+            "/stream/torrents",
+            get(super::list_stream::h_stream_torrents),
+        )
         .route("/torrents/{id}", get(torrents::h_torrent_details))
         .route("/torrents/{id}/haves", get(torrents::h_torrent_haves))
         .route("/torrents/{id}/metadata", get(torrents::h_metadata))

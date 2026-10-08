@@ -1,3 +1,4 @@
+import type { FeedMessage } from "./helper/listFeed";
 // Interface for the Torrent API response
 export interface TorrentId {
   id: number;
@@ -908,6 +909,14 @@ export type AddJobCancelOutcome =
   | ({ result: "finished" } & Partial<AddJobStatus>);
 
 export interface RqbitAPI {
+  /** `GET /stream/torrents` as a ws:// / wss:// URL (snapshot, then deltas), or
+   *  absent/null where only `listTorrents` polling works. */
+  getTorrentListStreamUrl?: () => string | null;
+  /** `GET /stream/torrents?since=<seq>&epoch=<epoch>`: delta since that version, or a
+   *  snapshot (null `since`, or a version the server no longer has). */
+  pollTorrentList?: (
+    since: { seq: number; epoch: string } | null,
+  ) => Promise<FeedMessage>;
   getPlaylistUrl: (index: number) => string | null;
   getStreamLogsUrl: () => string | null;
   listTorrents: (opts?: {

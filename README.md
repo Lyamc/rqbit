@@ -68,6 +68,11 @@ Server settings added by the fork live in `preferences.json` (and `admin.json`, 
   - nothing is ever deleted or truncated
 - Magnet links / `#add=<magnet>` URLs: see the GPUI client and Preferences > Interface below.
 
+### Compression and the torrent list stream
+
+- **Responses** are compressed with gzip, brotli or zstd (level 4) when the client sends `Accept-Encoding`. Only text-like bodies (JSON, HTML, JS, CSS, wasm, SVG, playlists) of 256 bytes or more are compressed. Media files and ranged responses are never compressed, so Range requests and streaming work as before, and the GPUI bundle's precompressed files aren't compressed again. Streams (`text/event-stream`, `/stream_logs`) aren't compressed either.
+- **`GET /stream/torrents`** is the torrent list the UIs use. As a WebSocket it sends a snapshot of a lean list on connect, then one delta per tick (`?tick_ms=`, 1 s by default). A delta is a JSON merge patch carrying only added/removed torrents and the fields that changed. Messages have sequence numbers; a client that sees a gap reconnects and gets a new snapshot, and pings keep idle proxies from closing the connection. With `?enc=deflate` the messages are raw-deflate compressed with a shared window; the WebSocket library has no permessage-deflate, so this is done in the app. Without an Upgrade it is the polling fallback: `?since=<seq>&epoch=<epoch>` returns the delta since then, or a snapshot if that's too old. The auth is the same as the rest of the API. `GET /torrents?with_stats=true` is unchanged.
+
 ### Events log
 
 - `events.jsonl` is a persistent, size-capped event log (`event_log_max_mb`, default 10 MB). It records:
@@ -397,6 +402,7 @@ curl -s 'http://127.0.0.1:3030/'
     "GET /stats": "Global session stats",
     "GET /stream_logs": "Continuously stream logs",
     "GET /torrents": "List torrents",
+    "GET /stream/torrents": "Torrent list for UIs: WebSocket (snapshot, then deltas; ?tick_ms=, ?enc=deflate) or, without Upgrade, a delta since ?since=<seq>&epoch=<epoch> (else a snapshot)",
     "GET /torrents/playlist": "Playlist for supported players",
     "GET /torrents/{id_or_infohash}": "Torrent details",
     "GET /torrents/{id_or_infohash}/haves": "The bitfield of have pieces",

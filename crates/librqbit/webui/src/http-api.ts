@@ -39,6 +39,7 @@ import {
   DownloadOrderView,
   DownloadOrderPatch,
 } from "./api-types";
+import type { FeedMessage } from "./helper/listFeed";
 
 // Define API URL and base path
 const apiUrl = (() => {
@@ -140,6 +141,23 @@ const makeRequest = async (
 
 export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
   getStreamLogsUrl: () => apiUrl + "/stream_logs",
+  getTorrentListStreamUrl: (): string | null => {
+    try {
+      const u = new URL(apiUrl + "/stream/torrents", window.location.href);
+      if (u.protocol === "http:") u.protocol = "ws:";
+      else if (u.protocol === "https:") u.protocol = "wss:";
+      else return null;
+      return u.toString();
+    } catch {
+      return null;
+    }
+  },
+  pollTorrentList: (since): Promise<FeedMessage> => {
+    const q = since
+      ? `?since=${since.seq}&epoch=${encodeURIComponent(since.epoch)}`
+      : "";
+    return makeRequest("GET", `/stream/torrents${q}`);
+  },
   listTorrents: (opts?: {
     withStats?: boolean;
   }): Promise<ListTorrentsResponse> => {

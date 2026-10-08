@@ -22,6 +22,7 @@ use crate::api::Result;
 
 mod gpui_web;
 mod handlers;
+mod list_stream;
 mod public_ip;
 mod timeout;
 #[cfg(feature = "webui")]
@@ -32,6 +33,7 @@ pub struct HttpApi {
     api: Api,
     opts: HttpApiOptions,
     public_ip: Arc<public_ip::PublicIpMonitor>,
+    list_feed: list_stream::ListFeedHub,
 }
 
 #[derive(Debug, Default)]
@@ -80,12 +82,48 @@ async fn simple_basic_auth(
     }
 }
 
+/// gzip / brotli / zstd for every response the client accepts it for, at level 4
+/// (cheap enough for responses polled every second; brotli's default 11 is far too slow).
+/// Only text-like bodies of 256 bytes or more; never ranges or streams (media files,
+/// `/stream_logs`, which have no compressible content type) or bodies that are already
+/// encoded (the GPUI bundle's precompressed files).
+fn compression_layer()
+-> tower_http::compression::CompressionLayer<impl tower_http::compression::Predicate + Clone> {
+    use http::header::{CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE};
+    tower_http::compression::CompressionLayer::new()
+        .quality(tower_http::CompressionLevel::Precise(4))
+        .compress_when(
+            |status: StatusCode, _: http::Version, h: &HeaderMap, _: &http::Extensions| {
+                if status == StatusCode::PARTIAL_CONTENT || h.contains_key(CONTENT_RANGE) {
+                    return false;
+                }
+                let ct = h
+                    .get(CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let text_like = ct.starts_with("application/json")
+                    || (ct.starts_with("text/") && !ct.starts_with("text/event-stream"))
+                    || ct.starts_with("application/javascript")
+                    || ct.starts_with("application/wasm")
+                    || ct.starts_with("image/svg+xml")
+                    || ct.contains("mpegurl");
+                let small = h
+                    .get(CONTENT_LENGTH)
+                    .and_then(|v| v.to_str().ok()?.parse::<u64>().ok())
+                    .is_some_and(|n| n < 256);
+                text_like && !small
+            },
+        )
+}
+
 impl HttpApi {
     pub fn new(api: Api, opts: Option<HttpApiOptions>) -> Self {
         Self {
             api,
             opts: opts.unwrap_or_default(),
             public_ip: public_ip::PublicIpMonitor::from_env(),
+            list_feed: list_stream::ListFeedHub::new(),
         }
     }
 
@@ -185,6 +223,7 @@ impl HttpApi {
 
         let app = main_router
             .layer(cors_layer)
+            .layer(compression_layer())
             .layer(
                 tower_http::trace::TraceLayer::new_for_http()
                     .make_span_with(|req: &Request| {
