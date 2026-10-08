@@ -1187,6 +1187,15 @@ impl DamageTracker {
         }
     }
 
+    /// Free space needed to resume (set when the episode started).
+    pub fn disk_full_resume_at(&self) -> Option<u64> {
+        self.inner
+            .lock()
+            .disk_full
+            .as_ref()
+            .map(|d| d.resume_at_free_bytes)
+    }
+
     /// Free space at the last check, while waiting.
     pub fn disk_full_space(&self) -> Option<crate::disk_space::DiskSpace> {
         self.inner

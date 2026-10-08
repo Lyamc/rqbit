@@ -903,7 +903,11 @@ impl TorrentStateLive {
         }
         // Already on a blocking-capable thread (the write path).
         let space = crate::disk_space::query(&self.shared.output_folder());
-        let resume_at = self.disk_resume_threshold();
+        // Relative to the free space reported now: some filesystems (bcachefs, btrfs,
+        // quotas) fail writes while still reporting free space, so require that much
+        // more to be freed, or the torrent would resume and fail again every check.
+        let resume_at =
+            self.disk_resume_threshold() + space.as_ref().map(|s| s.free_bytes).unwrap_or(0);
         self.shared.damage.set_disk_space(space.clone(), resume_at);
         let message = crate::disk_space::waiting_message(space.as_ref());
         warn!(
@@ -953,7 +957,11 @@ impl TorrentStateLive {
             .await
             .ok()
             .flatten();
-        let resume_at = self.disk_resume_threshold();
+        let resume_at = self
+            .shared
+            .damage
+            .disk_full_resume_at()
+            .unwrap_or_else(|| self.disk_resume_threshold());
         let enough = space.as_ref().is_some_and(|s| s.free_bytes >= resume_at);
         self.shared.damage.set_disk_space(space.clone(), resume_at);
         if !enough {
