@@ -12,7 +12,7 @@ use std::{
 
 use anyhow::anyhow;
 use axum::{
-    body::{Body, to_bytes},
+    body::Body,
     extract::{Query, State},
     response::IntoResponse,
 };
@@ -442,10 +442,7 @@ pub async fn h_fs_extract(
         .max_upload_body_size
         .unwrap_or(MAX_ZIP_BYTES)
         .min(MAX_ZIP_BYTES);
-    let data = to_bytes(body, max_size)
-        .await
-        .map_err(|_| ApiError::from((StatusCode::PAYLOAD_TOO_LARGE, "body too large")))?
-        .to_vec();
+    let data = crate::http_api::add_json::read_body_capped(body, max_size).await?;
 
     if data.is_empty() {
         return Err(ApiError::from((StatusCode::BAD_REQUEST, "empty body")));

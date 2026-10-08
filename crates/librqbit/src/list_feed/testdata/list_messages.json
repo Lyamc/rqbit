@@ -1,0 +1,1540 @@
+{
+  "messages": [
+    {
+      "epoch": "test",
+      "proto": 1,
+      "seq": 1,
+      "torrents": [
+        {
+          "category_label": "TV",
+          "id": 266,
+          "info_hash": "8a94cd10bde6b976273d558f52bce250755e3492",
+          "name": "Torrent 17",
+          "output_folder": "/downloads/Torrent 17",
+          "stats": {
+            "file_progress": [
+              447102877,
+              361967175,
+              317861810,
+              161076394,
+              1740224,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "finished": false,
+            "live": {
+              "download_bps": 32485,
+              "eta_ms": 27956369,
+              "snapshot": {
+                "downloaded_and_checked_pieces": 519,
+                "fetched_bytes": 1118781440,
+                "peer_stats": {
+                  "connecting": 0,
+                  "dead": 711,
+                  "live": 2,
+                  "not_needed": 0,
+                  "queued": 0,
+                  "seen": 713
+                },
+                "uploaded_bytes": 0
+              },
+              "upload_bps": 0
+            },
+            "progress_bytes": 1289748480,
+            "queue_position": 18,
+            "state": "live",
+            "status_detail": {
+              "kind": "downloading",
+              "label": "Downloading",
+              "queue_position": 18
+            },
+            "total_bytes": 2197936039,
+            "uploaded_bytes": 0
+          },
+          "torznab_category": 5000,
+          "total_pieces": 1049
+        },
+        {
+          "id": 208,
+          "info_hash": "83192077ee72211242132c2b6b44ada528ae74bc",
+          "name": "Torrent 2",
+          "output_folder": "/downloads/Torrent 2",
+          "stats": {
+            "file_progress": [
+              0,
+              0,
+              0,
+              2279211899
+            ],
+            "finished": false,
+            "live": {
+              "download_bps": 0,
+              "snapshot": {
+                "downloaded_and_checked_pieces": 0,
+                "fetched_bytes": 0,
+                "peer_stats": {
+                  "connecting": 0,
+                  "dead": 37,
+                  "live": 0,
+                  "not_needed": 0,
+                  "queued": 0,
+                  "seen": 37
+                },
+                "uploaded_bytes": 0
+              },
+              "upload_bps": 0
+            },
+            "progress_bytes": 2279211899,
+            "queue_position": 2,
+            "state": "live",
+            "status_detail": {
+              "kind": "stalled",
+              "label": "Stalled (no peers)",
+              "queue_position": 2
+            },
+            "total_bytes": 2295989115,
+            "uploaded_bytes": 0
+          },
+          "total_pieces": 548
+        },
+        {
+          "id": 211,
+          "info_hash": "c1eb5cf9347ffb0eec71d5016ef114a78a8f0496",
+          "name": "Torrent 3",
+          "output_folder": "/downloads/Torrent 3",
+          "stats": {
+            "file_progress": [
+              225,
+              87198,
+              5599483,
+              1376735264
+            ],
+            "finished": false,
+            "live": {
+              "download_bps": 0,
+              "snapshot": {
+                "downloaded_and_checked_pieces": 0,
+                "fetched_bytes": 0,
+                "peer_stats": {
+                  "connecting": 0,
+                  "dead": 129,
+                  "live": 0,
+                  "not_needed": 0,
+                  "queued": 0,
+                  "seen": 129
+                },
+                "uploaded_bytes": 0
+              },
+              "upload_bps": 0
+            },
+            "progress_bytes": 1382422170,
+            "queue_position": 3,
+            "state": "live",
+            "status_detail": {
+              "kind": "stalled",
+              "label": "Stalled (no peers)",
+              "queue_position": 3
+            },
+            "total_bytes": 2531661466,
+            "uploaded_bytes": 0
+          },
+          "total_pieces": 604
+        },
+        {
+          "category_label": "TV",
+          "id": 268,
+          "info_hash": "477319692f25596bca1121a3f837aa71e5b998a3",
+          "name": "Torrent 18",
+          "output_folder": "/downloads/Torrent 18",
+          "stats": {
+            "file_progress": [
+              907237,
+              398769036,
+              3591,
+              1816,
+              969961,
+              409883931,
+              3802,
+              2128,
+              853977,
+              328672485,
+              3293,
+              1913,
+              947986,
+              282838971,
+              2780,
+              1795,
+              948788,
+              1249870,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "finished": false,
+            "live": {
+              "download_bps": 129672,
+              "eta_ms": 27140123,
+              "snapshot": {
+                "downloaded_and_checked_pieces": 340,
+                "fetched_bytes": 1455521792,
+                "peer_stats": {
+                  "connecting": 0,
+                  "dead": 621,
+                  "live": 3,
+                  "not_needed": 0,
+                  "queued": 3,
+                  "seen": 627
+                },
+                "uploaded_bytes": 84361216
+              },
+              "upload_bps": 0
+            },
+            "progress_bytes": 1426063360,
+            "queue_position": 50,
+            "state": "live",
+            "status_detail": {
+              "kind": "downloading",
+              "label": "Downloading",
+              "queue_position": 50
+            },
+            "total_bytes": 4945384092,
+            "uploaded_bytes": 84361216
+          },
+          "torznab_category": 5000,
+          "total_pieces": 1180
+        },
+        {
+          "id": 98,
+          "info_hash": "60b580a4cd8870dd9c71233ad767602091c3b807",
+          "name": "Torrent 1",
+          "output_folder": "/downloads/Torrent 1",
+          "stats": {
+            "file_progress": [
+              2614741375,
+              2523410289
+            ],
+            "finished": false,
+            "live": {
+              "download_bps": 0,
+              "snapshot": {
+                "downloaded_and_checked_pieces": 0,
+                "fetched_bytes": 0,
+                "peer_stats": {
+                  "connecting": 0,
+                  "dead": 447,
+                  "live": 0,
+                  "not_needed": 0,
+                  "queued": 0,
+                  "seen": 447
+                },
+                "uploaded_bytes": 0
+              },
+              "upload_bps": 0
+            },
+            "progress_bytes": 5138151664,
+            "queue_position": 1,
+            "state": "live",
+            "status_detail": {
+              "kind": "stalled",
+              "label": "Stalled (no peers)",
+              "queue_position": 1
+            },
+            "total_bytes": 5139200240,
+            "uploaded_bytes": 0
+          },
+          "total_pieces": 4902
+        },
+        {
+          "category_label": "TV",
+          "id": 265,
+          "info_hash": "d17260273e40b1f91369b9637d1dd761c390db15",
+          "name": "Torrent 16",
+          "output_folder": "/downloads/Torrent 16",
+          "stats": {
+            "file_progress": [
+              289703450,
+              250170160,
+              259350775,
+              225037755,
+              198358710,
+              18766,
+              0,
+              0,
+              739670,
+              74082865
+            ],
+            "finished": false,
+            "live": {
+              "download_bps": 64971,
+              "eta_ms": 9134632,
+              "snapshot": {
+                "downloaded_and_checked_pieces": 1238,
+                "fetched_bytes": 1302623111,
+                "peer_stats": {
+                  "connecting": 0,
+                  "dead": 374,
+                  "live": 3,
+                  "not_needed": 0,
+                  "queued": 0,
+                  "seen": 377
+                },
+                "uploaded_bytes": 0
+              },
+              "upload_bps": 0
+            },
+            "progress_bytes": 1297462151,
+            "queue_position": 56,
+            "state": "live",
+            "status_detail": {
+              "kind": "downloading",
+              "label": "Downloading",
+              "queue_position": 56
+            },
+            "total_bytes": 1890956167,
+            "uploaded_bytes": 0
+          },
+          "torznab_category": 5000,
+          "total_pieces": 1804
+        },
+        {
+          "category_label": "TV",
+          "id": 251,
+          "info_hash": "1d9db6ba4d9ae0994701bc96f77bd78187a93727",
+          "name": "Torrent 8",
+          "output_folder": "/downloads/Torrent 8",
+          "stats": {
+            "file_progress": [
+              1504594274,
+              785194339,
+              13229624,
+              12237571,
+              0,
+              0,
+              0,
+              8027799,
+              8749417,
+              0,
+              0,
+              0
+            ],
+            "finished": false,
+            "live": {
+              "download_bps": 97453,
+              "eta_ms": 161272022,
+              "snapshot": {
+                "downloaded_and_checked_pieces": 90,
+                "fetched_bytes": 1640693760,
+                "peer_stats": {
+                  "connecting": 3,
+                  "dead": 4052,
+                  "live": 4,
+                  "not_needed": 0,
+                  "queued": 2,
+                  "seen": 4061
+                },
+                "uploaded_bytes": 4640178176
+              },
+              "upload_bps": 64969
+            },
+            "progress_bytes": 2332033024,
+            "queue_position": 12,
+            "state": "live",
+            "status_detail": {
+              "kind": "downloading",
+              "label": "Downloading",
+              "queue_position": 12
+            },
+            "total_bytes": 18048635257,
+            "uploaded_bytes": 4640178176
+          },
+          "torznab_category": 5000,
+          "total_pieces": 1076
+        },
+        {
+          "category_label": "TV",
+          "id": 269,
+          "info_hash": "66eb4f658c0fe2ba5bbcdd2c19786e9be6270630",
+          "name": "Torrent 19",
+          "output_folder": "/downloads/Torrent 19",
+          "stats": {
+            "file_progress": [
+              105297540,
+              91043130,
+              89402327,
+              105849075,
+              89966464,
+              129770304,
+              105969468,
+              10813510,
+              648502,
+              0,
+              0,
+              0,
+              1048576
+            ],
+            "finished": false,
+            "live": {
+              "download_bps": 32486,
+              "eta_ms": 21941581,
+              "snapshot": {
+                "downloaded_and_checked_pieces": 616,
+                "fetched_bytes": 660029440,
+                "peer_stats": {
+                  "connecting": 0,
+                  "dead": 568,
+                  "live": 1,
+                  "not_needed": 0,
+                  "queued": 0,
+                  "seen": 569
+                },
+                "uploaded_bytes": 332546048
+              },
+              "upload_bps": 0
+            },
+            "progress_bytes": 729808896,
+            "queue_position": 19,
+            "state": "live",
+            "status_detail": {
+              "kind": "downloading",
+              "label": "Downloading",
+              "queue_position": 19
+            },
+            "total_bytes": 1442604987,
+            "uploaded_bytes": 332546048
+          },
+          "torznab_category": 5000,
+          "total_pieces": 1376
+        },
+        {
+          "category_label": "Books",
+          "id": 327,
+          "info_hash": "16f91d6002de27dea1c65f7a43fb2c38d4dcdac2",
+          "name": "Torrent 23",
+          "output_folder": "/downloads/Torrent 23",
+          "stats": {
+            "file_progress": [
+              114788666,
+              116476074,
+              109849383,
+              117073696,
+              120538357,
+              128778707
+            ],
+            "finished": true,
+            "live": {
+              "download_bps": 0,
+              "snapshot": {
+                "downloaded_and_checked_pieces": 2699,
+                "fetched_bytes": 710535923,
+                "peer_stats": {
+                  "connecting": 0,
+                  "dead": 203,
+                  "live": 0,
+                  "not_needed": 60,
+                  "queued": 0,
+                  "seen": 263
+                },
+                "uploaded_bytes": 0
+              },
+              "upload_bps": 0
+            },
+            "progress_bytes": 707504883,
+            "queue_position": 60,
+            "state": "live",
+            "status_detail": {
+              "kind": "seeding",
+              "label": "Seeding",
+              "queue_position": 60
+            },
+            "total_bytes": 707504883,
+            "uploaded_bytes": 0
+          },
+          "torznab_category": 7000,
+          "total_pieces": 2699
+        },
+        {
+          "category_label": "TV",
+          "id": 271,
+          "info_hash": "1b31c05fe1e12dccd7d55b861834655bda42421d",
+          "name": "Torrent 20",
+          "output_folder": "/downloads/Torrent 20",
+          "stats": {
+            "file_progress": [
+              1515859962,
+              173413315,
+              5225539,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "finished": false,
+            "live": {
+              "download_bps": 64828,
+              "eta_ms": 254874463,
+              "snapshot": {
+                "downloaded_and_checked_pieces": 95,
+                "fetched_bytes": 1658388480,
+                "peer_stats": {
+                  "connecting": 0,
+                  "dead": 859,
+                  "live": 3,
+                  "not_needed": 0,
+                  "queued": 14,
+                  "seen": 876
+                },
+                "uploaded_bytes": 0
+              },
+              "upload_bps": 0
+            },
+            "progress_bytes": 1694498816,
+            "queue_position": 20,
+            "state": "live",
+            "status_detail": {
+              "kind": "downloading",
+              "label": "Downloading",
+              "queue_position": 20
+            },
+            "total_bytes": 18217721278,
+            "uploaded_bytes": 0
+          },
+          "torznab_category": 5000,
+          "total_pieces": 1086
+        },
+        {
+          "id": 226,
+          "info_hash": "0f872df298a49718bd299e00943739c2b0197b50",
+          "name": "Torrent 5",
+          "output_folder": "/downloads/Torrent 5",
+          "stats": {
+            "file_progress": [
+              1291122884,
+              33
+            ],
+            "finished": false,
+            "live": {
+              "download_bps": 0,
+              "snapshot": {
+                "downloaded_and_checked_pieces": 0,
+                "fetched_bytes": 0,
+                "peer_stats": {
+                  "connecting": 0,
+                  "dead": 75,
+                  "live": 0,
+                  "not_needed": 0,
+                  "queued": 0,
+                  "seen": 75
+                },
+                "uploaded_bytes": 0
+              },
+              "upload_bps": 0
+            },
+            "progress_bytes": 1291122917,
+            "queue_position": 5,
+            "state": "live",
+            "status_detail": {
+              "kind": "stalled",
+              "label": "Stalled (no peers)",
+              "queue_position": 5
+            },
+            "total_bytes": 1595209957,
+            "uploaded_bytes": 0
+          },
+          "total_pieces": 761
+        },
+        {
+          "category_label": "TV",
+          "id": 260,
+          "info_hash": "00643d380974e895e0c7efeedebde383d2ac1f9c",
+          "name": "Torrent 12",
+          "output_folder": "/downloads/Torrent 12",
+          "stats": {
+            "file_progress": [
+              350105660,
+              324214764,
+              352184438,
+              348344141,
+              384033395,
+              175405348,
+              334974,
+              0,
+              0,
+              0,
+              0,
+              0,
+              995444,
+              197211874
+            ],
+            "finished": false,
+            "live": {
+              "download_bps": 97380,
+              "eta_ms": 18854398,
+              "snapshot": {
+                "downloaded_and_checked_pieces": 1794,
+                "fetched_bytes": 1921794048,
+                "peer_stats": {
+                  "connecting": 0,
+                  "dead": 906,
+                  "live": 3,
+                  "not_needed": 0,
+                  "queued": 1,
+                  "seen": 910
+                },
+                "uploaded_bytes": 0
+              },
+              "upload_bps": 0
+            },
+            "progress_bytes": 2132830038,
+            "queue_position": 16,
+            "state": "live",
+            "status_detail": {
+              "kind": "downloading",
+              "label": "Downloading",
+              "queue_position": 16
+            },
+            "total_bytes": 3968886614,
+            "uploaded_bytes": 0
+          },
+          "torznab_category": 5000,
+          "total_pieces": 3786
+        },
+        {
+          "category_label": "Movies",
+          "id": 250,
+          "info_hash": "885b55ccbd584a02ea9bb7bb45e17b42a6798409",
+          "name": "Torrent 7",
+          "output_folder": "/downloads/Torrent 7",
+          "stats": {
+            "file_progress": [
+              673868775,
+              71,
+              718
+            ],
+            "finished": false,
+            "live": {
+              "download_bps": 97381,
+              "eta_ms": 156949453,
+              "snapshot": {
+                "downloaded_and_checked_pieces": 81,
+                "fetched_bytes": 707636988,
+                "peer_stats": {
+                  "connecting": 0,
+                  "dead": 576,
+                  "live": 3,
+                  "not_needed": 0,
+                  "queued": 0,
+                  "seen": 579
+                },
+                "uploaded_bytes": 0
+              },
+              "upload_bps": 0
+            },
+            "progress_bytes": 673869564,
+            "queue_position": 48,
+            "state": "live",
+            "status_detail": {
+              "kind": "downloading",
+              "label": "Downloading",
+              "queue_position": 48
+            },
+            "total_bytes": 15957913340,
+            "uploaded_bytes": 0
+          },
+          "torznab_category": 2045,
+          "total_pieces": 1903
+        },
+        {
+          "category_label": "TV",
+          "id": 254,
+          "info_hash": "7acdb76cf6ad13b8b4367a243909c6222556b0a7",
+          "name": "Torrent 10",
+          "output_folder": "/downloads/Torrent 10",
+          "stats": {
+            "file_progress": [
+              181865942,
+              149645536,
+              149760367,
+              169709658,
+              174119194,
+              697762932,
+              633619049,
+              626371617,
+              627243526,
+              771623360,
+              689531635,
+              596397701,
+              660911029,
+              656299391,
+              195510290,
+              1047781,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              335309,
+              187122677
+            ],
+            "finished": false,
+            "live": {
+              "download_bps": 324602,
+              "eta_ms": 38815764,
+              "snapshot": {
+                "downloaded_and_checked_pieces": 2906,
+                "fetched_bytes": 6232260608,
+                "peer_stats": {
+                  "connecting": 2,
+                  "dead": 1792,
+                  "live": 10,
+                  "not_needed": 0,
+                  "queued": 0,
+                  "seen": 1804
+                },
+                "uploaded_bytes": 0
+              },
+              "upload_bps": 0
+            },
+            "progress_bytes": 7168876994,
+            "queue_position": 13,
+            "state": "live",
+            "status_detail": {
+              "kind": "downloading",
+              "label": "Downloading",
+              "queue_position": 13
+            },
+            "total_bytes": 19768566210,
+            "uploaded_bytes": 0
+          },
+          "torznab_category": 5000,
+          "total_pieces": 9427
+        },
+        {
+          "category_label": "Movies",
+          "id": 249,
+          "info_hash": "72947803fdf047c6b6400c0c9294b8c06804e795",
+          "name": "Torrent 6",
+          "output_folder": "/downloads/Torrent 6",
+          "stats": {
+            "file_progress": [
+              4979234016,
+              71,
+              718
+            ],
+            "finished": false,
+            "live": {
+              "download_bps": 97381,
+              "eta_ms": 94239045,
+              "snapshot": {
+                "downloaded_and_checked_pieces": 373,
+                "fetched_bytes": 3279306752,
+                "peer_stats": {
+                  "connecting": 0,
+                  "dead": 1904,
+                  "live": 4,
+                  "not_needed": 0,
+                  "queued": 20,
+                  "seen": 1928
+                },
+                "uploaded_bytes": 0
+              },
+              "upload_bps": 0
+            },
+            "progress_bytes": 4979234805,
+            "queue_position": 11,
+            "state": "live",
+            "status_detail": {
+              "kind": "downloading",
+              "label": "Downloading",
+              "queue_position": 11
+            },
+            "total_bytes": 14156371957,
+            "uploaded_bytes": 0
+          },
+          "torznab_category": 2045,
+          "total_pieces": 1688
+        },
+        {
+          "category_label": "TV",
+          "id": 262,
+          "info_hash": "9f620311903a6db6ce68838833df6db02c26d271",
+          "name": "Torrent 14",
+          "output_folder": "/downloads/Torrent 14",
+          "stats": {
+            "file_progress": [
+              270960095,
+              3766817,
+              1048576,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "finished": false,
+            "live": {
+              "download_bps": 64972,
+              "eta_ms": 56105779,
+              "snapshot": {
+                "downloaded_and_checked_pieces": 263,
+                "fetched_bytes": 278757376,
+                "peer_stats": {
+                  "connecting": 0,
+                  "dead": 425,
+                  "live": 2,
+                  "not_needed": 0,
+                  "queued": 0,
+                  "seen": 427
+                },
+                "uploaded_bytes": 100974592
+              },
+              "upload_bps": 0
+            },
+            "progress_bytes": 275775488,
+            "queue_position": 61,
+            "state": "live",
+            "status_detail": {
+              "kind": "downloading",
+              "label": "Downloading",
+              "queue_position": 61
+            },
+            "total_bytes": 3921124300,
+            "uploaded_bytes": 100974592
+          },
+          "torznab_category": 5000,
+          "total_pieces": 3740
+        },
+        {
+          "id": 215,
+          "info_hash": "5c59b3bb4da54d7524ab66d22c587ca20c44f67f",
+          "name": "Torrent 4",
+          "output_folder": "/downloads/Torrent 4",
+          "stats": {
+            "file_progress": [
+              102135,
+              103520,
+              1519357,
+              1652915,
+              3401829567
+            ],
+            "finished": false,
+            "live": {
+              "download_bps": 0,
+              "snapshot": {
+                "downloaded_and_checked_pieces": 0,
+                "fetched_bytes": 0,
+                "peer_stats": {
+                  "connecting": 0,
+                  "dead": 66,
+                  "live": 0,
+                  "not_needed": 0,
+                  "queued": 0,
+                  "seen": 66
+                },
+                "uploaded_bytes": 0
+              },
+              "upload_bps": 0
+            },
+            "progress_bytes": 3405207494,
+            "queue_position": 4,
+            "state": "live",
+            "status_detail": {
+              "kind": "stalled",
+              "label": "Stalled (no peers)",
+              "queue_position": 4
+            },
+            "total_bytes": 3526842310,
+            "uploaded_bytes": 0
+          },
+          "total_pieces": 841
+        },
+        {
+          "category_label": "TV",
+          "id": 258,
+          "info_hash": "24734027817c6c6b3f803840bf171f2ff3be0d0d",
+          "name": "Torrent 11",
+          "output_folder": "/downloads/Torrent 11",
+          "stats": {
+            "file_progress": [
+              1301950836,
+              1214631505,
+              1292221761,
+              787086172,
+              1190927196,
+              32544003,
+              2332479,
+              1048576,
+              0
+            ],
+            "finished": false,
+            "live": {
+              "download_bps": 194759,
+              "eta_ms": 5170301,
+              "snapshot": {
+                "downloaded_and_checked_pieces": 4865,
+                "fetched_bytes": 5168136192,
+                "peer_stats": {
+                  "connecting": 1,
+                  "dead": 751,
+                  "live": 7,
+                  "not_needed": 0,
+                  "queued": 0,
+                  "seen": 759
+                },
+                "uploaded_bytes": 0
+              },
+              "upload_bps": 0
+            },
+            "progress_bytes": 5822742528,
+            "queue_position": 15,
+            "state": "live",
+            "status_detail": {
+              "kind": "downloading",
+              "label": "Downloading",
+              "queue_position": 15
+            },
+            "total_bytes": 6829709609,
+            "uploaded_bytes": 0
+          },
+          "torznab_category": 5000,
+          "total_pieces": 6514
+        },
+        {
+          "category_label": "TV",
+          "id": 252,
+          "info_hash": "a734c7df00b40c577a7cdea61a77a3a7e11e3b2c",
+          "name": "Torrent 9",
+          "output_folder": "/downloads/Torrent 9",
+          "stats": {
+            "file_progress": [],
+            "finished": false,
+            "initializing_paused": false,
+            "progress_bytes": 0,
+            "state": "initializing",
+            "status_detail": {
+              "kind": "resolving_metadata",
+              "label": "Resolving metadata (no peers yet) · 10h 8m"
+            },
+            "total_bytes": 0,
+            "uploaded_bytes": 0
+          },
+          "torznab_category": 5000,
+          "total_pieces": 0
+        },
+        {
+          "category_label": "TV",
+          "id": 261,
+          "info_hash": "e522ef2fd0c171830c09cb6ecffecd1c38f69413",
+          "name": "Torrent 13",
+          "output_folder": "/downloads/Torrent 13",
+          "stats": {
+            "file_progress": [],
+            "finished": false,
+            "initializing_paused": false,
+            "progress_bytes": 0,
+            "state": "initializing",
+            "status_detail": {
+              "kind": "resolving_metadata",
+              "label": "Resolving metadata (no peers yet) · 10h 2m"
+            },
+            "total_bytes": 0,
+            "uploaded_bytes": 0
+          },
+          "torznab_category": 5000,
+          "total_pieces": 0
+        },
+        {
+          "category_label": "TV",
+          "id": 264,
+          "info_hash": "f6ea00b6aeb6c258984a7cf6f8fee475853cd33d",
+          "name": "Torrent 15",
+          "output_folder": "/downloads/Torrent 15",
+          "stats": {
+            "file_progress": [],
+            "finished": false,
+            "initializing_paused": false,
+            "progress_bytes": 0,
+            "state": "initializing",
+            "status_detail": {
+              "kind": "resolving_metadata",
+              "label": "Resolving metadata (no peers yet) · 10h 1m"
+            },
+            "total_bytes": 0,
+            "uploaded_bytes": 0
+          },
+          "torznab_category": 5000,
+          "total_pieces": 0
+        },
+        {
+          "category_label": "TV",
+          "id": 275,
+          "info_hash": "e002fb16345a70b0be9881ce466034eb8173137f",
+          "name": "Torrent 21",
+          "output_folder": "/downloads/Torrent 21",
+          "stats": {
+            "file_progress": [],
+            "finished": false,
+            "initializing_paused": false,
+            "progress_bytes": 0,
+            "state": "initializing",
+            "status_detail": {
+              "kind": "resolving_metadata",
+              "label": "Resolving metadata (no peers yet) · 9h 54m"
+            },
+            "total_bytes": 0,
+            "uploaded_bytes": 0
+          },
+          "torznab_category": 5000,
+          "total_pieces": 0
+        },
+        {
+          "category_label": "TV",
+          "id": 280,
+          "info_hash": "34623939ec17c4a3fa7ae6b138e45f8ac873b7f6",
+          "name": "Torrent 22",
+          "output_folder": "/downloads/Torrent 22",
+          "stats": {
+            "file_progress": [],
+            "finished": false,
+            "initializing_paused": false,
+            "progress_bytes": 0,
+            "state": "initializing",
+            "status_detail": {
+              "kind": "resolving_metadata",
+              "label": "Resolving metadata (no peers yet) · 9h 53m"
+            },
+            "total_bytes": 0,
+            "uploaded_bytes": 0
+          },
+          "torznab_category": 5000,
+          "total_pieces": 0
+        }
+      ],
+      "type": "snapshot"
+    },
+    {
+      "base": 1,
+      "changed": [
+        {
+          "id": 266,
+          "stats": {
+            "live": {
+              "download_bps": 32454,
+              "eta_ms": 27983739,
+              "snapshot": {
+                "fetched_bytes": 1118814208
+              }
+            }
+          }
+        },
+        {
+          "id": 268,
+          "stats": {
+            "live": {
+              "download_bps": 0,
+              "eta_ms": null,
+              "snapshot": {
+                "fetched_bytes": 1455554560,
+                "peer_stats": {
+                  "connecting": 1,
+                  "dead": 620
+                }
+              }
+            }
+          }
+        },
+        {
+          "id": 265,
+          "stats": {
+            "file_progress": [
+              289703450,
+              250170160,
+              259350775,
+              225037755,
+              199407286,
+              18766,
+              0,
+              0,
+              739670,
+              74082865
+            ],
+            "live": {
+              "download_bps": 64909,
+              "eta_ms": 9127290,
+              "snapshot": {
+                "downloaded_and_checked_pieces": 1239,
+                "fetched_bytes": 1302672263
+              }
+            },
+            "progress_bytes": 1298510727
+          }
+        },
+        {
+          "id": 251,
+          "stats": {
+            "live": {
+              "download_bps": 64909,
+              "eta_ms": 242129188,
+              "snapshot": {
+                "fetched_bytes": 1640726528,
+                "peer_stats": {
+                  "connecting": 1,
+                  "dead": 4054
+                }
+              },
+              "upload_bps": 0
+            }
+          }
+        },
+        {
+          "id": 269,
+          "stats": {
+            "live": {
+              "download_bps": 32453,
+              "eta_ms": 21963468,
+              "snapshot": {
+                "fetched_bytes": 660045824
+              }
+            }
+          }
+        },
+        {
+          "id": 271,
+          "stats": {
+            "live": {
+              "download_bps": 32422,
+              "eta_ms": 509622037,
+              "snapshot": {
+                "fetched_bytes": 1658404864
+              }
+            }
+          }
+        },
+        {
+          "id": 260,
+          "stats": {
+            "live": {
+              "download_bps": 97299,
+              "eta_ms": 18870107,
+              "snapshot": {
+                "fetched_bytes": 1921843200
+              }
+            }
+          }
+        },
+        {
+          "id": 250,
+          "stats": {
+            "live": {
+              "download_bps": 64866,
+              "eta_ms": 235623262,
+              "snapshot": {
+                "fetched_bytes": 707669756
+              }
+            }
+          }
+        },
+        {
+          "id": 254,
+          "stats": {
+            "live": {
+              "download_bps": 64867,
+              "eta_ms": 194237990,
+              "snapshot": {
+                "fetched_bytes": 6232326144,
+                "peer_stats": {
+                  "connecting": 1,
+                  "dead": 1793
+                }
+              }
+            }
+          }
+        },
+        {
+          "id": 249,
+          "stats": {
+            "live": {
+              "download_bps": 32433,
+              "eta_ms": 282951107,
+              "snapshot": {
+                "fetched_bytes": 3279339520,
+                "peer_stats": {
+                  "connecting": 2,
+                  "seen": 1930
+                }
+              }
+            }
+          }
+        },
+        {
+          "id": 262,
+          "stats": {
+            "live": {
+              "download_bps": 0,
+              "eta_ms": null,
+              "snapshot": {
+                "fetched_bytes": 278773760
+              }
+            }
+          }
+        },
+        {
+          "id": 258,
+          "stats": {
+            "file_progress": [
+              1301950836,
+              1214631505,
+              1292221761,
+              787086172,
+              1190927196,
+              33592579,
+              2332479,
+              1048576,
+              0
+            ],
+            "live": {
+              "download_bps": 97297,
+              "eta_ms": 10338552,
+              "snapshot": {
+                "downloaded_and_checked_pieces": 4866,
+                "fetched_bytes": 5168250880,
+                "peer_stats": {
+                  "connecting": 2,
+                  "dead": 750
+                }
+              }
+            },
+            "progress_bytes": 5823791104
+          }
+        }
+      ],
+      "epoch": "test",
+      "proto": 1,
+      "seq": 2,
+      "type": "delta"
+    },
+    {
+      "base": 2,
+      "changed": [
+        {
+          "id": 266,
+          "stats": {
+            "live": {
+              "download_bps": 97261,
+              "eta_ms": 9337604,
+              "snapshot": {
+                "fetched_bytes": 1118879744
+              }
+            }
+          }
+        },
+        {
+          "id": 268,
+          "stats": {
+            "live": {
+              "download_bps": 97332,
+              "eta_ms": 36157845,
+              "snapshot": {
+                "fetched_bytes": 1455652864
+              }
+            }
+          }
+        },
+        {
+          "id": 265,
+          "stats": {
+            "live": {
+              "download_bps": 162100,
+              "eta_ms": 3654796,
+              "snapshot": {
+                "fetched_bytes": 1302770567
+              }
+            }
+          }
+        },
+        {
+          "id": 251,
+          "stats": {
+            "live": {
+              "download_bps": 162102,
+              "eta_ms": 96954680,
+              "snapshot": {
+                "fetched_bytes": 1640824832,
+                "peer_stats": {
+                  "connecting": 0,
+                  "dead": 4055
+                },
+                "uploaded_bytes": 4640243712
+              },
+              "upload_bps": 64841
+            },
+            "uploaded_bytes": 4640243712
+          }
+        },
+        {
+          "id": 269,
+          "stats": {
+            "live": {
+              "download_bps": 64842,
+              "eta_ms": 10992743,
+              "snapshot": {
+                "fetched_bytes": 660078592
+              }
+            }
+          }
+        },
+        {
+          "id": 271,
+          "stats": {
+            "live": {
+              "download_bps": 97295,
+              "eta_ms": 169825309,
+              "snapshot": {
+                "fetched_bytes": 1658470400
+              }
+            }
+          }
+        },
+        {
+          "id": 260,
+          "stats": {
+            "live": {
+              "download_bps": 194651,
+              "eta_ms": 9432509,
+              "snapshot": {
+                "fetched_bytes": 1921941504,
+                "peer_stats": {
+                  "connecting": 1,
+                  "dead": 905
+                }
+              }
+            }
+          }
+        },
+        {
+          "id": 250,
+          "stats": {
+            "live": {
+              "download_bps": 162203,
+              "eta_ms": 94227359,
+              "snapshot": {
+                "fetched_bytes": 707768060
+              }
+            }
+          }
+        },
+        {
+          "id": 254,
+          "stats": {
+            "live": {
+              "download_bps": 389299,
+              "eta_ms": 32365000,
+              "snapshot": {
+                "fetched_bytes": 6232653824,
+                "peer_stats": {
+                  "connecting": 2,
+                  "dead": 1792
+                }
+              }
+            }
+          }
+        },
+        {
+          "id": 249,
+          "stats": {
+            "live": {
+              "download_bps": 97326,
+              "eta_ms": 94292215,
+              "snapshot": {
+                "fetched_bytes": 3279437824
+              }
+            }
+          }
+        },
+        {
+          "id": 262,
+          "stats": {
+            "live": {
+              "download_bps": 64840,
+              "eta_ms": 56219838,
+              "snapshot": {
+                "fetched_bytes": 278839296
+              }
+            }
+          }
+        },
+        {
+          "id": 258,
+          "stats": {
+            "live": {
+              "download_bps": 291972,
+              "eta_ms": 3445247,
+              "snapshot": {
+                "fetched_bytes": 5168480256,
+                "peer_stats": {
+                  "connecting": 0,
+                  "dead": 752
+                }
+              }
+            }
+          }
+        }
+      ],
+      "epoch": "test",
+      "proto": 1,
+      "seq": 3,
+      "type": "delta"
+    },
+    {
+      "added": [
+        {
+          "category_label": "TV",
+          "id": 9001,
+          "info_hash": "ad20ff33aee205b0115423f29953b3a561147099",
+          "name": "Torrent added",
+          "output_folder": "/downloads/Torrent added",
+          "stats": {
+            "file_progress": [
+              447102877,
+              361967175,
+              317861810,
+              161076394,
+              1740224,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "finished": false,
+            "live": {
+              "download_bps": 97261,
+              "eta_ms": 9337604,
+              "snapshot": {
+                "downloaded_and_checked_pieces": 519,
+                "fetched_bytes": 1118879744,
+                "peer_stats": {
+                  "connecting": 0,
+                  "dead": 711,
+                  "live": 2,
+                  "not_needed": 0,
+                  "queued": 0,
+                  "seen": 713
+                },
+                "uploaded_bytes": 0
+              },
+              "upload_bps": 0
+            },
+            "progress_bytes": 1289748480,
+            "queue_position": 18,
+            "state": "live",
+            "status_detail": {
+              "kind": "downloading",
+              "label": "Downloading",
+              "queue_position": 18
+            },
+            "total_bytes": 2197936039,
+            "uploaded_bytes": 0
+          },
+          "torznab_category": 5000,
+          "total_pieces": 1049
+        }
+      ],
+      "base": 3,
+      "changed": [
+        {
+          "id": 266,
+          "stats": {
+            "live": {
+              "eta_ms": null
+            }
+          }
+        },
+        {
+          "category_label": "Changed label",
+          "id": 208
+        }
+      ],
+      "epoch": "test",
+      "order": [
+        266,
+        9001,
+        208,
+        211,
+        98,
+        265,
+        251,
+        269,
+        327,
+        271,
+        226,
+        260,
+        250,
+        254,
+        249,
+        262,
+        215,
+        258,
+        252,
+        261,
+        264,
+        275,
+        280
+      ],
+      "proto": 1,
+      "removed": [
+        268
+      ],
+      "seq": 4,
+      "type": "delta"
+    }
+  ],
+  "note": "Generated from list_snapshots.json by list_feed tests: a snapshot, then a delta to each following state."
+}

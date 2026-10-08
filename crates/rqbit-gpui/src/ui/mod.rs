@@ -44,8 +44,6 @@ use list_state::{FixAction, Nav, Selection, SortColumn, SortDir, StatusFilter};
 use prefs_panel::{PrefsPanel, PrefsPanelEvent};
 use text_input::{TextInput, TextInputEvent};
 
-/// How often the torrent list is refreshed (the web UI polls about as often).
-const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Slower retry while the server is unreachable.
 const RETRY_INTERVAL: Duration = Duration::from_secs(3);
 /// Events badge refresh (web UI: 15 s).
@@ -335,9 +333,16 @@ impl RqbitWindow {
                 self.conn = ConnState::Connecting;
                 let generation = self.generation;
                 let client_for_stats = client.clone();
+                // Torrent list: WebSocket snapshot + deltas, else delta polling
+                // (crate::feed); one full list per update, as before.
+                let mut feed = crate::feed::transport::TorrentFeed::new(client.clone());
                 self.poll_task = Some(cx.spawn(async move |this, cx| {
+                    let bg = cx.background_executor().clone();
                     loop {
-                        let res = cx.background_executor().spawn(client.list_torrents()).await;
+                        let res = feed
+                            .next(&bg)
+                            .await
+                            .map(|torrents| ListTorrentsResponse { torrents });
                         let ok = res.is_ok();
                         let alive = this
                             .update(cx, |this, cx| {
@@ -350,8 +355,9 @@ impl RqbitWindow {
                         if !alive {
                             return;
                         }
-                        let delay = if ok { POLL_INTERVAL } else { RETRY_INTERVAL };
-                        cx.background_executor().timer(delay).await;
+                        if !ok {
+                            cx.background_executor().timer(RETRY_INTERVAL).await;
+                        }
                     }
                 }));
                 self.events_seen = crate::store::get(&self.seen_key()).and_then(|v| v.parse().ok());

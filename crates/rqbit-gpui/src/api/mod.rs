@@ -71,6 +71,33 @@ pub struct ConnEndpoints {
     pub remote: SocketAddr,
 }
 
+/// Standard base64 with padding (basic auth headers).
+pub fn base64_encode(input: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 /// A cheap-to-clone handle to one rqbit server.
 #[derive(Clone)]
 pub struct ApiClient {
@@ -229,6 +256,34 @@ impl ApiClient {
         self.request(Method::Post, path)
             .map(|r| r.map(|_| ()))
             .boxed()
+    }
+
+    /// Credentials from the server URL, if any.
+    pub fn basic_auth(&self) -> Option<(String, String)> {
+        self.basic_auth.clone()
+    }
+
+    /// `ws(s)://.../stream/torrents?enc=deflate` (see `crate::feed`).
+    pub fn stream_url(&self) -> anyhow::Result<Url> {
+        let mut u = self.url("stream/torrents")?;
+        let scheme = if u.scheme() == "https" { "wss" } else { "ws" };
+        u.set_scheme(scheme)
+            .map_err(|_| anyhow::anyhow!("can't make a WebSocket URL from {u}"))?;
+        u.set_query(Some(&format!("enc=deflate&tick_ms={}", crate::feed::transport::TICK.as_millis())));
+        Ok(u)
+    }
+
+    /// Delta polling fallback: `GET /stream/torrents?since=<seq>&epoch=<epoch>`
+    /// (a snapshot without `since`).
+    pub fn poll_torrent_list(&self, since: Option<(u64, String)>) -> ApiFuture<serde_json::Value> {
+        let path = match since {
+            Some((seq, epoch)) => format!(
+                "stream/torrents?since={seq}&epoch={}",
+                url::form_urlencoded::byte_serialize(epoch.as_bytes()).collect::<String>()
+            ),
+            None => "stream/torrents".to_owned(),
+        };
+        self.get_json(&path)
     }
 
     /// `GET /torrents?with_stats=true` — the same bulk call the web UI polls.

@@ -60,8 +60,18 @@ upnp-serve = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs", "io-util"] }
 governor.workspace = true
 console-subscriber = { workspace = true, optional = true }
-axum = { workspace = true, optional = true, features = ["multipart"] }
-tower-http = { workspace = true, features = ["cors", "trace"], optional = true }
+axum = { workspace = true, optional = true, features = ["multipart", "ws"] }
+tower-http = { workspace = true, features = [
+    "cors",
+    "trace",
+    "compression-gzip",
+    "compression-br",
+    "compression-zstd",
+    "decompression-gzip",
+    "decompression-deflate",
+    "decompression-br",
+    "decompression-zstd",
+], optional = true }
 tokio-stream.workspace = true
 serde = { workspace = true, features = ["rc"] }
 serde_derive.workspace = true
@@ -104,6 +114,8 @@ walkdir.workspace = true
 arc-swap.workspace = true
 intervaltree.workspace = true
 async-compression = { workspace = true, features = ["tokio", "gzip"] }
+# Raw-deflate stream of `GET /stream/torrents?enc=deflate`.
+flate2 = "1"
 librqbit-utp = { workspace = true, features = ["export-metrics"] }
 axum-extra = { workspace = true, features = ["query"] }
 zip = { version = "2.2", default-features = false, features = ["deflate"], optional = true }
@@ -124,6 +136,9 @@ tracing-subscriber = { workspace = true, features = ["fmt", "std"] }
 tokio-test.workspace = true
 tempfile.workspace = true
 pollster.workspace = true
+tower = { version = "0.5", features = ["util"] }
+brotli = "8"
+zstd = "0.13"
 
 [[example]]
 name = "simulate_traffic"

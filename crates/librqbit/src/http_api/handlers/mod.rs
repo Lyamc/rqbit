@@ -46,6 +46,7 @@ async fn h_api_root(parts: Parts) -> impl IntoResponse {
             "GET /dht/stats": "DHT stats",
             "GET /dht/table": "DHT routing table",
             "GET /torrents": "List torrents",
+            "GET /stream/torrents": "Torrent list for UIs: WebSocket (snapshot, then deltas; ?tick_ms=, ?enc=deflate) or, without Upgrade, a delta since ?since=<seq>&epoch=<epoch> (else a snapshot)",
             "GET /torrents/playlist": "Generate M3U8 playlist for all files in all torrents",
             "GET /stats": "Global session stats",
             "GET /public_ip": "Public IPv4/IPv6 as seen from the server's network (?refresh=true re-checks, cached 30s)",
@@ -63,7 +64,7 @@ async fn h_api_root(parts: Parts) -> impl IntoResponse {
             "GET /torrents/{id_or_infohash}/peer_stats/prometheus": "Per peer stats in prometheus format",
             "GET /torrents/{id_or_infohash}/stream/{file_idx}": "Stream a file. Accepts Range header to seek.",
             "GET /torrents/{id_or_infohash}/playlist": "Playlist for supported players",
-            "POST /torrents": "Add a torrent here. magnet: or http:// or a local file.",
+            "POST /torrents": "Add a torrent here. magnet: or http:// or a local file, or a JSON body (Content-Type: application/json) {\"url\" or \"torrent_base64\", plus add options by query-param name}. Request bodies may be gzip/deflate/br/zstd (Content-Encoding).",
             "POST /torrents/{id_or_infohash}/category": "Edit the category. Body {category?, category_source?, category_id?, torznab_category?}; a missing key is unchanged, null clears it. Affects future organizing only.",
             "POST /torrents/{id_or_infohash}/relocate": "Move/copy a torrent's data, keeps seeding. Body {destination, copy?, into?}; into=true: destination is the folder to put it in (multi-file -> <destination>/<TorrentName>). Never overwrites.",
             "GET /add_jobs/{job_id}": "Status of an add started with ?add_job_id= (stage: resolving_metadata, waiting_for_server, ...)",
@@ -113,6 +114,10 @@ pub fn make_api_router(state: ApiState) -> Router {
         .route("/stats", get(torrents::h_session_stats))
         .route("/public_ip", get(other::h_public_ip))
         .route("/torrents", get(torrents::h_torrents_list))
+        .route(
+            "/stream/torrents",
+            get(super::list_stream::h_stream_torrents),
+        )
         .route("/torrents/{id}", get(torrents::h_torrent_details))
         .route("/torrents/{id}/haves", get(torrents::h_torrent_haves))
         .route("/torrents/{id}/metadata", get(torrents::h_metadata))

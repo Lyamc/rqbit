@@ -19,8 +19,10 @@ gpui-main = []
 # TLS for talking to https:// servers from the standalone `rqbit-gpui` binary.
 # When built as part of `rqbit --features gpui` the TLS backend selected for
 # librqbit (default-tls / rust-tls) is shared automatically.
-rustls = ["reqwest/rustls"]
-native-tls = ["reqwest/native-tls"]
+# Also used for wss:// torrent-list streams (without either, those fall back to
+# polling over reqwest).
+rustls = ["reqwest/rustls", "tungstenite/rustls-tls-native-roots"]
+native-tls = ["reqwest/native-tls", "tungstenite/native-tls"]
 
 [dependencies]
 # Native builds use GPUI 0.2.2 from crates.io. The browser build
@@ -35,10 +37,14 @@ log = "0.4"
 futures.workspace = true
 # Event times in the local zone (wasmbind: the browser's zone via js Date).
 chrono = { workspace = true, features = ["wasmbind"] }
+# Raw deflate for the torrent-list stream (`enc=deflate`); miniz_oxide, so also wasm.
+flate2 = "1"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 clap = { workspace = true, features = ["derive", "env"] }
-reqwest = { workspace = true, features = ["blocking"] }
+reqwest = { workspace = true, features = ["blocking", "gzip"] }
+# Torrent-list WebSocket (blocking, on its own thread).
+tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 # Local/remote socket addresses of the connection reqwest actually used
 # (footer); reqwest stores hyper-util's HttpInfo in response extensions.
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy"] }
@@ -51,7 +57,9 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = [
+    "BinaryType",
     "Blob",
+    "CloseEvent",
     "CssStyleDeclaration",
     "DataTransfer",
     "Document",
@@ -65,9 +73,11 @@ web-sys = { version = "0.3", features = [
     "HtmlElement",
     "HtmlInputElement",
     "Location",
+    "MessageEvent",
     "Navigator",
     "Node",
     "Storage",
+    "WebSocket",
     "Window",
 ] }
 
