@@ -20,6 +20,7 @@ use crate::api::Api;
 use crate::ApiError;
 use crate::api::Result;
 
+mod add_json;
 mod gpui_web;
 mod handlers;
 mod list_stream;
@@ -117,6 +118,18 @@ fn compression_layer()
         )
 }
 
+/// See the router setup. tower-http's default answer to an unsupported encoding is
+/// already `415` + `Accept-Encoding: gzip,deflate,br,zstd`; this pins that down.
+pub(crate) fn request_decompression_layer() -> tower_http::decompression::RequestDecompressionLayer
+{
+    tower_http::decompression::RequestDecompressionLayer::new()
+        .gzip(true)
+        .deflate(true)
+        .br(true)
+        .zstd(true)
+        .pass_through_unaccepted(false)
+}
+
 impl HttpApi {
     pub fn new(api: Api, opts: Option<HttpApiOptions>) -> Self {
         Self {
@@ -202,6 +215,12 @@ impl HttpApi {
                 }))
                 .allow_headers(AllowHeaders::any())
         };
+
+        // Compressed request bodies (`Content-Encoding: gzip | deflate | br | zstd`),
+        // decompressed as they are read, so each handler's body limit caps the
+        // *decompressed* size (413). Any other encoding: 415 with `Accept-Encoding`
+        // listing these. Added before the auth layer, so auth runs first.
+        main_router = main_router.route_layer(request_decompression_layer());
 
         // Simple one-user basic auth
         if let Some((user, pass)) = state.opts.basic_auth.clone() {

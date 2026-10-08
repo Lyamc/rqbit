@@ -2,7 +2,7 @@ use std::{net::SocketAddr, str::FromStr};
 
 use anyhow::Context;
 use axum::{
-    body::{Body, to_bytes},
+    body::Body,
     extract::{Path, Query, State},
     response::IntoResponse,
 };
@@ -35,9 +35,27 @@ pub async fn h_torrents_list(
 pub async fn h_torrents_post(
     State(state): State<ApiState>,
     Query(params): Query<TorrentAddQueryParams>,
+    axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
+    headers: http::HeaderMap,
     Timeout(timeout): Timeout<600_000, 3_600_000>,
     body: Body,
 ) -> Result<impl IntoResponse> {
+    let max_size = state.opts.max_upload_body_size.unwrap_or(10 * 1024 * 1024);
+    // `Content-Type: application/json` only (see `add_json`); otherwise the legacy
+    // body below, unchanged.
+    let (params, json_add, body) = if crate::http_api::add_json::is_json(&headers) {
+        if params.from_server_path.is_some() {
+            return Err(ApiError::invalid_input(anyhow::anyhow!(
+                "from_server_path can't be combined with a JSON body"
+            )));
+        }
+        let data = crate::http_api::add_json::read_body_capped(body, max_size).await?;
+        let (params, src) = crate::http_api::add_json::parse_json_add(raw_query.as_deref(), &data)
+            .map_err(ApiError::invalid_input)?;
+        (params, Some(src), None)
+    } else {
+        (params, None, Some(body))
+    };
     let is_url = params.is_url;
     let from_server_path = params.from_server_path.clone();
     // Paused: explicit parameter, else the "When a torrent is added" preference. An
@@ -59,6 +77,17 @@ pub async fn h_torrents_post(
     opts.normalize_category().map_err(ApiError::invalid_input)?;
     opts.paused = want_paused || hold.is_some();
 
+    if let Some(src) = json_add {
+        let add = match src {
+            crate::http_api::add_json::JsonAddSource::Url(u) => AddTorrent::Url(u.into()),
+            crate::http_api::add_json::JsonAddSource::TorrentBytes(b) => {
+                AddTorrent::TorrentFileBytes(b.into())
+            }
+        };
+        return add_with_timeout(&state, add, opts, timeout, hold).await;
+    }
+    let body = body.expect("legacy body");
+
     // Add from a validated server filesystem path (browse UI).
     if let Some(path) = from_server_path {
         let data = super::fs::read_torrent_under_roots(&state, &path)?;
@@ -66,11 +95,7 @@ pub async fn h_torrents_post(
         return add_with_timeout(&state, add, opts, timeout, hold).await;
     }
 
-    let max_size = state.opts.max_upload_body_size.unwrap_or(10 * 1024 * 1024);
-    let data = to_bytes(body, max_size)
-        .await
-        .map_err(|_| ApiError::from((StatusCode::PAYLOAD_TOO_LARGE, "body too large")))?
-        .to_vec();
+    let data = crate::http_api::add_json::read_body_capped(body, max_size).await?;
     let maybe_magnet = |data: &[u8]| -> bool {
         std::str::from_utf8(data)
             .ok()

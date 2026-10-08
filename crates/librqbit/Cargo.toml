@@ -67,6 +67,10 @@ tower-http = { workspace = true, features = [
     "compression-gzip",
     "compression-br",
     "compression-zstd",
+    "decompression-gzip",
+    "decompression-deflate",
+    "decompression-br",
+    "decompression-zstd",
 ], optional = true }
 tokio-stream.workspace = true
 serde = { workspace = true, features = ["rc"] }
@@ -132,6 +136,9 @@ tracing-subscriber = { workspace = true, features = ["fmt", "std"] }
 tokio-test.workspace = true
 tempfile.workspace = true
 pollster.workspace = true
+tower = { version = "0.5", features = ["util"] }
+brotli = "8"
+zstd = "0.13"
 
 [[example]]
 name = "simulate_traffic"

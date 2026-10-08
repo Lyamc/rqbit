@@ -4970,6 +4970,7 @@ dependencies = [
  "backon",
  "base64 0.23.1",
  "bitvec",
+ "brotli",
  "byteorder",
  "bytes",
  "console-subscriber",
@@ -5023,6 +5024,7 @@ dependencies = [
  "tokio-stream",
  "tokio-test",
  "tokio-util",
+ "tower",
  "tower-http 0.7.0",
  "tracing",
  "tracing-subscriber",
@@ -5032,6 +5034,7 @@ dependencies = [
  "walkdir",
  "windows 0.62.2",
  "zip",
+ "zstd",
 ]
 
 [[package]]
@@ -10085,6 +10088,7 @@ dependencies = [
  "futures-core",
  "http",
  "http-body",
+ "http-body-util",
  "percent-encoding",
  "pin-project-lite",
  "tokio",

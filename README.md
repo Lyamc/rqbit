@@ -67,10 +67,12 @@ Server settings added by the fork live in `preferences.json` (and `admin.json`, 
   - matching files are renamed into place
   - nothing is ever deleted or truncated
 - Magnet links / `#add=<magnet>` URLs: see the GPUI client and Preferences > Interface below.
+- **JSON add body**: `POST /torrents` with `Content-Type: application/json` takes `{"url": "magnet:..." | "http(s)://..."}` or `{"torrent_base64": "<.torrent bytes, base64>"}` plus any add option under its query-parameter name. See [Add torrent through HTTP API](#add-torrent-through-http-api).
 
 ### Compression and the torrent list stream
 
 - **Responses** are compressed with gzip, brotli or zstd (level 4) when the client sends `Accept-Encoding`. Only text-like bodies (JSON, HTML, JS, CSS, wasm, SVG, playlists) of 256 bytes or more are compressed. Media files and ranged responses are never compressed, so Range requests and streaming work as before, and the GPUI bundle's precompressed files aren't compressed again. Streams (`text/event-stream`, `/stream_logs`) aren't compressed either.
+- **Request bodies** can be compressed on every endpoint: `Content-Encoding: gzip`, `deflate` (zlib), `br` or `zstd`; uncompressed requests work as before. The body is decompressed as it is read, and the endpoint's usual size limit applies to the *decompressed* size: `POST /torrents` uses `max_upload_body_size` (10 MiB by default) and the JSON endpoints use 2 MiB. Going over the limit returns `413`, data that isn't valid for its encoding returns `400`, and any other `Content-Encoding` returns `415 Unsupported Media Type` with `Accept-Encoding: gzip,deflate,br,zstd`.
 - **`GET /stream/torrents`** is the torrent list the UIs use. As a WebSocket it sends a snapshot of a lean list on connect, then one delta per tick (`?tick_ms=`, 1 s by default). A delta is a JSON merge patch carrying only added/removed torrents and the fields that changed. Messages have sequence numbers; a client that sees a gap reconnects and gets a new snapshot, and pings keep idle proxies from closing the connection. With `?enc=deflate` the messages are raw-deflate compressed with a shared window; the WebSocket library has no permessage-deflate, so this is done in the app. Without an Upgrade it is the polling fallback: `?since=<seq>&epoch=<epoch>` returns the delta since then, or a snapshot if that's too old. The auth is the same as the rest of the API. `GET /torrents?with_stats=true` is unchanged.
 
 ### Events log
@@ -414,7 +416,7 @@ curl -s 'http://127.0.0.1:3030/'
     "GET /torrents/{id_or_infohash}/stream/{file_idx}": "Stream a file. Accepts Range header to seek.",
     "GET /web/": "Web UI",
     "POST /rust_log": "Set RUST_LOG to this post launch (for debugging)",
-    "POST /torrents": "Add a torrent here. magnet: or http:// or a local file.",
+    "POST /torrents": "Add a torrent here. magnet: or http:// or a local file, or a JSON body (Content-Type: application/json) {\"url\" or \"torrent_base64\", plus add options by query-param name}. Request bodies may be gzip/deflate/br/zstd (Content-Encoding).",
     "POST /torrents/create": "Create a torrent and start seeding. Body should be a local folder",
     "POST /torrents/resolve_magnet": "Resolve a magnet to torrent file bytes",
     "POST /torrents/{id_or_infohash}/add_peers": "Add peers (newline-delimited)",
@@ -455,6 +457,19 @@ Supported query parameters, all optional:
 - only_files_regex - the regular expression string to match filenames
 - output_folder - the folder to download to. If not specified, defaults to the one that rqbit server started with
 - list_only=true|false - if you want to just list the files in the torrent instead of downloading
+
+OR, with a JSON body (only when `Content-Type: application/json`; any other body is taken as above, so a .torrent that happens to start with `{` is never read as JSON):
+
+```
+curl -H 'Content-Type: application/json' \
+  -d '{"url": "magnet:?xt=urn:btih:...", "torznab_category": 5070, "category": "Anime - English-translated", "category_source": "nyaa", "category_id": "1_2", "paused": true}' \
+  http://127.0.0.1:3030/torrents
+```
+
+- Exactly one of `url` (a `magnet:` link or an `http(s)://` URL of a .torrent) and `torrent_base64` (the .torrent file, base64; standard or URL-safe alphabet, padding optional).
+- Any add option under its query-parameter name, in JSON types: `torznab_category` (number), `category`, `category_source`, `category_id`, `paused`, `overwrite`, `list_only`, `output_folder`, `sub_folder`, `only_files` (`[0, 2]`), `only_files_regex`, `initial_peers` (`["192.0.2.1:6881"]`), `peer_connect_timeout`, `peer_read_write_timeout`, `magnet_timeout_secs`, `wait_for_metadata`, `defer_metadata`, `adopt_foreign_incomplete`, `add_job_id`, `add_dialog_id`. Strings are also accepted where the query string takes them (e.g. `"only_files": "0,2"`).
+- Query parameters still apply, but an option set in both places takes the JSON value; `null` in the JSON unsets it. `is_url` and `from_server_path` aren't accepted in a JSON body.
+- Errors: `400` with `invalid_input` for invalid JSON, a missing or doubled `url`/`torrent_base64`, an unknown field, a value of the wrong type or bad base64; the add itself fails in the same ways as the other forms. `413` if the body is over `max_upload_body_size`. The body may be compressed (`Content-Encoding: gzip|deflate|br|zstd`), e.g. `gzip -c add.json | curl -H 'Content-Type: application/json' -H 'Content-Encoding: gzip' --data-binary @- http://127.0.0.1:3030/torrents`.
 
 ## Code organization
 
