@@ -14,6 +14,7 @@
 //! which calls [`open_main_window`] on GPUI's web platform.
 
 pub mod api;
+pub mod feed;
 pub mod format;
 #[cfg(not(target_family = "wasm"))]
 pub mod handlers;
