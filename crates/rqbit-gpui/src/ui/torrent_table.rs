@@ -212,6 +212,12 @@ pub fn damage_short_text(t: &TorrentListItem) -> Option<String> {
             r.files_done, r.files_total
         ));
     }
+    if let Some(f) = d.disk_full.as_ref() {
+        return Some(format!(
+            "{} — resumes by itself, Fix errors retries now",
+            f.message
+        ));
+    }
     let attention = if d.needs_attention == Some(true) {
         "Needs attention: "
     } else {
@@ -271,10 +277,13 @@ pub fn damage_short_text(t: &TorrentListItem) -> Option<String> {
 /// A repair that scanned the files and found nothing unreadable (not an alarm).
 pub const NO_DAMAGE_FOUND: &str = "No damage found";
 
-/// Colour for a [`damage_short_text`] line: muted for "No damage found", warning otherwise.
+/// Colour for a [`damage_short_text`] line: muted for "No damage found", error for a
+/// full disk, warning otherwise.
 pub fn damage_text_color(text: &str) -> gpui::Rgba {
     if text == NO_DAMAGE_FOUND {
         theme::text_muted()
+    } else if text.starts_with("Disk full") {
+        theme::error()
     } else {
         theme::warning()
     }
@@ -565,6 +574,30 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn disk_full_is_said_plainly() {
+        let msg = "Disk full: downloading paused until space is freed (0.4 GB free on /mnt/data)";
+        let t = TorrentListItem {
+            stats: Some(TorrentStats {
+                damage: Some(DamageStats {
+                    disk_full: Some(crate::api::DiskFullStats {
+                        pieces_waiting: 3,
+                        resume_at_free_bytes: 1 << 30,
+                        message: msg.into(),
+                        last_error: "ENOSPC".into(),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let text = damage_short_text(&t).unwrap();
+        assert!(text.starts_with(msg), "{text}");
+        let d = t.stats.as_ref().and_then(|s| s.damage.as_ref()).unwrap();
+        assert!(d.has_recovery_issues());
     }
 
     #[test]

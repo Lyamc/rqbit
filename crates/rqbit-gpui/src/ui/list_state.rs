@@ -75,11 +75,15 @@ impl StatusFilter {
             StatusFilter::Attention => {
                 matches!(
                     kind,
-                    "needs_attention" | "waiting_to_retry" | "repairing" | "queued_for_repair"
+                    "needs_attention"
+                        | "disk_full"
+                        | "waiting_to_retry"
+                        | "repairing"
+                        | "queued_for_repair"
                 ) || s
                     .damage
                     .as_ref()
-                    .is_some_and(|d| d.needs_attention == Some(true))
+                    .is_some_and(|d| d.needs_attention == Some(true) || d.disk_full.is_some())
             }
         }
     }
@@ -109,8 +113,9 @@ pub enum SortDir {
 }
 
 /// Groups similar states together (web UI `STATUS_ORDER`).
-const STATUS_ORDER: [&str; 18] = [
+const STATUS_ORDER: [&str; 19] = [
     "error",
+    "disk_full",
     "needs_attention",
     "repairing",
     "queued_for_repair",

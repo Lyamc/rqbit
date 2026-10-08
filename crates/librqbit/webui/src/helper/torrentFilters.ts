@@ -138,10 +138,12 @@ export function matchesStatus(
     case "attention":
       return (
         kind === "needs_attention" ||
+        kind === "disk_full" ||
         kind === "waiting_to_retry" ||
         kind === "repairing" ||
         kind === "queued_for_repair" ||
-        !!t.stats?.damage?.needs_attention
+        !!t.stats?.damage?.needs_attention ||
+        !!t.stats?.damage?.disk_full
       );
   }
 }

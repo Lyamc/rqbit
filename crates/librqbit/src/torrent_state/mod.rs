@@ -1152,6 +1152,9 @@ impl ManagedTorrent {
             retry,
             live: live_view,
             error: resp.error.as_deref(),
+            disk_full: damage
+                .and_then(|d| d.disk_full.as_ref())
+                .map(|d| d.message.as_str()),
         }));
 
         resp

@@ -72,6 +72,19 @@ pub struct DamageStats {
     pub repair: Option<RepairStatus>,
     pub recovery: Option<RecoveryStats>,
     pub needs_attention: Option<bool>,
+    /// Downloading paused because the disk is full (resumes by itself).
+    pub disk_full: Option<DiskFullStats>,
+}
+
+/// Mirrors `DiskFullStats` in api-types.ts.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct DiskFullStats {
+    pub pieces_waiting: u32,
+    pub resume_at_free_bytes: u64,
+    /// "Disk full: downloading paused until space is freed (0.4 GB free on /mnt)"
+    pub message: String,
+    pub last_error: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -140,7 +153,7 @@ impl DamageStats {
     }
     /// Pieces held back / given up after I/O errors, or files whose auto repair gave up.
     pub fn has_recovery_issues(&self) -> bool {
-        self.recovery.is_some() || self.needs_attention == Some(true)
+        self.recovery.is_some() || self.needs_attention == Some(true) || self.disk_full.is_some()
     }
     pub fn is_repair_running(&self) -> bool {
         self.repair.as_ref().is_some_and(|r| r.state == "running")

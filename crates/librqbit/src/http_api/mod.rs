@@ -21,6 +21,7 @@ use crate::ApiError;
 use crate::api::Result;
 
 mod add_json;
+mod favicon;
 mod gpui_web;
 mod handlers;
 mod list_stream;
@@ -153,13 +154,13 @@ impl HttpApi {
 
         let state = Arc::new(self);
 
-        let mut main_router = handlers::make_api_router(state.clone());
+        let mut main_router = favicon::add_routes(handlers::make_api_router(state.clone()));
 
         #[cfg(feature = "webui")]
         {
             use axum::response::Redirect;
 
-            let webui_router = webui::make_webui_router();
+            let webui_router = favicon::add_routes(webui::make_webui_router());
             main_router = main_router.nest("/web/", webui_router);
             main_router = main_router.route("/web", get(|| async { Redirect::permanent("./web/") }))
         }
@@ -168,7 +169,10 @@ impl HttpApi {
         {
             use axum::response::Redirect;
 
-            main_router = main_router.nest("/gpui/", gpui_web::make_gpui_web_router());
+            main_router = main_router.nest(
+                "/gpui/",
+                favicon::add_routes(gpui_web::make_gpui_web_router()),
+            );
             main_router = main_router.route(
                 "/gpui",
                 axum::routing::get(|| async { Redirect::permanent("./gpui/") }),

@@ -77,6 +77,8 @@ pub mod kind {
     pub const PIECE_RETRY: &str = "piece_retry_scheduled";
     pub const NEEDS_ATTENTION: &str = "needs_attention";
     pub const IO_ERROR: &str = "io_error";
+    pub const DISK_FULL: &str = "disk_full";
+    pub const DISK_SPACE_AVAILABLE: &str = "disk_space_available";
     pub const DAMAGE_DETECTED: &str = "damage_detected";
     pub const ADOPTION: &str = "adoption";
     pub const TORRENT_ERROR: &str = "torrent_error";

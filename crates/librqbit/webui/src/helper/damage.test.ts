@@ -1,5 +1,10 @@
 // Run with `npm test`.
-import { damageShortText, repairSummaryText } from "./damage";
+import {
+  damageShortText,
+  diskFullDetail,
+  hasRecoveryIssues,
+  repairSummaryText,
+} from "./damage";
 import { DamageStats, RepairSummary } from "../api-types";
 
 let failures = 0;
@@ -70,6 +75,30 @@ eq(
   "real repair still says Repaired",
 );
 eq(damageShortText({ damaged_files: [] }), null, "no damage, no repair: nothing shown");
+
+const full: DamageStats = {
+  damaged_files: [],
+  disk_full: {
+    since: "2026-10-09T13:15:35Z",
+    pieces_waiting: 3,
+    space: { free_bytes: 432_100_000, total_bytes: 4e12, mount: "/mnt/data" },
+    resume_at_free_bytes: 1 << 30,
+    message: "Disk full: downloading paused until space is freed (0.4 GB free on /mnt/data)",
+    last_error: "error calling pwritev: ENOSPC: No space left on device",
+  },
+};
+eq(
+  damageShortText(full),
+  "Disk full: downloading paused until space is freed (0.4 GB free on /mnt/data) — resumes by itself, Fix errors retries now",
+  "disk full: plain message in the list",
+);
+eq(hasRecoveryIssues(full), true, "disk full shows the recovery notice");
+eq(
+  diskFullDetail(full)?.startsWith("Resumes by itself once 1"),
+  true,
+  "disk full detail names the resume threshold",
+);
+eq(diskFullDetail({ damaged_files: [] }), null, "no disk full detail otherwise");
 
 console.log(`damage: ${checks - failures}/${checks} checks passed`);
 if (failures) throw new Error(`${failures} damage check(s) failed`);

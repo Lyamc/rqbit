@@ -347,11 +347,17 @@ impl TorrentStateLive {
             {
                 let state = Arc::downgrade(&state);
                 async move {
+                    let mut tick: u64 = 0;
                     loop {
                         tokio::time::sleep(Duration::from_secs(5)).await;
+                        tick += 1;
                         let Some(state) = state.upgrade() else {
                             return Ok(());
                         };
+                        // Full disk: re-measure every 15s.
+                        if tick.is_multiple_of(3) {
+                            state.check_disk_space().await;
+                        }
                         // At most 32 pieces per torrent every 5s, so a burst of expiring
                         // backoffs can't flood the disk.
                         if let Err(e) = state.requeue_due_pieces(32) {
@@ -876,6 +882,119 @@ impl TorrentStateLive {
             ),
         }
         Ok(())
+    }
+
+    /// A write of `piece` failed because the disk is full: hold the piece back (not
+    /// counted as a recovery attempt) and pause downloading until there is space again
+    /// (see [`Self::check_disk_space`]). Seeding continues.
+    pub(crate) fn hold_piece_disk_full(
+        &self,
+        piece: ValidPieceIndex,
+        e: &anyhow::Error,
+    ) -> anyhow::Result<()> {
+        let msg = format!("{e:#}");
+        let newly = self.shared.damage.piece_disk_full(piece.get(), &msg);
+        {
+            let mut g = self.lock_write("disk_full_hold");
+            g.get_pieces_mut()?.defer_piece(piece);
+        }
+        if !newly {
+            return Ok(());
+        }
+        // Already on a blocking-capable thread (the write path).
+        let space = crate::disk_space::query(&self.shared.output_folder());
+        // Relative to the free space reported now: some filesystems (bcachefs, btrfs,
+        // quotas) fail writes while still reporting free space, so require that much
+        // more to be freed, or the torrent would resume and fail again every check.
+        let resume_at =
+            self.disk_resume_threshold() + space.as_ref().map(|s| s.free_bytes).unwrap_or(0);
+        self.shared.damage.set_disk_space(space.clone(), resume_at);
+        let message = crate::disk_space::waiting_message(space.as_ref());
+        warn!(
+            id = self.shared.id,
+            info_hash = ?self.shared.info_hash,
+            piece = piece.get(),
+            error = msg,
+            "{message}"
+        );
+        use crate::event_log::{NewEvent, Severity, kind};
+        let file_id = e
+            .downcast_ref::<crate::file_ops::FileIoError>()
+            .map(|c| c.file_id);
+        self.shared.emit_event(
+            NewEvent::new(kind::DISK_FULL, Severity::Error, message)
+                .torrent(self.torrent_ref())
+                .file(file_id, file_id.map(|f| self.file_full_path(f)))
+                .details(serde_json::json!({
+                    "piece": piece.get(),
+                    "error": msg,
+                    "free_bytes": space.as_ref().map(|s| s.free_bytes),
+                    "mount": space.as_ref().map(|s| s.mount.clone()),
+                    "resume_at_free_bytes": resume_at,
+                })),
+        );
+        Ok(())
+    }
+
+    /// Free space needed before downloading resumes after a full disk.
+    fn disk_resume_threshold(&self) -> u64 {
+        let remaining = self
+            .lock_read("disk_resume_threshold")
+            .get_chunks()
+            .map(|c| c.get_remaining_bytes())
+            .unwrap_or(0);
+        crate::disk_space::resume_threshold(remaining, self.lengths.default_piece_length() as u64)
+    }
+
+    /// While waiting for disk space: measure it and resume downloading once there is
+    /// enough. Returns true if downloading resumed.
+    pub(crate) async fn check_disk_space(&self) -> bool {
+        if !self.shared.damage.is_disk_full() {
+            return false;
+        }
+        let folder = self.shared.output_folder();
+        let space = tokio::task::spawn_blocking(move || crate::disk_space::query(&folder))
+            .await
+            .ok()
+            .flatten();
+        let resume_at = self
+            .shared
+            .damage
+            .disk_full_resume_at()
+            .unwrap_or_else(|| self.disk_resume_threshold());
+        let enough = space.as_ref().is_some_and(|s| s.free_bytes >= resume_at);
+        self.shared.damage.set_disk_space(space.clone(), resume_at);
+        if !enough {
+            return false;
+        }
+        let pieces = self.shared.damage.clear_disk_full();
+        let note = crate::disk_space::free_note(space.as_ref());
+        info!(
+            id = self.shared.id,
+            pieces = pieces.len(),
+            "disk space available again{note}; downloading resumed"
+        );
+        if let Err(e) = self.requeue_pieces(&pieces, "requeueing pieces held back on a full disk") {
+            debug!("error requeueing pieces: {e:#}");
+        }
+        self.new_pieces_notify.notify_waiters();
+        // Peers we had nothing to ask for were dropped as "not needed" meanwhile.
+        self.reconnect_all_not_needed_peers();
+        use crate::event_log::{NewEvent, Severity, kind};
+        self.shared.emit_event(
+            NewEvent::new(
+                kind::DISK_SPACE_AVAILABLE,
+                Severity::Info,
+                format!("Disk space available again{note}: downloading resumed"),
+            )
+            .torrent(self.torrent_ref())
+            .details(serde_json::json!({
+                "pieces_requeued": pieces.len(),
+                "free_bytes": space.as_ref().map(|s| s.free_bytes),
+                "mount": space.as_ref().map(|s| s.mount.clone()),
+            })),
+        );
+        true
     }
 
     fn log_recovery_decision(
@@ -1767,6 +1886,10 @@ impl PeerHandler {
             debug!("we are choked, can't acquire piece");
             return Ok(None);
         }
+        if self.state.shared.damage.is_disk_full() {
+            trace!("disk full, not requesting pieces");
+            return Ok(None);
+        }
 
         // Steal info to process after releasing the peer lock
         let mut steal_info: Option<(SocketAddr, ValidPieceIndex)> = None;
@@ -2223,6 +2346,22 @@ impl PeerHandler {
             if !cfg!(feature = "_disable_disk_write_net_benchmark") {
                 match state.file_ops().write_chunk(addr, piece, chunk_info) {
                     Ok(()) => {}
+                    Err(e) if crate::disk_space::is_disk_full(&e) => {
+                        if state.soft_recover_enabled() {
+                            // Not a fault of the data or the disk: wait for space instead
+                            // of counting toward the recovery backoff. Keep the peer.
+                            state.hold_piece_disk_full(chunk_info.piece_index, &e)?;
+                            return Ok(());
+                        }
+                        let space = crate::disk_space::query(&state.shared.output_folder());
+                        let e = e.context(crate::disk_space::stopped_message(space.as_ref()));
+                        error!(
+                            id = state.shared.id,
+                            info_hash = ?state.shared.info_hash,
+                            "FATAL: error writing chunk to disk: {e:#}"
+                        );
+                        return state.on_fatal_error(e);
+                    }
                     Err(e) => {
                         state.note_io_failure(&e, chunk_info.piece_index, "write");
                         if state.soft_recover_enabled() {

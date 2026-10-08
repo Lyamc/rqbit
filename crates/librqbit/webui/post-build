@@ -15,7 +15,6 @@ let indexHtml = fs.readFileSync('index.html', 'utf-8');
 
 // List of files to process
 const files = [
-    { dst: 'assets/logo.svg', src: manifest['assets/logo.svg'].file },
     { dst: 'assets/index.css', src: manifest['index.html'].css[0] },
     { dst: 'assets/index.js', src: manifest['index.html'].file }
 ];

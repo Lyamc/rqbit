@@ -6,6 +6,7 @@ import { useTorrentStore } from "../stores/torrentStore";
 import { useErrorStore } from "../stores/errorStore";
 import { formatBytes } from "../helper/formatBytes";
 import {
+  diskFullDetail,
   formatDuration,
   hasDamagedFiles,
   hasRecoveryIssues,
@@ -106,6 +107,12 @@ export const DamagedFilesNotice: React.FC<{ torrent: TorrentListItem }> = ({
             affected pieces. The torrent is paused while it runs.
           </div>
         </>
+      )}
+      {damage.disk_full && (
+        <div data-testid="disk-full-status" title={damage.disk_full.last_error}>
+          <div className="font-medium text-error">{damage.disk_full.message}</div>
+          <div className="text-tertiary">{diskFullDetail(damage)}</div>
+        </div>
       )}
       {recText && (
         <div

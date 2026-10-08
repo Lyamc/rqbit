@@ -668,6 +668,24 @@ export interface RepairStatus {
   error?: string;
 }
 
+export interface DiskSpace {
+  free_bytes: number;
+  total_bytes: number;
+  mount: string;
+}
+
+/** Writes failed because the disk is full: downloading paused until enough space is free
+ * (re-checked every 15s, resumes by itself). Not counted as recovery attempts. */
+export interface DiskFullStats {
+  since: string;
+  pieces_waiting: number;
+  space?: DiskSpace;
+  resume_at_free_bytes: number;
+  /** "Disk full: downloading paused until space is freed (0.4 GB free on /mnt)" */
+  message: string;
+  last_error: string;
+}
+
 export interface DamageStats {
   damaged_files: DamagedFileStats[];
   repair?: RepairStatus;
@@ -675,6 +693,7 @@ export interface DamageStats {
   recovery?: RecoveryStats;
   /** Automatic recovery gave up somewhere; manual Fix errors needed. */
   needs_attention?: boolean;
+  disk_full?: DiskFullStats;
 }
 
 export interface RepairStartResponse {
@@ -698,6 +717,7 @@ export type StatusKind =
   | "repairing"
   | "waiting_to_retry"
   | "needs_attention"
+  | "disk_full"
   | "moving"
   | "renaming"
   | "queued_for_downloading"

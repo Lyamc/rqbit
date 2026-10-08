@@ -47,7 +47,7 @@ pub fn status_color(kind: &str) -> Rgba {
     match kind {
         "downloading" | "resolving_metadata" | "queued_for_downloading" => primary(),
         "seeding" | "complete" | "queued_for_seeding" => success(),
-        "error" | "needs_attention" => error(),
+        "error" | "needs_attention" | "disk_full" => error(),
         "checking"
         | "queued_for_checking"
         | "initializing"
