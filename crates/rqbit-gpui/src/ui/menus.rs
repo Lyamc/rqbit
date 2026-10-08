@@ -15,6 +15,7 @@ pub enum RowMenuAction {
     /// `POST /download_order` patch, applied to every selected torrent.
     Order(Value),
     Move,
+    SetCategory,
     Remove,
 }
 
@@ -161,6 +162,10 @@ pub fn torrent_menu(
             single,
             R::Move,
         ),
+        MenuEntry::item(
+            if n > 1 { format!("Set category ({n})…") } else { "Set category…".to_owned() },
+            R::SetCategory,
+        ),
         MenuEntry::Sep,
         MenuEntry::item(
             if single { "Remove…".to_owned() } else { format!("Remove {n} torrents…") },
@@ -267,6 +272,7 @@ mod tests {
             "Force recheck (2)",
             "Queue >",
             "Download order >",
+            "Set category (2)…",
             "Remove 2 torrents…",
         ] {
             assert!(l.iter().any(|x| x == want), "missing {want}: {l:?}");

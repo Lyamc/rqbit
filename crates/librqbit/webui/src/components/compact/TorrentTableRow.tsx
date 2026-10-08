@@ -10,6 +10,7 @@ import {
   TORRENT_TABLE_GRID,
 } from "./torrentTableLayout";
 import { floorPercent } from "../../helper/progress";
+import { categoryLabel } from "../../helper/category";
 
 interface TorrentTableRowProps {
   torrent: TorrentListItem;
@@ -58,6 +59,7 @@ const TorrentTableRowUnmemoized: React.FC<TorrentTableRowProps> = ({
   const displayEta = finished ? "Done" : eta;
 
   const name = torrent.name ?? "";
+  const category = categoryLabel(torrent);
 
   const handleRowClick = (e: React.MouseEvent) => {
     // Right button: handled by onContextMenu (keeps a multi-selection).
@@ -145,6 +147,14 @@ const TorrentTableRowUnmemoized: React.FC<TorrentTableRowProps> = ({
       </div>
       <div role="gridcell" className={cellBase}>
         <StatusBadge stats={stats} compact />
+      </div>
+      <div
+        role="gridcell"
+        className={`${cellBase} truncate text-secondary`}
+        title={category}
+        data-testid="category-cell"
+      >
+        {category}
       </div>
       <div role="gridcell" className={numericCell}>
         {noMetadata ? "—" : formatBytes(totalBytes)}

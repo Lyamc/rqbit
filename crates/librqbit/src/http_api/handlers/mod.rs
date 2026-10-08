@@ -64,6 +64,7 @@ async fn h_api_root(parts: Parts) -> impl IntoResponse {
             "GET /torrents/{id_or_infohash}/stream/{file_idx}": "Stream a file. Accepts Range header to seek.",
             "GET /torrents/{id_or_infohash}/playlist": "Playlist for supported players",
             "POST /torrents": "Add a torrent here. magnet: or http:// or a local file.",
+            "POST /torrents/{id_or_infohash}/category": "Edit the category. Body {category?, category_source?, category_id?, torznab_category?}; a missing key is unchanged, null clears it. Affects future organizing only.",
             "POST /torrents/{id_or_infohash}/relocate": "Move/copy a torrent's data, keeps seeding. Body {destination, copy?, into?}; into=true: destination is the folder to put it in (multi-file -> <destination>/<TorrentName>). Never overwrites.",
             "GET /add_jobs/{job_id}": "Status of an add started with ?add_job_id= (stage: resolving_metadata, waiting_for_server, ...)",
             "POST /add_jobs/{job_id}/cancel": "Cancel an add started with ?add_job_id= (no-op + already_added if it was committed)",
@@ -235,6 +236,7 @@ pub fn make_api_router(state: ApiState) -> Router {
             )
             .route("/torrents/{id}/add_peers", post(torrents::h_add_peers))
             .route("/torrents/{id}/rename_file", post(torrents::h_rename_file))
+            .route("/torrents/{id}/category", post(torrents::h_set_category))
             .route("/torrents/{id}/relocate", post(torrents::h_relocate))
             .route("/torrents/create", post(torrents::h_create_torrent));
     }

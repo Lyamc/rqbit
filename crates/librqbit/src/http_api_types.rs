@@ -27,6 +27,12 @@ pub struct TorrentAddQueryParams {
     pub list_only: Option<bool>,
     /// Optional Newznab/Torznab category id (e.g. 2000=Movies, 5070=Anime).
     pub torznab_category: Option<u32>,
+    /// Category display name (free text, at most 100 characters).
+    pub category: Option<String>,
+    /// Where the category comes from, e.g. "nyaa" (a-z, 0-9, _ or -).
+    pub category_source: Option<String>,
+    /// The source's own category id, e.g. "1_2".
+    pub category_id: Option<String>,
     /// Adopt another client's data in output_folder before the initial check
     /// (transfer from other client). Supported: "auto" ("qbit" = alias).
     pub adopt_foreign_incomplete: Option<String>,
@@ -132,6 +138,9 @@ impl TorrentAddQueryParams {
                 ..Default::default()
             }),
             torznab_category: self.torznab_category,
+            category: self.category,
+            category_source: self.category_source,
+            category_id: self.category_id,
             adopt_foreign_incomplete: self.adopt_foreign_incomplete,
             add_job_id: self.add_job_id,
             magnet_resolve_timeout: self.magnet_timeout_secs.map(Duration::from_secs),
@@ -140,5 +149,39 @@ impl TorrentAddQueryParams {
             paused: self.paused.unwrap_or(false),
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod category_param_tests {
+    use super::*;
+
+    fn parse(qs: &str) -> Result<TorrentAddQueryParams, serde_urlencoded::de::Error> {
+        serde_urlencoded::from_str(qs)
+    }
+
+    #[test]
+    fn category_params() {
+        let p = parse("category=Anime%20-%20Raw&category_source=nyaa&category_id=1_4&torznab_category=5070").unwrap();
+        let mut o = p.into_add_torrent_options();
+        o.normalize_category().unwrap();
+        assert_eq!(o.category.as_deref(), Some("Anime - Raw"));
+        assert_eq!(o.category_source.as_deref(), Some("nyaa"));
+        assert_eq!(o.category_id.as_deref(), Some("1_4"));
+        assert_eq!(o.torznab_category, Some(5070));
+        // Optional; empty means none.
+        let mut o = parse("category=&category_source=NYAA").unwrap().into_add_torrent_options();
+        o.normalize_category().unwrap();
+        assert_eq!((o.category, o.category_source.as_deref()), (None, Some("nyaa")));
+        let mut o = parse("category_source=bad%20source").unwrap().into_add_torrent_options();
+        assert!(o.normalize_category().is_err());
+        let mut o = parse("category_id=1%2F2").unwrap().into_add_torrent_options();
+        assert!(o.normalize_category().is_err());
+    }
+
+    #[test]
+    fn torznab_category_stays_numeric() {
+        assert!(parse("torznab_category=Anime").is_err());
+        assert!(parse("torznab_category=1_2").is_err());
     }
 }

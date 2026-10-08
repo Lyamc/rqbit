@@ -5,6 +5,7 @@
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
+use super::category::CategoryFilter;
 use crate::api::{TorrentListItem, TorrentState, TorrentStats};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -90,6 +91,7 @@ pub enum SortColumn {
     Queue,
     Name,
     Status,
+    Category,
     Size,
     Progress,
     Down,
@@ -185,6 +187,11 @@ fn sort_key(t: &TorrentListItem, col: SortColumn) -> Key {
             .map(|q| q as f64)
             .unwrap_or(f64::INFINITY),
         SortColumn::Status => status_rank(s) as f64,
+        // Uncategorized sorts last ascending.
+        SortColumn::Category => {
+            let l = t.category_text().to_lowercase();
+            return Key::Str(if l.is_empty() { "\u{10ffff}".into() } else { l });
+        }
     })
 }
 
@@ -196,11 +203,24 @@ fn cmp_keys(a: &Key, b: &Key) -> Ordering {
     }
 }
 
-/// Indices into `torrents` of the visible rows, in display order.
+/// Indices into `torrents` of the visible rows, in display order (no category filter).
+#[cfg(test)]
 pub fn visible_rows(
     torrents: &[TorrentListItem],
     query: &str,
     filter: StatusFilter,
+    col: SortColumn,
+    dir: SortDir,
+) -> Vec<usize> {
+    visible_rows_in(torrents, query, filter, &CategoryFilter::All, col, dir)
+}
+
+/// Indices into `torrents` of the visible rows, in display order.
+pub fn visible_rows_in(
+    torrents: &[TorrentListItem],
+    query: &str,
+    filter: StatusFilter,
+    category: &CategoryFilter,
     col: SortColumn,
     dir: SortDir,
 ) -> Vec<usize> {
@@ -211,6 +231,7 @@ pub fn visible_rows(
         .filter(|(_, t)| {
             (q.is_empty() || t.name.as_deref().unwrap_or("").to_lowercase().contains(&q))
                 && filter.matches(t)
+                && category.matches(t)
         })
         .map(|(i, t)| (i, sort_key(t, col)))
         .collect();
@@ -447,6 +468,27 @@ pub fn fix_action(s: Option<&TorrentStats>) -> FixAction {
 mod tests {
     use super::*;
     use crate::api::ListTorrentsResponse;
+
+    #[test]
+    fn category_sort_and_filter() {
+        let v: ListTorrentsResponse = serde_json::from_value(serde_json::json!({"torrents": [
+            {"id": 1, "info_hash": "a", "name": "One", "output_folder": "", "total_pieces": 1},
+            {"id": 2, "info_hash": "b", "name": "Two", "output_folder": "", "total_pieces": 1,
+             "category_source": "sukebei", "category_id": "2_2", "category_label": "Real Life - Videos"},
+            {"id": 3, "info_hash": "c", "name": "Three", "output_folder": "", "total_pieces": 1,
+             "torznab_category": 5070, "category_label": "Anime"},
+        ]}))
+        .unwrap();
+        let t = v.torrents;
+        let ids = |r: Vec<usize>| r.into_iter().map(|i| t[i].id).collect::<Vec<_>>();
+        let all = CategoryFilter::All;
+        assert_eq!(ids(visible_rows_in(&t, "", StatusFilter::All, &all, SortColumn::Category, SortDir::Asc)), vec![3, 2, 1]);
+        assert_eq!(ids(visible_rows_in(&t, "", StatusFilter::All, &all, SortColumn::Category, SortDir::Desc)), vec![1, 2, 3]);
+        assert_eq!(ids(visible_rows_in(&t, "", StatusFilter::All, &CategoryFilter::None, SortColumn::Id, SortDir::Asc)), vec![1]);
+        let anime = CategoryFilter::Label("Anime".into());
+        assert_eq!(ids(visible_rows_in(&t, "", StatusFilter::All, &anime, SortColumn::Id, SortDir::Asc)), vec![3]);
+        assert_eq!(ids(visible_rows_in(&t, "two", StatusFilter::All, &anime, SortColumn::Id, SortDir::Asc)), Vec::<usize>::new());
+    }
 
     fn list() -> Vec<TorrentListItem> {
         let v: ListTorrentsResponse = serde_json::from_value(serde_json::json!({"torrents": [

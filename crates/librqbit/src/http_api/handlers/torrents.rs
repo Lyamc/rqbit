@@ -56,6 +56,7 @@ pub async fn h_torrents_post(
         !want_paused && prefs.start_after_add_dialog() && !params.list_only.unwrap_or(false)
     });
     let mut opts = params.into_add_torrent_options();
+    opts.normalize_category().map_err(ApiError::invalid_input)?;
     opts.paused = want_paused || hold.is_some();
 
     // Add from a validated server filesystem path (browse UI).
@@ -745,6 +746,20 @@ pub async fn h_rename_file(
         .api_torrent_action_rename_file(id, body.file_id, body.new_path)
         .await
         .map(axum::Json)
+}
+
+/// `POST /torrents/{id}/category` with `{"category", "category_source",
+/// "category_id", "torznab_category"}`: a missing key is left alone, `null` clears it.
+pub async fn h_set_category(
+    State(state): State<ApiState>,
+    Path(id): Path<TorrentIdOrHash>,
+    body: axum::body::Bytes,
+) -> Result<impl IntoResponse> {
+    // Parsed here so a wrong type (e.g. a non-numeric torznab_category) is a 400
+    // `invalid_input` like the other validation errors.
+    let body: crate::source_category::CategoryUpdate = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::invalid_input(anyhow::anyhow!("invalid category body: {e}")))?;
+    state.api.api_set_category(id, body).await.map(axum::Json)
 }
 
 #[derive(Deserialize)]

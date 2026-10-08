@@ -738,6 +738,15 @@ export const MockAPI: RqbitAPI & { getVersion: () => Promise<string> } = {
     _fileId: number,
     _newPath: string,
   ): Promise<void> => {},
+  setCategory: async (index: number, update) => {
+    void update;
+    return {
+      name: generateTorrentName(index),
+      info_hash: generateInfoHash(index),
+      files: [],
+      output_folder: `/downloads/torrent_${index}`,
+    };
+  },
   relocateTorrent: async (
     _index: number,
     _destination: string,

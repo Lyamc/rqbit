@@ -43,6 +43,9 @@ impl TorrentsTableRecord {
                 is_paused: self.is_paused,
                 file_renames: None,
                 torznab_category: None,
+                category: None,
+                category_source: None,
+                category_id: None,
                 move_dest: None,
             },
         ))

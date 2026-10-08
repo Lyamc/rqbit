@@ -89,6 +89,7 @@ pub mod kind {
     pub const QUEUE_ROTATION: &str = "queue_rotation";
     pub const TORRENT_MOVED: &str = "torrent_moved";
     pub const MOVE_FAILED: &str = "move_failed";
+    pub const CATEGORY_CHANGED: &str = "category_changed";
 }
 
 fn one() -> u64 {

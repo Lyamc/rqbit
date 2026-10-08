@@ -252,6 +252,7 @@ impl Api {
                             .into_owned(),
                         total_pieces,
                         torznab_category: mgr.torznab_category(),
+                        category: (&mgr.category()).into(),
 
                         // These will be filled in /details and /stats endpoints
                         files: None,
@@ -305,7 +306,7 @@ impl Api {
                 only_files.as_deref(),
                 output_folder,
                 &renames,
-                handle.torznab_category(),
+                &handle.category(),
             )
         }
     }
@@ -458,6 +459,43 @@ impl Api {
             .await
             .map_err(|e| ApiError::from((StatusCode::BAD_REQUEST, e)))?;
         Ok(Default::default())
+    }
+
+    /// `POST /torrents/{id}/category`: edit the category of a torrent or of a magnet
+    /// still resolving its metadata. Returns the torrent's details.
+    pub async fn api_set_category(
+        &self,
+        idx: TorrentIdOrHash,
+        update: crate::source_category::CategoryUpdate,
+    ) -> Result<TorrentDetailsResponse> {
+        if let Some(id) = self.pending_id(idx)
+            && let Some(pm) = self.session.pending.get(id)
+        {
+            let old = pm.category();
+            let new = update.apply(&old).map_err(ApiError::invalid_input)?;
+            if new != old {
+                if !self.session.pending_set_category(id, new.clone()) {
+                    // Resolved meanwhile: edit the torrent instead.
+                    return Box::pin(self.api_set_category(idx, update)).await;
+                }
+                self.session.emit_category_event(
+                    crate::event_log::TorrentRef {
+                        id: Some(id),
+                        info_hash: pm.info_hash.clone(),
+                        name: Some(pm.display_name()),
+                    },
+                    &old,
+                    &new,
+                );
+            }
+            return self.api_torrent_details(idx);
+        }
+        let handle = self.mgr_handle(idx)?;
+        self.session
+            .set_category(&handle, &update)
+            .await
+            .map_err(ApiError::invalid_input)?;
+        self.api_torrent_details(idx)
     }
 
     pub async fn api_torrent_action_relocate(
@@ -722,6 +760,7 @@ impl Api {
     ) -> Result<ApiAddTorrentResponse> {
         use crate::pending_magnets::{is_magnet_like, is_metadata_wait};
         let mut opts = opts.unwrap_or_default();
+        opts.normalize_category().map_err(ApiError::invalid_input)?;
         let magnet_url = match &add {
             AddTorrent::Url(url) if is_magnet_like(url.trim()) => Some(url.trim().to_string()),
             _ => None,
@@ -790,6 +829,7 @@ impl Api {
                             output_folder: String::new(),
                             total_pieces: 0,
                             torznab_category: None,
+                            category: Default::default(),
                             files: Some(vec![]),
                             stats: None,
                         },
@@ -913,7 +953,7 @@ impl Api {
                         .to_string_lossy()
                         .into_owned(),
                     &handle.file_renames(),
-                    handle.torznab_category(),
+                    &handle.category(),
                 )
                 .context("error making torrent details")?;
                 ApiAddTorrentResponse {
@@ -955,7 +995,7 @@ impl Api {
                     only_files.as_deref(),
                     output_folder.to_string_lossy().into_owned().to_string(),
                     &Default::default(),
-                    None,
+                    &Default::default(),
                 )
                 .context("error making torrent details")?,
             },
@@ -971,7 +1011,7 @@ impl Api {
                         .to_string_lossy()
                         .into_owned(),
                     &handle.file_renames(),
-                    handle.torznab_category(),
+                    &handle.category(),
                 )
                 .context("error making torrent details")?;
                 ApiAddTorrentResponse {
@@ -1081,9 +1121,13 @@ pub struct TorrentDetailsResponse {
     #[serde(default)]
     pub total_pieces: u32,
 
-    /// Newznab/Torznab category id if supplied at add time.
+    /// Newznab/Torznab category id if supplied at add time (or edited).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub torznab_category: Option<u32>,
+
+    /// `category`, `category_source`, `category_id` and `category_label`.
+    #[serde(flatten)]
+    pub category: crate::source_category::CategoryView,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub files: Option<Vec<TorrentDetailsResponseFile>>,
@@ -1156,6 +1200,9 @@ fn placeholder_opts(o: &AddTorrentOptions) -> AddTorrentOptions {
         initial_peers: o.initial_peers.clone(),
         trackers: o.trackers.clone(),
         torznab_category: o.torznab_category,
+        category: o.category.clone(),
+        category_source: o.category_source.clone(),
+        category_id: o.category_id.clone(),
         adopt_foreign_incomplete: o.adopt_foreign_incomplete.clone(),
         magnet_resolve_timeout: o.magnet_resolve_timeout,
         ..Default::default()
@@ -1173,6 +1220,7 @@ fn pending_details(
         output_folder: pm.output_folder.clone().unwrap_or_default(),
         total_pieces: 0,
         torznab_category: pm.torznab_category,
+        category: (&pm.category()).into(),
         files: None,
         stats,
     }
@@ -1186,7 +1234,7 @@ fn make_torrent_details(
     only_files: Option<&[usize]>,
     output_folder: String,
     renames: &std::collections::HashMap<usize, PathBuf>,
-    torznab_category: Option<u32>,
+    category: &crate::source_category::TorrentCategory,
 ) -> Result<TorrentDetailsResponse> {
     let files = match info {
         Some(info) => info
@@ -1231,7 +1279,8 @@ fn make_torrent_details(
         files: Some(files),
         output_folder,
         total_pieces,
-        torznab_category,
+        torznab_category: category.torznab,
+        category: category.into(),
         stats: None,
     })
 }

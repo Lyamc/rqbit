@@ -78,6 +78,7 @@ mod read_buf;
 mod session;
 pub mod relocate;
 mod media_classify;
+pub mod source_category;
 mod session_admin;
 mod session_preferences;
 pub mod remove_policy;

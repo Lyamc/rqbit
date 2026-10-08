@@ -15,6 +15,7 @@ import { useUIStore } from "../../stores/uiStore";
 import { useErrorStore } from "../../stores/errorStore";
 import { ContextMenu, MenuItem } from "../ContextMenu";
 import { DeleteTorrentModal } from "../modal/DeleteTorrentModal";
+import { CategoryModal } from "../modal/CategoryModal";
 import { torrentOrderMenu } from "../../helper/downloadOrderMenu";
 import {
   hasDamagedFiles,
@@ -43,6 +44,9 @@ export const TorrentContextMenu: React.FC<{
     Pick<TorrentListItem, "id" | "name">[] | null
   >(null);
   const [menuOpen, setMenuOpen] = useState(true);
+  const [categorizing, setCategorizing] = useState<TorrentListItem[] | null>(
+    null,
+  );
 
   const byId = (id: number) => torrents?.find((t) => t.id === id);
   const selected = ids.map(byId).filter((t): t is TorrentListItem => !!t);
@@ -165,6 +169,11 @@ export const TorrentContextMenu: React.FC<{
       submenu: torrentOrderMenu(order, applyOrder),
     },
     { label: "Move files…", onClick: move },
+    {
+      label: n > 1 ? `Set category (${n})…` : "Set category…",
+      disabled: !API.setCategory || selected.length === 0,
+      onClick: () => setCategorizing(selected),
+    },
     { separator: true },
     {
       label: n > 1 ? `Remove ${n} torrents…` : "Remove…",
@@ -184,13 +193,25 @@ export const TorrentContextMenu: React.FC<{
           testId="torrent-context-menu"
           onClose={() => {
             setMenuOpen(false);
-            // Keep mounted while the remove dialog is open.
+            // Keep mounted while the remove / category dialog is open.
             setTimeout(() => {
               setRemoving((r) => {
-                if (!r) onClose();
+                setCategorizing((c) => {
+                  if (!r && !c) onClose();
+                  return c;
+                });
                 return r;
               });
             }, 0);
+          }}
+        />
+      )}
+      {categorizing && (
+        <CategoryModal
+          torrents={categorizing}
+          onHide={() => {
+            setCategorizing(null);
+            onClose();
           }}
         />
       )}

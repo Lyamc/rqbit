@@ -122,12 +122,17 @@ impl AutoOrganizeFolders {
 /// Map a Newznab/Torznab category id to a media type.
 ///
 /// Uses the thousands bucket (1000 Games, 2000 Movies, …). Category 5070
-/// (Anime) wins over generic TV (5000). Unknown / 8000+ returns `None` so
+/// (Anime) wins over generic TV (5000) and 4050 (PC/Games) over Software (4000).
+/// 3040 (Audio/Lossless) stays Music. Unknown / 8000+ returns `None` so
 /// callers can fall back to name/path heuristics.
 pub fn media_type_from_torznab_category(category: u32) -> Option<MediaType> {
     // Anime is a TV subcategory — check before the 5000 bucket.
     if category == 5070 || (5070..5080).contains(&category) {
         return Some(MediaType::Anime);
+    }
+    // PC/Games is a Software subcategory: a game, like 1000.
+    if category == 4050 {
+        return Some(MediaType::Game);
     }
     match category / 1000 {
         1 => Some(MediaType::Game),
@@ -468,5 +473,10 @@ mod tests {
         assert_eq!(media_type_from_torznab_category(5000), Some(MediaType::Tv));
         assert_eq!(media_type_from_torznab_category(2000), Some(MediaType::Movie));
         assert_eq!(media_type_from_torznab_category(8000), None);
+        assert_eq!(media_type_from_torznab_category(4050), Some(MediaType::Game));
+        assert_eq!(media_type_from_torznab_category(4000), Some(MediaType::Software));
+        assert_eq!(media_type_from_torznab_category(4010), Some(MediaType::Software));
+        assert_eq!(media_type_from_torznab_category(3040), Some(MediaType::Music));
+        assert_eq!(media_type_from_torznab_category(6000), Some(MediaType::Porn));
     }
 }

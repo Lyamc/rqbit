@@ -135,6 +135,7 @@ impl JsonSessionPersistenceStore {
             bail!("storages other than FilesystemStorageFactory are not supported");
         }
 
+        let category = torrent.category();
         let st = SerializedTorrent {
             trackers: torrent
                 .shared()
@@ -152,7 +153,10 @@ impl JsonSessionPersistenceStore {
                 let m = torrent.file_renames();
                 if m.is_empty() { None } else { Some(m) }
             },
-            torznab_category: torrent.torznab_category(),
+            torznab_category: category.torznab,
+            category: category.name,
+            category_source: category.source,
+            category_id: category.id,
             move_dest: torrent.shared().move_dest.read().clone(),
         };
 
